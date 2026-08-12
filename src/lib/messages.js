@@ -20,4 +20,8 @@ export const CX = {
   ACCEPT_CANDIDATE: 'CX_ACCEPT_CANDIDATE',
   // Advance past the current candidate without acting on them.
   SKIP_CANDIDATE: 'CX_SKIP_CANDIDATE',
+  // The operator pressed stop. An AbortSignal does not cross into the page, so
+  // this is how a run in progress reaches an accept that is mid-pause: it
+  // arrives on its own round trip and is felt inside the pause, not after it.
+  STOP_REVIEWER: 'CX_STOP_REVIEWER',
 };

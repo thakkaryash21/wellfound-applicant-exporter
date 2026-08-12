@@ -13,6 +13,7 @@
     'READ_CANDIDATE',
     'ACCEPT_CANDIDATE',
     'SKIP_CANDIDATE',
+    'STOP',
   ]);
   const TIMEOUT_MS = 30000;
   const pending = new Map();
@@ -54,6 +55,7 @@
     ['CX_READ_CANDIDATE', 'READ_CANDIDATE'],
     ['CX_ACCEPT_CANDIDATE', 'ACCEPT_CANDIDATE'],
     ['CX_SKIP_CANDIDATE', 'SKIP_CANDIDATE'],
+    ['CX_STOP_REVIEWER', 'STOP'],
   ]);
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

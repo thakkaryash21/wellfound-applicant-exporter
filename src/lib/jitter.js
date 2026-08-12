@@ -3,6 +3,16 @@ export const PACING = {
   downloadMs: [1500, 4000],
   breakMs: [15000, 40000],
   breakEvery: [8, 12],
+  // The two pauses either side of putting the message into the composer. Not a
+  // typing simulation: nobody types the same 400 characters six hundred times,
+  // so streaming it a character at a time would be a different tell rather than
+  // a smaller one. What a person actually does with boilerplate is paste it and
+  // glance over it, so that is what is paced - a beat while the composer opens
+  // and the wording is gathered, and a beat to read it back before sending.
+  // They draw from the same log-normal `sample` as everything else here; a
+  // second randomness model would be its own signature.
+  beforePasteMs: [1500, 5000],
+  afterPasteMs: [1000, 3000],
 };
 
 // Box-Muller gives a normal draw; exponentiating it gives a log-normal shape:

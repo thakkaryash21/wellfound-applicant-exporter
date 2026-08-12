@@ -43,6 +43,8 @@
   // bracket in a stranger's inbox.
   const LEFTOVER_TOKEN = /\[[a-z_]+\]/i;
 
+  // A pause is served in slices so a stop lands inside it rather than after it.
+  const PAUSE_SLICE_MS = 100;
   const CONFIRM_TIMEOUT_MS = 15000;
   const CONFIRM_POLL_MS = 250;
   const COMPOSER_TIMEOUT_MS = 5000;
@@ -167,6 +169,25 @@
     });
   }
 
+  // The run's abort, as this document can see it. The panel owns the signal and
+  // cannot hand an AbortSignal across the world boundary, so it sends STOP and
+  // this flag is what an in-flight accept reads. Cleared when the reviewer is
+  // opened, which is where a pass begins.
+  let stopped = false;
+
+  // Sleeping in slices, so a stop pressed four seconds into a five-second pause
+  // is felt now rather than at the end of it. The panel's own sleep is
+  // abort-aware for the same reason; this is that idea, one boundary further in.
+  async function pause(ms) {
+    const total = Math.max(0, Number(ms) || 0);
+    let left = total;
+    while (left > 0 && !stopped) {
+      const slice = left < PAUSE_SLICE_MS ? left : PAUSE_SLICE_MS;
+      await wait(slice);
+      left -= slice;
+    }
+  }
+
   // Polls a condition to a deadline and reports what it was waiting for. Never
   // repeats an action - only a read.
   async function waitFor(check, { timeoutMs, pollMs, what }) {
@@ -232,6 +253,7 @@
   // Where it landed is read back from the same DOM the rest of this file
   // trusts, rather than assumed from which button was clicked.
   async function openReviewer() {
+    stopped = false;
     clickSafely(firstOfMany(pageRoot(), OPEN_LABEL, 'View application'), 'View application');
     const at = await waitFor(() => readCurrentOrNull(), {
       timeoutMs: COMPOSER_TIMEOUT_MS,
@@ -275,7 +297,14 @@
   // already received one.
   const sent = new Set();
 
-  async function acceptCurrent({ expectedUserId, message } = {}) {
+  // One round trip, deliberately, pauses and all. Splitting this into open /
+  // paste / send would let a stopped or failed run leave a half-open composer
+  // on the page, and - worse - would put a message boundary between the
+  // identity re-read and the click it guards. The two pause lengths are sampled
+  // by the panel from the same PACING the rest of the run uses and handed in;
+  // this file owns no timings of its own, and treats a missing one as no pause
+  // rather than inventing a number.
+  async function acceptCurrent({ expectedUserId, message, beforePasteMs, afterPasteMs } = {}) {
     const expected = expectedUserId == null ? '' : String(expectedUserId);
     if (!expected) throw new Error('Refusing to accept without an expected candidate id');
     if (typeof message !== 'string' || message.trim() === '') {
@@ -301,7 +330,17 @@
       pollMs: COMPOSER_POLL_MS,
       what: 'The response composer did not open',
     });
-    typeMessage(composerBox(), message);
+
+    // A beat while the composer opens and the wording is gathered.
+    await pause(beforePasteMs);
+    if (stopped) throw new Error('Stopped before the message was entered; nothing was sent');
+    pasteMessage(composerBox(), message);
+    // A beat to read it back, which is what the pause after a paste is.
+    await pause(afterPasteMs);
+    // After the pause and before the click, so a stop during either pause takes
+    // effect while nothing has yet gone out. Past this point a send is
+    // possible, and nothing here ever retries one.
+    if (stopped) throw new Error('Stopped before the message was sent; nothing was sent');
 
     const send = uniqueControl(dialogRoot(), SEND_LABEL, 'Accept application & send message');
     // Identity, re-read immediately before the click and nowhere else that
@@ -355,9 +394,21 @@
     );
   }
 
-  // React does not see a plain `value =` assignment, so the native setter is
-  // used where one exists and the input event is dispatched by hand.
-  function typeMessage(box, message) {
+  // The message goes in as a paste, in the order a browser does one: focus the
+  // field, deliver a paste event carrying the text, set the value, announce it
+  // with `input`.
+  //
+  // NO KEY EVENTS, EVER, ON THIS PATH - and not merely because they were
+  // measured to do nothing. The reviewer binds `A` to Accept and `R` to Reject
+  // at document level, and this message is full of both letters. Entering it
+  // key by key would make the safety of the whole feature rest on a measurement
+  // continuing to hold, which is not a thing to rest anything on.
+  function pasteMessage(box, message) {
+    if (typeof box.focus === 'function') box.focus();
+    announcePaste(box, message);
+    // The step React actually reads: assigning through the prototype's own
+    // setter, then dispatching input, leaves React's internal props holding the
+    // message rather than just the DOM node. Verified live.
     const proto =
       typeof globalThis.HTMLTextAreaElement === 'function'
         ? globalThis.HTMLTextAreaElement.prototype
@@ -367,9 +418,29 @@
     else box.value = message;
     if (typeof Event === 'function') {
       box.dispatchEvent(new Event('input', { bubbles: true }));
-      box.dispatchEvent(new Event('change', { bubbles: true }));
     }
+    // The post-condition that matters: if the text cannot be read back off the
+    // element, nothing further happens.
     if (box.value !== message) throw new Error('The message did not reach the composer');
+  }
+
+  // Cosmetic, and treated as such: this is what makes the entry look like a
+  // paste to anything watching, while the value assignment above is what
+  // actually delivers it. Feature-detected, and its failure is swallowed rather
+  // than raised, because a decoration must never be the reason a send that the
+  // operator authorised does not happen.
+  function announcePaste(box, message) {
+    if (typeof ClipboardEvent !== 'function' || typeof DataTransfer !== 'function') return false;
+    try {
+      const carried = new DataTransfer();
+      carried.setData('text/plain', message);
+      box.dispatchEvent(
+        new ClipboardEvent('paste', { clipboardData: carried, bubbles: true, cancelable: true }),
+      );
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   // --- the wire ---------------------------------------------------------------
@@ -379,6 +450,13 @@
     READ_CANDIDATE: async () => readCurrent(),
     ACCEPT_CANDIDATE: (payload) => acceptCurrent(payload),
     SKIP_CANDIDATE: () => skipCurrent(),
+    // The operator pressed stop. It arrives on its own round trip, while an
+    // accept may still be sitting in one of its pauses, and that is the point:
+    // the flag is what the pause and the pre-send check read.
+    STOP: async () => {
+      stopped = true;
+      return { stopped: true };
+    },
   };
 
   window.addEventListener('message', async (event) => {
@@ -412,7 +490,8 @@
       firstOfMany,
       clickSafely,
       sendKey,
-      typeMessage,
+      pasteMessage,
+      pause,
       handlers,
       sent,
     });

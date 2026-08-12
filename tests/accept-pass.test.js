@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { runAcceptPass, planAccepts, firstNameOf, resolveFirstName } from '../src/panel/accept-pass.js';
 import { ACCEPT_STATUS, RESUME_STATUS } from '../src/lib/csv.js';
 import { CX } from '../src/lib/messages.js';
+import { PACING } from '../src/lib/jitter.js';
 
 const JOB = '9100001';
 
@@ -34,6 +35,7 @@ function fakeReviewer({ people, failAccept = null } = {}) {
       index += 1;
       return at();
     }
+    if (message.type === CX.STOP_REVIEWER) return { stopped: true };
     if (message.type === CX.ACCEPT_CANDIDATE) {
       const here = at();
       if (here.userId !== String(message.payload.expectedUserId)) {
@@ -58,7 +60,7 @@ const captured = (userId, name = `Person ${userId}`) => ({
 });
 
 // One row per person, in the shape pass 1 leaves behind.
-function harness({ people, records, failAccept = null, signal, template } = {}) {
+function harness({ people, records, failAccept = null, signal, template, rand } = {}) {
   const reviewer = fakeReviewer({ people, failAccept });
   const events = [];
   const ledger = [];
@@ -75,6 +77,7 @@ function harness({ people, records, failAccept = null, signal, template } = {}) 
       sleeps.push(ms);
     },
     emit: (event) => events.push(event),
+    ...(rand ? { rand } : {}),
   };
   const run = () =>
     runAcceptPass(deps, {
@@ -330,5 +333,59 @@ describe('runAcceptPass', () => {
 
     expect(sleeps).toHaveLength(2);
     expect(events.filter((e) => e.type === 'resting' || e.type === 'break')).toHaveLength(2);
+  });
+
+  // The two pauses inside an accept - a beat before the message goes in, a beat
+  // to read it back - are sampled here rather than in the driver. The driver is
+  // a classic content script and cannot import jitter.js, and a copy of the
+  // numbers there would be the same concept in two files, drifting apart.
+  it('samples a fresh pair of pauses for the paste, per candidate', async () => {
+    let seed = 1;
+    const rand = () => {
+      seed = (seed * 16807) % 2147483647;
+      return seed / 2147483647;
+    };
+    const records = [captured('1'), captured('2')];
+    const { run, reviewer } = harness({ people: ['1', '2'], records, rand });
+    await run();
+
+    const accepts = reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE);
+    expect(accepts).toHaveLength(2);
+    for (const accept of accepts) {
+      expect(accept.beforePasteMs).toBeGreaterThanOrEqual(PACING.beforePasteMs[0]);
+      expect(accept.beforePasteMs).toBeLessThanOrEqual(PACING.beforePasteMs[1]);
+      expect(accept.afterPasteMs).toBeGreaterThanOrEqual(PACING.afterPasteMs[0]);
+      expect(accept.afterPasteMs).toBeLessThanOrEqual(PACING.afterPasteMs[1]);
+    }
+    // Drawn again for the second person. A pair fixed for the whole run would
+    // be a rhythm no human has, and the most fingerprintable shape of all.
+    expect([accepts[0].beforePasteMs, accepts[0].afterPasteMs]).not.toEqual([
+      accepts[1].beforePasteMs,
+      accepts[1].afterPasteMs,
+    ]);
+  });
+
+  // An accept spends most of its time paused inside the page, and an
+  // AbortSignal does not cross that boundary. Without this the operator's stop
+  // is only felt after the pause it interrupted - which is after the send.
+  it('tells the page to stop as well, when the operator aborts', async () => {
+    const records = [captured('1'), captured('2')];
+    const controller = new AbortController();
+    const reviewer = fakeReviewer({ people: ['1', '2'] });
+    await runAcceptPass(
+      {
+        review: async (message) => {
+          const answer = await reviewer.review(message);
+          if (message.type === CX.ACCEPT_CANDIDATE) controller.abort();
+          return answer;
+        },
+        recordAccepted: async () => {},
+        sleep: async () => {},
+        emit: () => {},
+      },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records, signal: controller.signal },
+    );
+
+    expect(typesOf(reviewer.log)).toContain(CX.STOP_REVIEWER);
   });
 });

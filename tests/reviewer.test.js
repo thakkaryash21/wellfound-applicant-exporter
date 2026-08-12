@@ -38,6 +38,10 @@ function createPage(options = {}) {
     keys: [],
     sentText: null,
     rejected: false,
+    focused: false,
+    pasted: [],
+    inputs: 0,
+    order: [],
   };
 
   function currentId() {
@@ -118,8 +122,35 @@ function createPage(options = {}) {
       }
       render();
     });
+    // The composer, watched the way a page watches its own field: what got
+    // focus, what was pasted into it, and what it was told about afterwards.
+    const box = document.getElementById('msg');
+    if (box) {
+      // A composer that silently keeps nothing, which is the one failure that
+      // would otherwise send an empty message to a real person.
+      if (options.deafComposer) {
+        Object.defineProperty(box, '_value', { get: () => '', set() {}, configurable: true });
+      }
+      box.focus = () => {
+        state.focused = true;
+        state.order.push('focus');
+      };
+      box.addEventListener('paste', (event) => {
+        state.order.push('paste');
+        state.pasted.push(event.clipboardData?.getData('text/plain'));
+      });
+      box.addEventListener('input', () => {
+        state.order.push('input');
+        state.inputs += 1;
+      });
+    }
     document.getElementById('send')?.addEventListener('click', () => {
-      state.sentText = document.querySelector('textarea').value;
+      const field = document.querySelector('textarea');
+      state.sentText = field.value;
+      // Which route the value took, captured while the composer still exists:
+      // a confirmed send closes it, and the element is gone by the time a test
+      // could look.
+      state.viaPrototypeSetter = Boolean(field.viaPrototypeSetter);
       (options.onSendClick ?? confirmSend)(state);
       render();
     });
@@ -135,11 +166,15 @@ function createPage(options = {}) {
   // The keyboard, as measured: a scripted event is recorded here so a test can
   // see it was sent, and moves nothing, because on the live page it moved
   // nothing. `r` and `x` would be catastrophic if the site ever did trust a
-  // synthetic event, so the harness treats them as if it did.
-  document.addEventListener('keydown', (event) => {
-    state.keys.push(event.key);
-    if (/^(r|x)$/i.test(event.key)) state.rejected = true;
-  });
+  // synthetic event, so the harness treats them as if it did - and listens on
+  // all three key events, because "the driver sends no keys" is a claim about
+  // every one of them, not just the one it used to send.
+  for (const type of ['keydown', 'keyup', 'keypress']) {
+    document.addEventListener(type, (event) => {
+      state.keys.push(event.key);
+      if (/^(r|x)$/i.test(event.key)) state.rejected = true;
+    });
+  }
 
   render();
   return { dom, document, state, render, currentId };
@@ -158,7 +193,45 @@ class FakeEvent {
   }
 }
 
-function load(page) {
+class FakeDataTransfer {
+  constructor() {
+    this.data = new Map();
+  }
+
+  setData(type, value) {
+    this.data.set(type, String(value));
+  }
+
+  getData(type) {
+    return this.data.get(type) ?? '';
+  }
+}
+
+class FakeClipboardEvent {
+  constructor(type, init) {
+    this.type = type;
+    this.clipboardData = init?.clipboardData ?? null;
+  }
+}
+
+// The prototype whose `value` setter React reads through. The driver reaches
+// for this descriptor rather than assigning `box.value` directly, so the
+// harness has to own one for that path to be the path under test - and it
+// records that it was the one used.
+class FakeHTMLTextAreaElement {
+  get value() {
+    return this._value ?? '';
+  }
+
+  set value(next) {
+    this._value = String(next);
+    this.viaPrototypeSetter = true;
+  }
+}
+
+// `clipboard: false` is the browser that has no ClipboardEvent or DataTransfer.
+// The paste is decoration; the value must land regardless.
+function load(page, { clipboard = true } = {}) {
   const fakeWindow = createFakeWindow();
   const { exposed } = loadClassicScript('src/content/reviewer.js', {
     globals: {
@@ -166,6 +239,8 @@ function load(page) {
       document: page.document,
       KeyboardEvent: FakeKeyboardEvent,
       Event: FakeEvent,
+      HTMLTextAreaElement: FakeHTMLTextAreaElement,
+      ...(clipboard ? { ClipboardEvent: FakeClipboardEvent, DataTransfer: FakeDataTransfer } : {}),
     },
     expose: '__WFX_REVIEWER__',
   });
@@ -190,9 +265,9 @@ afterEach(() => {
   driver = undefined;
 });
 
-function start(options) {
+function start(options, loadOptions) {
   page = createPage(options);
-  driver = load(page).driver;
+  driver = load(page, loadOptions).driver;
   return driver;
 }
 
@@ -286,6 +361,154 @@ describe('accepting', () => {
     start();
     await driver.openReviewer();
     await expect(driver.acceptCurrent({ message: MESSAGE })).rejects.toThrow(/expected candidate/i);
+  });
+});
+
+// --- how the message goes in --------------------------------------------------
+
+// Every letter the reviewer binds a shortcut to, at document level: `a` is
+// Accept, `r` is Reject, `x` is Quick Reject. The real message is full of all
+// three, which is the reason the entry is a paste and not a typing simulation.
+const RISKY_MESSAGE = 'Hey Amara,\n\nRegarding your excellent application - warm regards!';
+
+describe('entering the message', () => {
+  it('dispatches no key event of any kind, whatever the message contains', async () => {
+    start();
+    await driver.openReviewer();
+    await driver.acceptCurrent({ expectedUserId: '21527289', message: RISKY_MESSAGE });
+    // Not "no key that rejects" - no key at all. Typing this message out would
+    // have pressed `a`, `r` and `x` dozens of times against a page that binds
+    // all three, and the only thing standing between that and a rejected
+    // candidate would be a measurement continuing to hold.
+    expect(page.state.keys).toEqual([]);
+    expect(page.state.rejected).toBe(false);
+    expect(page.state.sentText).toBe(RISKY_MESSAGE);
+  });
+
+  it('focuses, pastes, sets the value through the prototype setter, then says input', async () => {
+    start();
+    await driver.openReviewer();
+    await driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    // The order a browser does a paste in. Focus first because a real paste
+    // needs it; input last because that is what React reads the value on.
+    expect(page.state.order).toEqual(['focus', 'paste', 'input']);
+    expect(page.state.pasted).toEqual([MESSAGE]);
+    expect(page.state.inputs).toBe(1);
+    // The value went in through HTMLTextAreaElement's own setter, which is the
+    // step that leaves React holding the message rather than just the DOM node.
+    expect(page.state.viaPrototypeSetter).toBe(true);
+  });
+
+  it('still lands the value where the browser has no ClipboardEvent', async () => {
+    start(undefined, { clipboard: false });
+    await driver.openReviewer();
+    await driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    expect(page.state.pasted).toEqual([]);
+    // The paste is decoration. Skipping it must not cost the send.
+    expect(page.state.sentText).toBe(MESSAGE);
+    expect(page.state.order).toEqual(['focus', 'input']);
+  });
+
+  it('refuses to send when the text cannot be read back off the element', async () => {
+    start({ deafComposer: true });
+    await driver.openReviewer();
+    await expect(
+      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+    ).rejects.toThrow(/did not reach the composer/);
+    expect(page.state.sentText).toBe(null);
+  });
+});
+
+describe('the pauses either side of the paste', () => {
+  const PAUSES = { beforePasteMs: 3000, afterPasteMs: 2000 };
+
+  it('waits before pasting and again before sending, honouring what it was handed', async () => {
+    start();
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({
+      expectedUserId: '21527289',
+      message: MESSAGE,
+      ...PAUSES,
+    });
+
+    // The composer is open and empty: the operator is gathering their thoughts.
+    await vi.advanceTimersByTimeAsync(2900);
+    expect(page.state.pasted).toEqual([]);
+
+    await vi.advanceTimersByTimeAsync(200);
+    expect(page.state.pasted).toEqual([MESSAGE]);
+    // Pasted, but not sent: this is the glance over it before committing.
+    expect(page.state.sentText).toBe(null);
+
+    await vi.advanceTimersByTimeAsync(1800);
+    expect(page.state.sentText).toBe(null);
+    await vi.advanceTimersByTimeAsync(200);
+    await expect(pending).resolves.toMatchObject({ accepted: true });
+  });
+
+  it('invents no pause of its own when it was handed none', async () => {
+    start();
+    await driver.openReviewer();
+    // The panel owns pacing. A driver that filled in its own numbers would put
+    // one concept in two files and drift from the run's own rhythm.
+    await expect(
+      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+    ).resolves.toMatchObject({ accepted: true });
+  });
+
+  it('feels a stop inside the pause rather than after it, and does not send', async () => {
+    start();
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({
+      expectedUserId: '21527289',
+      message: MESSAGE,
+      beforePasteMs: 1000,
+      afterPasteMs: 30000,
+    });
+    const settled = expect(pending).rejects.toThrow(/Stopped before the message was sent/);
+    await vi.advanceTimersByTimeAsync(1500);
+    expect(page.state.pasted).toEqual([MESSAGE]);
+
+    await driver.handlers.STOP();
+    // One slice, not the remaining twenty-nine seconds. An operator who presses
+    // stop is not asked to wait out a pause they interrupted.
+    await vi.advanceTimersByTimeAsync(200);
+    await settled;
+    expect(page.state.sentText).toBe(null);
+    expect(page.state.clicks).not.toContain('Accept application & send message');
+    // Nothing went out, so this candidate is not burned: the never-retry guard
+    // is about messages that may have been delivered, not about attempts.
+    expect(driver.sent.has('21527289')).toBe(false);
+  });
+
+  it('stops during the first pause without entering anything at all', async () => {
+    start();
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({
+      expectedUserId: '21527289',
+      message: MESSAGE,
+      beforePasteMs: 30000,
+    });
+    const settled = expect(pending).rejects.toThrow(/Stopped before the message was entered/);
+    await vi.advanceTimersByTimeAsync(300);
+    await driver.handlers.STOP();
+    await vi.advanceTimersByTimeAsync(200);
+    await settled;
+    expect(page.state.pasted).toEqual([]);
+  });
+
+  it('clears an earlier stop when the reviewer is opened for a new pass', async () => {
+    start();
+    await driver.openReviewer();
+    await driver.handlers.STOP();
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({
+      expectedUserId: '21527289',
+      message: MESSAGE,
+      ...PAUSES,
+    });
+    await vi.advanceTimersByTimeAsync(6000);
+    await expect(pending).resolves.toMatchObject({ accepted: true });
   });
 });
 

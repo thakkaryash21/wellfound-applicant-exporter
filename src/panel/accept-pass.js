@@ -157,7 +157,19 @@ export async function runAcceptPass(deps, options) {
     }
   }
 
+  // An accept spends most of its time paused inside the page, where the run's
+  // AbortSignal cannot reach: signals do not cross into a content script. So a
+  // stop is forwarded as its own message. It is very likely to arrive while an
+  // accept is mid-pause, which is exactly the case it exists for - the pause
+  // ends there and then, and no send follows it. Its failure is ignored: a tab
+  // that has gone away cannot send anything either.
+  const forwardStop = () => {
+    Promise.resolve(review({ type: CX.STOP_REVIEWER })).catch(() => {});
+  };
+  signal?.addEventListener('abort', forwardStop, { once: true });
+
   const finish = () => {
+    signal?.removeEventListener('abort', forwardStop);
     emit({
       type: 'accept_done',
       jobId,
@@ -236,7 +248,18 @@ export async function runAcceptPass(deps, options) {
       try {
         await review({
           type: CX.ACCEPT_CANDIDATE,
-          payload: { expectedUserId: userId, message },
+          // Sampled here, per candidate, from the same PACING every other pause
+          // in the run draws from. The driver is a classic content script with
+          // no imports: it cannot reach jitter.js, and copying the numbers into
+          // it would put one concept in two places. So pacing stays the panel's
+          // and the DOM stays the driver's, and these two numbers are the whole
+          // of what crosses.
+          payload: {
+            expectedUserId: userId,
+            message,
+            beforePasteMs: sample(PACING.beforePasteMs[0], PACING.beforePasteMs[1], rand),
+            afterPasteMs: sample(PACING.afterPasteMs[0], PACING.afterPasteMs[1], rand),
+          },
         });
       } catch (sendError) {
         // An unclear outcome stops the pass and reports it. It is never
