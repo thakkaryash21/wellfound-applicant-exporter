@@ -121,8 +121,17 @@ class FakeElement {
 
   // A form control's value is a property that starts life at the attribute, so
   // markup rendered with value="25" reads back 25 until the user types.
+  //
+  // A textarea is the exception, and it matters: it has no value attribute at
+  // all, its value starts as the text between its tags. Without this, a panel
+  // that renders a message into a textarea and reads it back out would read an
+  // empty string here and the operator's wording in a browser - the fake
+  // agreeing with the code rather than with the platform.
   get value() {
-    return this._value ?? this.getAttribute('value') ?? '';
+    if (this._value !== null) return this._value;
+    const attr = this.getAttribute('value');
+    if (attr !== null) return attr;
+    return this.tag === 'textarea' ? this.textContent : '';
   }
 
   set value(next) {
@@ -294,7 +303,12 @@ class FakeElement {
     return { cancel() {} };
   }
 
-  focus() {}
+  // Recorded rather than ignored. Which control a screen puts the focus on is a
+  // real decision on the confirm screen: the button that sends a few hundred
+  // messages must not be the one a stray Enter lands on.
+  focus() {
+    if (globalThis.document instanceof FakeDocument) globalThis.document.activeElement = this;
+  }
 }
 
 function dashed(key) {
@@ -427,6 +441,7 @@ class FakeDocument {
     // Keyboard traffic in a page goes to the document, so the document listens
     // and dispatches like an element does.
     this.events = new FakeElement('document');
+    this.activeElement = null;
   }
 
   addEventListener(type, handler) {
