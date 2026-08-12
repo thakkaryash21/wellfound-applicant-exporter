@@ -450,3 +450,20 @@ describe('the accept control', () => {
     expect(startLabel([3])).toBe('Download 3 resumes');
   });
 });
+
+// The counts drop after an accept run, possibly to zero, because accepting
+// drains the review queue. Naming what left is what stops that reading as the
+// extension having lost the applicants.
+describe('a role this extension has accepted people from', () => {
+  it('names them beside the queue count', () => {
+    expect(jobSubtitle(job({ accepted: 40 }))).toBe('4 applicants \u00b7 3 new \u00b7 40 accepted');
+    expect(jobSubtitle(job({ estimatedNew: 0, accepted: 40 }))).toBe(
+      '4 applicants \u00b7 all downloaded \u00b7 40 accepted',
+    );
+  });
+
+  it('says nothing when this extension has accepted nobody', () => {
+    expect(jobSubtitle(job())).toBe('4 applicants \u00b7 3 new');
+    expect(jobSubtitle(job({ accepted: 0 }))).toBe('4 applicants \u00b7 3 new');
+  });
+});

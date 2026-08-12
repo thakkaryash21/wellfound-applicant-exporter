@@ -634,3 +634,41 @@ describe('accepting', () => {
     expect(screen.innerHTML).not.toContain('accepted');
   });
 });
+
+// End to end on the one screen where an overstated number cannot be taken
+// back: the operator runs this retroactively over the same roles, so from the
+// second run on the library holds people who have already been messaged and
+// have left the review queue.
+describe('the confirm screen over a role accepted before', () => {
+  it('asks approval for the people who will actually be messaged', async () => {
+    const screen = await openPanel({
+      stub: stubController({
+        listJobs: vi.fn(async () => [
+          job(JOB_A, { actionableCount: 372, known: 312, accepted: 40, estimatedNew: 60 }),
+        ]),
+        startRun: vi.fn(() => new Promise(() => {})),
+      }),
+    });
+    const pick = screen.querySelector('.job-pick');
+    pick.checked = true;
+    await pick.dispatch('change');
+    // Accept only: the retroactive run, which downloads nobody and accepts the
+    // people already on disk.
+    byId('advanced').open = true;
+    byId('preview').checked = true;
+    const accept = byId(HOME_IDS.accept);
+    accept.checked = true;
+    await accept.dispatch('change');
+    await byId('start').click();
+    await settle();
+
+    // 312 in the library, 40 of them messaged last run and gone from the queue,
+    // so 272 are left to message and the 100 who applied since have no resume.
+    expect(screen.innerHTML).toContain('Accept 272 people');
+    expect(screen.innerHTML).toContain('372 in the review queue');
+    expect(screen.innerHTML).toContain('272 will be messaged');
+    expect(screen.innerHTML).toContain('100 refused');
+    expect(screen.innerHTML).toContain('40 accepted by this extension on an earlier run');
+    expect(screen.innerHTML).not.toContain('Accept 312 people');
+  });
+});

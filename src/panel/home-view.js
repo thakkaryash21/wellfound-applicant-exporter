@@ -89,8 +89,12 @@ export function jobSubtitle(job) {
   const total = job.actionableCount;
   if (total == null) return 'applicant count not loaded yet';
   const noun = total === 1 ? 'applicant' : 'applicants';
-  if (job.estimatedNew === 0) return `${total} ${noun} \u00b7 all downloaded`;
-  return `${total} ${noun} \u00b7 ${job.estimatedNew} new`;
+  // Accepting drains the queue, so this count drops after an accept run and
+  // can drop to zero. Naming what left is what stops that reading as the
+  // extension having lost the applicants.
+  const accepted = job.accepted ? ` \u00b7 ${job.accepted} accepted` : '';
+  if (job.estimatedNew === 0) return `${total} ${noun} \u00b7 all downloaded${accepted}`;
+  return `${total} ${noun} \u00b7 ${job.estimatedNew} new${accepted}`;
 }
 
 // The button used to promise the whole backlog under a limit that would refuse

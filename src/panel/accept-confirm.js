@@ -39,27 +39,28 @@ export const CONFIRM_IDS = {
 //   is a ceiling and the screen says "up to".
 export function acceptRow(job, setting, { download = true } = {}) {
   const inQueue = job.actionableCount ?? null;
-  const known = job.known ?? 0;
+  const already = job.accepted ?? 0;
+  // The library holds everyone this extension has fetched, and it keeps holding
+  // the ones it has since accepted - the download ledger has no reason to
+  // forget them. The review queue does not: accepting removes a candidate from
+  // it. So the people who are both on disk and still acceptable are the library
+  // minus the ones already messaged, and using `known` on its own counts that
+  // difference twice on the second run over a role.
+  const haveResume = Math.max(0, (job.known ?? 0) - already);
+  const base = { jobId: job.jobId, title: job.title, alreadyAccepted: already, inQueue };
   if (inQueue == null) {
-    return { jobId: job.jobId, title: job.title, people: null, bound: false, refused: 0 };
+    return { ...base, people: null, bound: false, refused: 0 };
   }
   if (!download) {
-    const people = Math.min(known, inQueue);
-    return {
-      jobId: job.jobId,
-      title: job.title,
-      people,
-      bound: false,
-      refused: inQueue - people,
-    };
+    const people = Math.min(haveResume, inQueue);
+    return { ...base, people, bound: false, refused: inQueue - people };
   }
   if (setting.mode === 'all') {
-    return { jobId: job.jobId, title: job.title, people: inQueue, bound: false, refused: 0 };
+    return { ...base, people: inQueue, bound: false, refused: 0 };
   }
   return {
-    jobId: job.jobId,
-    title: job.title,
-    people: Math.min(inQueue, setting.limit + known),
+    ...base,
+    people: Math.min(inQueue, setting.limit + haveResume),
     bound: true,
     refused: 0,
   };
@@ -84,11 +85,15 @@ export function confirmModel({
   const counted = rows.filter((row) => row.people != null);
   const total = counted.reduce((sum, row) => sum + row.people, 0);
   const refused = rows.reduce((sum, row) => sum + row.refused, 0);
+  const alreadyAccepted = rows.reduce((sum, row) => sum + row.alreadyAccepted, 0);
+  const inQueue = counted.reduce((sum, row) => sum + row.inQueue, 0);
   const role = rows[0]?.title ?? '';
   return {
     rows,
     total,
     refused,
+    alreadyAccepted,
+    inQueue,
     // A role whose count never loaded makes the total a floor rather than a
     // sum, and the screen has to say which it is.
     uncounted: rows.length - counted.length,
@@ -106,15 +111,38 @@ export function headline(model) {
   return `${lead}${people}`;
 }
 
+// Where the number came from, in the order the run gets there. The operator
+// runs this repeatedly over the same roles, so the figure changes between runs
+// for reasons no single total can explain: people were messaged last time and
+// have left the queue, people applied since and have no resume yet. Each of
+// those is its own line rather than an adjustment folded into one number.
+export function derivation(model) {
+  const lines = [];
+  lines.push(`${model.inQueue} in the review queue`);
+  lines.push(
+    `${model.bound || model.uncounted ? 'up to ' : ''}${model.total} will be messaged`,
+  );
+  if (model.refused) {
+    lines.push(`${model.refused} refused: no resume was captured for them`);
+  }
+  if (model.alreadyAccepted) {
+    // Not subtracted from the queue on screen, because they were never in it:
+    // accepting removed them. It is here to explain a figure that has shrunk
+    // since the last run, and it is what this extension did, not who has been
+    // accepted - anyone accepted by hand in Wellfound is in neither list.
+    lines.push(
+      `${model.alreadyAccepted} accepted by this extension on an earlier run, ` +
+        'so they have already left the queue',
+    );
+  }
+  return lines;
+}
+
 // Back is the filled button and it comes first, so the deliberate action is the
 // one that is neither the default focus nor the easy one to hit. The send
 // button names its own count: a button that says what it is about to do is
 // worth more here than one that says "Confirm".
 export function renderConfirm(model) {
-  const refusal = model.refused
-    ? `<p class="job-meta">${model.refused} will not be accepted: no resume was captured
-         for them, and accepting would lose it for good.</p>`
-    : '';
   const downloadRefusal = model.download
     ? `<p class="job-meta">Anyone whose resume cannot be downloaded is refused for the
          same reason.</p>`
@@ -136,8 +164,10 @@ export function renderConfirm(model) {
         <ul class="confirm-roles">
           ${model.rows.map((row) => `<li>${escapeHtml(roleLine(row))}</li>`).join('')}
         </ul>
+        <ul class="confirm-sum">
+          ${derivation(model).map((line) => `<li>${escapeHtml(line)}</li>`).join('')}
+        </ul>
         ${uncounted}
-        ${refusal}
         ${downloadRefusal}
         <p class="label">The message, as it will be sent</p>
         <pre class="accept-preview">${escapeHtml(model.message)}</pre>

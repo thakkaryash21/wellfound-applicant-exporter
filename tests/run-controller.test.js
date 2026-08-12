@@ -669,6 +669,36 @@ describe('listJobs hydration', () => {
     fake.chrome.tabs.update = working;
     expect((await controller.listJobs()).map((j) => j.actionableCount)).toEqual([4, 7]);
   });
+
+  // The sibling of `known`, and it is on the list for the same reason: the
+  // confirm screen has to subtract the people this extension has already
+  // messaged, or the second run over a role asks the operator to approve a
+  // number that includes people it will then correctly skip.
+  it('carries how many of a role this extension has already accepted', async () => {
+    setup({
+      tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
+      jobs: [{ jobId: JOB, title: 'Backend Engineer', actionableCount: 4 }],
+      storage: {
+        [`job:${JOB}`]: {
+          jobId: JOB,
+          jobTitle: 'Backend Engineer',
+          seenUserIds: ['7700001', '7700002', '7700003'],
+          accepted: { 7700001: '2026-08-12 10:00', 7700002: '2026-08-12 10:01' },
+        },
+      },
+    });
+    const controller = await controllerFor();
+    expect(await controller.listJobs()).toMatchObject([{ known: 3, accepted: 2 }]);
+  });
+
+  it('says nobody has been accepted for a role this extension has never run', async () => {
+    setup({
+      tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
+      jobs: [{ jobId: JOB, title: 'Backend Engineer', actionableCount: 4 }],
+    });
+    const controller = await controllerFor();
+    expect(await controller.listJobs()).toMatchObject([{ accepted: 0 }]);
+  });
 });
 
 // I1: `grep -c abort tests/run-controller.test.js` used to return 0. A leaked

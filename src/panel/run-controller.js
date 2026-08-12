@@ -225,9 +225,19 @@ export function createController({
           // about people, so estimating from it promised files the run would
           // then correctly refuse to fetch.
           const { known, downloaded } = await ledgerService.describe(job.jobId);
+          // Everyone this extension has already messaged for this role. It is
+          // the sibling of `known` and it is here for the same reason: without
+          // it the confirm screen counts people the run will then correctly
+          // skip, and that screen is the one place a number must not read
+          // higher than what will happen.
+          //
+          // It counts what we did, not who has been accepted. An applicant the
+          // operator accepted by hand in Wellfound is in neither this list nor
+          // the review queue, and nothing here can see them.
+          const accepted = (await ledgerService.acceptedUserIdsFor(job.jobId)).length;
           const estimatedNew =
             job.actionableCount == null ? null : Math.max(0, job.actionableCount - known);
-          return { ...job, downloaded, known, estimatedNew };
+          return { ...job, downloaded, known, accepted, estimatedNew };
         }),
       );
     },

@@ -340,6 +340,17 @@ body {
   font-weight: 600;
 }
 
+/* Where the number came from, under the roles it came from. Quieter than the
+   roles above it: this is the working, not the answer. */
+.confirm-sum {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: grid;
+  gap: var(--space-1);
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .danger-action {
   color: var(--rust);
   border-color: var(--rust);
