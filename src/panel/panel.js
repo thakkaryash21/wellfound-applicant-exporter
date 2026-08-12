@@ -751,8 +751,8 @@ async function load() {
     const missing = state.jobs.filter((job) => job.actionableCount == null).length;
     if (hydrationRan && missing > 0) {
       state.hydrationNote =
-        `${missing} ${missing === 1 ? 'role has' : 'roles have'} no applicant count yet. ` +
-        'Open that role\u2019s applicant list on Wellfound, or reopen this panel to try again.';
+        `${missing} ${missing === 1 ? 'role has' : 'roles have'} no applicant count. ` +
+        'Open that role\u2019s applicant list on Wellfound to see one.';
     }
   } catch (error) {
     state.jobs = [];
