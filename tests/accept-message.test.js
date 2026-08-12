@@ -18,10 +18,10 @@ describe('composeMessage', () => {
   it('substitutes [first_name] and [role_name]', () => {
     const out = composeMessage({
       template: 'Hey [first_name], re: [role_name].',
-      firstName: 'Ken',
-      roleName: 'Applied AI Engineer',
+      firstName: 'Jane',
+      roleName: 'Platform Engineer',
     });
-    expect(out).toBe('Hey Ken, re: Applied AI Engineer.');
+    expect(out).toBe('Hey Jane, re: Platform Engineer.');
   });
 
   it('drops the name and the stranded space when first name is missing', () => {
@@ -45,14 +45,14 @@ describe('composeMessage', () => {
   });
 
   it('composes the real default message with a missing name, never stranding the space', () => {
-    const out = composeMessage({ firstName: '', roleName: 'Applied AI Engineer' });
+    const out = composeMessage({ firstName: '', roleName: 'Platform Engineer' });
     expect(out.startsWith('Hey,')).toBe(true);
     expect(out).not.toMatch(/Hey +,/);
   });
 
   it('throws if a bracket token survives substitution', () => {
     expect(() =>
-      composeMessage({ template: 'Hey [first_name], [unknown_token] here.', firstName: 'Ken', roleName: 'Eng' })
+      composeMessage({ template: 'Hey [first_name], [unknown_token] here.', firstName: 'Jane', roleName: 'Eng' })
     ).toThrow();
   });
 

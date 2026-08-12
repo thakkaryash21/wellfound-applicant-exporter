@@ -33,7 +33,7 @@ function createPage(options = {}) {
   const dom = installFakeDom();
   const { document } = dom;
   const state = {
-    queue: options.queue ?? ['21527289', '21373701', '21200000'],
+    queue: options.queue ?? ['70000001', '70000002', '70000003'],
     index: 1,
     open: false,
     composer: false,
@@ -351,7 +351,7 @@ describe('opening the reviewer', () => {
     // click: a confirmed accept holds the index and drains the bucket, so
     // position 1 is where the loop stays.
     expect(page.state.openedAt).toBe(1);
-    expect(at).toEqual({ opened: true, userId: '21527289', index: 1, total: 3 });
+    expect(at).toEqual({ opened: true, userId: '70000001', index: 1, total: 3 });
     // One click, first time. The double-click once seen was a scrolling
     // harness's artifact, and a second click on an open modal lands unknown.
     expect(page.state.clicks).toEqual(['View application']);
@@ -367,7 +367,7 @@ describe('reporting who is shown', () => {
   it('reads the id from the resume link and the position from the counter', async () => {
     start();
     await driver.openReviewer();
-    expect(driver.readCurrent()).toEqual({ userId: '21527289', index: 1, total: 3 });
+    expect(driver.readCurrent()).toEqual({ userId: '70000001', index: 1, total: 3 });
   });
 
   it('errors rather than returning null when the id cannot be read', async () => {
@@ -395,7 +395,7 @@ describe('accepting', () => {
     start();
     await driver.openReviewer();
     const result = await driver.acceptCurrent({
-      expectedUserId: '21527289',
+      expectedUserId: '70000001',
       message: MESSAGE,
     });
 
@@ -409,9 +409,9 @@ describe('accepting', () => {
     // denominator dropped. A caller that pressed Next after this would skip
     // somebody, so the driver reports the new position rather than moving.
     expect(result).toEqual({
-      userId: '21527289',
+      userId: '70000001',
       accepted: true,
-      next: { userId: '21373701', index: 1, total: 2 },
+      next: { userId: '70000002', index: 1, total: 2 },
     });
     expect(page.state.keys).toEqual([]);
   });
@@ -420,8 +420,8 @@ describe('accepting', () => {
     start();
     await driver.openReviewer();
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21373701', message: MESSAGE }),
-    ).rejects.toThrow(/showing 21527289, not 21373701/);
+      driver.acceptCurrent({ expectedUserId: '70000002', message: MESSAGE }),
+    ).rejects.toThrow(/showing 70000001, not 70000002/);
     expect(page.state.clicks).toEqual(['View application']);
   });
 
@@ -459,7 +459,7 @@ describe('saying whether anything was sent', () => {
     // is five seconds; a slow render is not an ambiguous send.
     start({ composerNeverOpens: true });
     await driver.openReviewer();
-    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     const settled = pending.catch((error) => error);
     await vi.advanceTimersByTimeAsync(5000);
     const error = await settled;
@@ -472,7 +472,7 @@ describe('saying whether anything was sent', () => {
     start();
     await driver.openReviewer();
     const error = await driver
-      .acceptCurrent({ expectedUserId: '21373701', message: MESSAGE })
+      .acceptCurrent({ expectedUserId: '70000002', message: MESSAGE })
       .catch((e) => e);
     certainly(error.message);
   });
@@ -481,7 +481,7 @@ describe('saying whether anything was sent', () => {
     start({ deafComposer: true });
     await driver.openReviewer();
     const error = await driver
-      .acceptCurrent({ expectedUserId: '21527289', message: MESSAGE })
+      .acceptCurrent({ expectedUserId: '70000001', message: MESSAGE })
       .catch((e) => e);
     expect(error.message).toMatch(/did not reach the composer/);
     certainly(error.message);
@@ -492,7 +492,7 @@ describe('saying whether anything was sent', () => {
     await driver.openReviewer();
     for (const message of ['Hey [first_name],', '   ']) {
       const error = await driver
-        .acceptCurrent({ expectedUserId: '21527289', message })
+        .acceptCurrent({ expectedUserId: '70000001', message })
         .catch((e) => e);
       certainly(error.message);
     }
@@ -502,7 +502,7 @@ describe('saying whether anything was sent', () => {
   it('does NOT mark the send it could not confirm', async () => {
     start({ onSendClick: () => {} });
     await driver.openReviewer();
-    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     const settled = pending.catch((error) => error);
     await vi.advanceTimersByTimeAsync(15000);
     const error = await settled;
@@ -522,7 +522,7 @@ describe('entering the message', () => {
   it('dispatches no key event of any kind, whatever the message contains', async () => {
     start();
     await driver.openReviewer();
-    await driver.acceptCurrent({ expectedUserId: '21527289', message: RISKY_MESSAGE });
+    await driver.acceptCurrent({ expectedUserId: '70000001', message: RISKY_MESSAGE });
     // Not "no key that rejects" - no key at all. Typing this message out would
     // have pressed `a`, `r` and `x` dozens of times against a page that binds
     // all three, and the only thing standing between that and a rejected
@@ -535,7 +535,7 @@ describe('entering the message', () => {
   it('focuses, pastes, sets the value through the prototype setter, then says input', async () => {
     start();
     await driver.openReviewer();
-    await driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    await driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     // The order a browser does a paste in. Focus first because a real paste
     // needs it; input last because that is what React reads the value on.
     expect(page.state.order).toEqual(['focus', 'paste', 'input']);
@@ -549,7 +549,7 @@ describe('entering the message', () => {
   it('still lands the value where the browser has no ClipboardEvent', async () => {
     start(undefined, { clipboard: false });
     await driver.openReviewer();
-    await driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    await driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     expect(page.state.pasted).toEqual([]);
     // The paste is decoration. Skipping it must not cost the send.
     expect(page.state.sentText).toBe(MESSAGE);
@@ -560,7 +560,7 @@ describe('entering the message', () => {
     start({ deafComposer: true });
     await driver.openReviewer();
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
     ).rejects.toThrow(/did not reach the composer/);
     expect(page.state.sentText).toBe(null);
   });
@@ -573,7 +573,7 @@ describe('the pauses either side of the paste', () => {
     start();
     await driver.openReviewer();
     const pending = driver.acceptCurrent({
-      expectedUserId: '21527289',
+      expectedUserId: '70000001',
       message: MESSAGE,
       ...PAUSES,
     });
@@ -599,7 +599,7 @@ describe('the pauses either side of the paste', () => {
     // The panel owns pacing. A driver that filled in its own numbers would put
     // one concept in two files and drift from the run's own rhythm.
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
     ).resolves.toMatchObject({ accepted: true });
   });
 
@@ -607,7 +607,7 @@ describe('the pauses either side of the paste', () => {
     start();
     await driver.openReviewer();
     const pending = driver.acceptCurrent({
-      expectedUserId: '21527289',
+      expectedUserId: '70000001',
       message: MESSAGE,
       beforePasteMs: 1000,
       afterPasteMs: 30000,
@@ -625,14 +625,14 @@ describe('the pauses either side of the paste', () => {
     expect(page.state.clicks).not.toContain('Accept application & send message');
     // Nothing went out, so this candidate is not burned: the never-retry guard
     // is about messages that may have been delivered, not about attempts.
-    expect(driver.sent.has('21527289')).toBe(false);
+    expect(driver.sent.has('70000001')).toBe(false);
   });
 
   it('stops during the first pause without entering anything at all', async () => {
     start();
     await driver.openReviewer();
     const pending = driver.acceptCurrent({
-      expectedUserId: '21527289',
+      expectedUserId: '70000001',
       message: MESSAGE,
       beforePasteMs: 30000,
     });
@@ -650,7 +650,7 @@ describe('the pauses either side of the paste', () => {
     await driver.handlers.STOP();
     await driver.openReviewer();
     const pending = driver.acceptCurrent({
-      expectedUserId: '21527289',
+      expectedUserId: '70000001',
       message: MESSAGE,
       ...PAUSES,
     });
@@ -686,7 +686,7 @@ describe('the never-reject guard', () => {
     start({ acceptAriaLabel: 'Reject application' });
     await driver.openReviewer();
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
     ).rejects.toThrow(/Refusing to click a reject/);
     expect(page.state.clicks).toEqual(['View application']);
   });
@@ -706,8 +706,8 @@ describe('the identity interlock', () => {
     });
     await driver.openReviewer();
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
-    ).rejects.toThrow(/moved to 21373701 before the send; nothing was sent/);
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
+    ).rejects.toThrow(/moved to 70000002 before the send; nothing was sent/);
     expect(page.state.sentText).toBe(null);
     expect(page.state.clicks).not.toContain('Accept application & send message');
   });
@@ -800,7 +800,7 @@ describe('the exactly-one-control guard', () => {
     start();
     await driver.openReviewer();
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
     ).resolves.toMatchObject({ accepted: true });
     expect(page.state.clicks).toEqual([
       'View application',
@@ -814,7 +814,7 @@ describe('the exactly-one-control guard', () => {
     await driver.openReviewer();
     page.document.getElementById('ghost').rect = { width: 0, height: 0 };
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
     ).resolves.toMatchObject({ accepted: true });
   });
 
@@ -822,7 +822,7 @@ describe('the exactly-one-control guard', () => {
     start({ extraMarkup: '<div role="button">Accept</div>' });
     await driver.openReviewer();
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
     ).rejects.toThrow(/Found 2 Accept controls/);
     expect(page.state.clicks).toEqual(['View application']);
   });
@@ -854,7 +854,7 @@ describe('the unsubstituted-token guard', () => {
     await driver.openReviewer();
     await expect(
       driver.acceptCurrent({
-        expectedUserId: '21527289',
+        expectedUserId: '70000001',
         message: 'Hey [first_name], thanks for applying.',
       }),
     ).rejects.toThrow(/unsubstituted token/);
@@ -867,7 +867,7 @@ describe('the unsubstituted-token guard', () => {
     start();
     await driver.openReviewer();
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: '   ' }),
+      driver.acceptCurrent({ expectedUserId: '70000001', message: '   ' }),
     ).rejects.toThrow(/empty message/);
     expect(page.state.clicks).toEqual(['View application']);
   });
@@ -879,15 +879,15 @@ describe('the never-retry guard', () => {
   it('refuses a second accept for a candidate it has already sent to', async () => {
     start();
     await driver.openReviewer();
-    await driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    await driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     // The reviewer has moved on, but even if the caller put them back, the
     // answer is the same: a retried accept is a second message to somebody who
     // already received one.
-    page.state.queue.unshift('21527289');
+    page.state.queue.unshift('70000001');
     page.render();
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
-    ).rejects.toThrow(/Already sent an accept to 21527289/);
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
+    ).rejects.toThrow(/Already sent an accept to 70000001/);
     expect(page.state.clicks.filter((c) => c.startsWith('Accept application')).length).toBe(1);
   });
 
@@ -896,12 +896,12 @@ describe('the never-retry guard', () => {
     // message may well have gone.
     start({ onSendClick: () => {} });
     await driver.openReviewer();
-    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
-    const settled = expect(pending).rejects.toThrow(/Could not confirm the accept for 21527289/);
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
+    const settled = expect(pending).rejects.toThrow(/Could not confirm the accept for 70000001/);
     await vi.advanceTimersByTimeAsync(15000);
     await settled;
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
     ).rejects.toThrow(/Already sent an accept/);
     expect(page.state.clicks.filter((c) => c.startsWith('Accept application')).length).toBe(1);
   });
@@ -920,7 +920,7 @@ describe('confirming the send', () => {
       },
     });
     await driver.openReviewer();
-    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     const settled = expect(pending).rejects.toThrow(/may or may not have been sent/);
     await vi.advanceTimersByTimeAsync(15000);
     await settled;
@@ -934,7 +934,7 @@ describe('confirming the send', () => {
       },
     });
     await driver.openReviewer();
-    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     const settled = expect(pending).rejects.toThrow(/Nothing was retried/);
     await vi.advanceTimersByTimeAsync(15000);
     await settled;
@@ -953,7 +953,7 @@ describe('confirming the send', () => {
     });
     rerender = page.render;
     await driver.openReviewer();
-    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     await vi.advanceTimersByTimeAsync(5000);
     await expect(pending).resolves.toMatchObject({ accepted: true });
   });
@@ -971,7 +971,7 @@ describe('skipping', () => {
     // all, so the driver sends no keys anywhere, ever.
     expect(page.state.keys).toEqual([]);
     // They stay in the bucket, so M is unchanged and the index rises.
-    expect(next).toEqual({ userId: '21373701', index: 2, total: 3 });
+    expect(next).toEqual({ userId: '70000002', index: 2, total: 3 });
     expect(page.state.rejected).toBe(false);
   });
 
@@ -992,7 +992,7 @@ describe('skipping', () => {
   });
 
   it('reports rather than hanging when the reviewer does not move', async () => {
-    start({ queue: ['21527289'] });
+    start({ queue: ['70000001'] });
     await driver.openReviewer();
     const pending = driver.skipCurrent();
     const settled = expect(pending).rejects.toThrow(/did not move on to the next candidate/);
@@ -1037,7 +1037,7 @@ describe('leaving the page as it was found', () => {
     start();
     await driver.openReviewer();
     const pending = driver.acceptCurrent({
-      expectedUserId: '21527289',
+      expectedUserId: '70000001',
       message: MESSAGE,
       afterPasteMs: 30000,
     });
@@ -1077,7 +1077,7 @@ describe('leaving the page as it was found', () => {
     // teardown becomes the thing that needed tearing down.
     start({ onSendClick: () => {} });
     await driver.openReviewer();
-    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     const settled = pending.catch((e) => e);
     await vi.advanceTimersByTimeAsync(1000);
 
@@ -1143,7 +1143,7 @@ describe('leaving the page as it was found', () => {
       start({ cancelDoesNothing: true, exitDoesNothing: true });
       await driver.openReviewer();
       const accept = driver.acceptCurrent({
-        expectedUserId: '21527289',
+        expectedUserId: '70000001',
         message: MESSAGE,
         afterPasteMs: 30000,
       });
@@ -1209,7 +1209,7 @@ describe('leaving the page as it was found', () => {
     // does not ask that question.
     expect(driver.reachableControls(scope, /^accept$/i).usable.length).toBe(2);
     await expect(
-      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
     ).resolves.toMatchObject({ accepted: true });
   });
 
@@ -1250,7 +1250,7 @@ describe('the accept round trip fitting inside the relay budget', () => {
     start();
     await driver.openReviewer();
     const pending = driver.acceptCurrent({
-      expectedUserId: '21527289',
+      expectedUserId: '70000001',
       message: MESSAGE,
       // Far past what the panel samples, which is the point: the bound is this
       // file's promise about how long it may hold the wire, not a request.
@@ -1298,13 +1298,13 @@ describe('the message handlers', () => {
       source: 'wfx-page',
       id: 'a1',
       ok: true,
-      data: { opened: true, userId: '21527289', index: 1, total: 3 },
+      data: { opened: true, userId: '70000001', index: 1, total: 3 },
     });
     expect(byId('a2')).toEqual({
       source: 'wfx-page',
       id: 'a2',
       ok: true,
-      data: { userId: '21527289', index: 1, total: 3 },
+      data: { userId: '70000001', index: 1, total: 3 },
     });
     expect(answers().length).toBe(2);
 
@@ -1324,7 +1324,7 @@ describe('the message handlers', () => {
       source: 'wfx-cs',
       id: 'b1',
       type: 'ACCEPT_CANDIDATE',
-      payload: { expectedUserId: '21527289', message: 'Hey [first_name]' },
+      payload: { expectedUserId: '70000001', message: 'Hey [first_name]' },
     });
     await vi.advanceTimersByTimeAsync(0);
     const answer = wire.posted.find((m) => m.id === 'b1');

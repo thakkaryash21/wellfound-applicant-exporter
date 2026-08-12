@@ -206,7 +206,7 @@ describe('sendOutcome', () => {
   it('reads the driver s certain refusals as a plain stop', () => {
     for (const reason of [
       'The response composer did not open; nothing was sent',
-      'The reviewer is showing 21373701, not 21527289; nothing was sent',
+      'The reviewer is showing 70000002, not 70000001; nothing was sent',
       'Refusing to send a message with an unsubstituted token; nothing was sent',
       'Refusing to click a reject control (asked for Accept, found "Reject"); nothing was sent',
     ]) {
@@ -217,7 +217,7 @@ describe('sendOutcome', () => {
   it('keeps unclear for the one failure that follows the click', () => {
     expect(
       sendOutcome(
-        'Could not confirm the accept for 21527289. It may or may not have been sent - ' +
+        'Could not confirm the accept for 70000001. It may or may not have been sent - ' +
           'check the candidate in Wellfound before running again. Nothing was retried.',
       ),
     ).toBe('unclear');
@@ -242,7 +242,7 @@ describe('firstNameOf', () => {
 
 describe('resolveFirstName', () => {
   it('prefers the real firstName field over a split of the display name', () => {
-    expect(resolveFirstName({ firstName: 'Amogh', name: 'Dr. Amogh Wyawahare' })).toBe('Amogh');
+    expect(resolveFirstName({ firstName: 'Jane', name: 'Dr. Jane Doe' })).toBe('Jane');
   });
 
   it('falls back to the first word of name when firstName is missing', () => {

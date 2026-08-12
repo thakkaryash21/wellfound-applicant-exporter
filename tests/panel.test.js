@@ -608,7 +608,7 @@ describe('accepting', () => {
     expect(screen.innerHTML).toContain('0 of 12 accepted');
     expect(screen.innerHTML).toContain('4 refused');
 
-    emit({ type: 'accept_considering', jobId: JOB_A, userId: '21527289', index: 1, total: 116 });
+    emit({ type: 'accept_considering', jobId: JOB_A, userId: '70000001', index: 1, total: 116 });
     expect(byId(RUN_IDS.status).textContent).toBe('reading 1 of 116 in the review queue');
 
     emit({ type: 'accept_candidate', jobId: JOB_A, outcome: 'accepted', accepted: 1, intended: 12 });
