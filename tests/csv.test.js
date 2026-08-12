@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { escapeField, toCsv, userIdsFromCsv, CSV_COLUMNS, formatDate } from '../src/lib/csv.js';
-import { RESUME_STATUS } from '../src/lib/csv.js';
+import { RESUME_STATUS, ACCEPT_STATUS, acceptFailure, formatDateTime } from '../src/lib/csv.js';
 import { normalizeNode } from '../src/lib/normalize.js';
 
 describe('escapeField', () => {
@@ -254,5 +254,93 @@ describe('the columns the field run found wrong', () => {
 
   it('has no Headline column, which Wellfound never populates', () => {
     expect(CSV_COLUMNS.map((c) => c.header)).not.toContain('Headline');
+  });
+});
+
+describe('the accept columns', () => {
+  it('appends Accept and Accepted At after every existing column', () => {
+    const headers = CSV_COLUMNS.map((c) => c.header);
+    expect(headers.slice(-2)).toEqual(['Accept', 'Accepted At']);
+    // Nothing already there moved.
+    expect(headers.indexOf('Resume')).toBe(headers.length - 3);
+  });
+
+  it('is a distinct word for every outcome the accept pass can reach', () => {
+    const values = Object.values(ACCEPT_STATUS);
+    expect(new Set(values).size).toBe(values.length);
+  });
+
+  // The refusal this file exists to make loud. Accepting someone with no
+  // captured resume forfeits that resume forever - see
+  // .superpowers/sdd/2026-08-11-wellfound-applicant-exporter/accept-plan.md,
+  // "Accepting is destructive to this extension's data source". The cell must
+  // read as an instruction, not sit blank.
+  describe('the no-resume refusal', () => {
+    it('names the refusal in words a reader can act on, not a blank cell', () => {
+      expect(ACCEPT_STATUS.NO_RESUME).not.toBe('');
+      expect(ACCEPT_STATUS.NO_RESUME.toLowerCase()).toContain('refused');
+      expect(ACCEPT_STATUS.NO_RESUME.toLowerCase()).toContain('resume');
+    });
+
+    it('writes the refusal into the Accept cell of the CSV, never a blank', () => {
+      const row = toCsv([
+        { userId: '999', name: 'No Resume Guy', acceptStatus: ACCEPT_STATUS.NO_RESUME },
+      ]).split('\r\n')[1];
+      expect(row).toContain('refused');
+      // Guards against a blank Accept cell being followed only by an empty
+      // Accepted At cell with no refusal word anywhere on the row.
+      expect(row).not.toMatch(/,,\r?$/);
+    });
+  });
+
+  it('distinguishes accepted this run from accepted on an earlier run', () => {
+    expect(ACCEPT_STATUS.ACCEPTED).not.toBe(ACCEPT_STATUS.ALREADY);
+  });
+
+  it('distinguishes a run that never intended to accept from one that stopped short', () => {
+    expect(ACCEPT_STATUS.NOT_ACCEPTING).not.toBe(ACCEPT_STATUS.NOT_REACHED);
+  });
+
+  it('reports a failed accept with its reason, like the Resume column does', () => {
+    expect(acceptFailure('send never confirmed')).toBe('failed: send never confirmed');
+  });
+
+  it('round-trips accept status and timestamp through the CSV', () => {
+    const csv = toCsv([
+      {
+        userId: '111',
+        name: 'Jane Doe',
+        acceptStatus: ACCEPT_STATUS.ACCEPTED,
+        acceptedAt: '2026-08-12 14:23:55',
+      },
+    ]);
+    const row = csv.split('\r\n')[1];
+    expect(row).toContain('accepted');
+    expect(row).toContain('2026-08-12 14:23:55');
+  });
+});
+
+describe('formatDateTime', () => {
+  it('keeps local prose from the ledger as it stands', () => {
+    expect(formatDateTime('2026-08-12 14:23:55')).toBe('2026-08-12 14:23:55');
+  });
+
+  it('is empty for null, undefined and blank', () => {
+    expect(formatDateTime(null)).toBe('');
+    expect(formatDateTime(undefined)).toBe('');
+    expect(formatDateTime('')).toBe('');
+  });
+
+  it('never renders a raw Unix timestamp - the defect this project already shipped once', () => {
+    const text = formatDateTime(1786465883);
+    expect(text).not.toBe('1786465883');
+    expect(text).toContain('2026-08-11');
+    expect(text).toMatch(/\d{2}:\d{2}:\d{2}/);
+  });
+
+  it('reads an ISO instant on the reader’s clock, with a time attached', () => {
+    const text = formatDateTime('2026-08-12T02:23:55.586Z');
+    expect(text).toContain('2026-08-11');
+    expect(text).toMatch(/\d{2}:\d{2}:\d{2}/);
   });
 });

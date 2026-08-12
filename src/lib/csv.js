@@ -1,4 +1,4 @@
-import { localDateStamp } from './local-time.js';
+import { localDateStamp, localDateTimeText } from './local-time.js';
 
 // The run that writes the CSV and downloads nothing had five names: `dryRun`
 // in the options, `'dry-run'` as an outcome key and a trace kind, "Preview
@@ -23,6 +23,40 @@ export const RESUME_STATUS = {
   PREVIEW: PREVIEW,
   NOT_REACHED: 'not fetched: the run stopped first',
 };
+
+// Every value the Accept column can hold. Accepting is irreversible and, per
+// DESIGN, it also removes the candidate from the only query this extension has
+// - so this column carries more weight than any status word above it, and it
+// must never collapse distinct causes into one "skipped" cell. Declared here
+// for the same reason RESUME_STATUS is: this file owns the column, the runner
+// only ever writes one of these exact strings.
+export const ACCEPT_STATUS = {
+  // Sent this run, message and all.
+  ACCEPTED: 'accepted',
+  // Sent on an earlier run - the ledger already had them before this run began.
+  ALREADY: 'already accepted',
+  // This run never intended to accept anyone. Distinct from NOT_REACHED: this
+  // is a mode the operator chose, not a limit the run hit.
+  NOT_ACCEPTING: 'not attempted: this run was not accepting',
+  // The run was accepting, but stopped (a limit, an abort) before reaching
+  // this candidate. Mirrors RESUME_STATUS.NOT_REACHED in wording on purpose:
+  // the same idea, the same words, in the other column.
+  NOT_REACHED: 'not attempted: the run stopped first',
+  // The refusal this file exists to make visible. Accepting someone with no
+  // captured resume would forfeit that resume forever, because they leave
+  // NEEDS_REVIEW and can never be fetched again. The run declines, and the
+  // cell says exactly why rather than sitting blank.
+  NO_RESUME: 'refused: no resume on file, accepting would lose them for good',
+};
+
+// `failed: <reason>` for an accept the run attempted and Wellfound (or the
+// driver) could not complete - the identity interlock aborting, the reviewer
+// never opening, a send that never confirmed. Mirrors the free-form
+// `failed: ...` cells the Resume column already writes, so one convention
+// covers both columns instead of two.
+export function acceptFailure(reason) {
+  return `failed: ${reason}`;
+}
 
 // Wellfound sends Unix seconds (1786465883). The raw integer is meaningless in a
 // spreadsheet, so the CSV carries a date and only a date - `YYYY-MM-DD`, because
@@ -54,6 +88,34 @@ export function formatDate(value) {
   return localDateStamp(date);
 }
 
+// The accept timestamp's sibling to formatDate: same recognition of a bare
+// date, an ISO instant, or a Unix stamp in seconds or milliseconds, but
+// rendered with a time on the reader's own clock rather than truncated to a
+// day. This project has already shipped a raw Unix timestamp into a CSV once;
+// the ledger's own acceptedAt is already local text, but nothing stops a raw
+// stamp from reaching this cell some other way, so the column formats
+// defensively rather than trusting its caller.
+export function formatDateTime(value) {
+  if (value === null || value === undefined || value === '') return '';
+  if (typeof value === 'string') {
+    // Already local prose (what the ledger stores, e.g. "2026-08-12
+    // 14:23:55") - nothing to convert, so it is taken as it stands.
+    if (/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value)) return value;
+    if (/^\d{4}-\d{2}-\d{2}[T ]/.test(value)) {
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? '' : localDateTimeText(parsed);
+    }
+    const bare = value.match(/^(\d{4}-\d{2}-\d{2})$/);
+    if (bare) return bare[1];
+  }
+  const n = Number(value);
+  if (!Number.isFinite(n)) return '';
+  const ms = Math.abs(n) < MS_THRESHOLD ? n * 1000 : n;
+  const date = new Date(ms);
+  if (Number.isNaN(date.getTime())) return '';
+  return localDateTimeText(date);
+}
+
 // `format` turns a stored value into the cell a reader sees. Presentation lives
 // here because this module owns the file's shape; the record keeps the raw value.
 export const CSV_COLUMNS = [
@@ -74,6 +136,10 @@ export const CSV_COLUMNS = [
   // Why the filename cell is blank. Without this, "fetched on an earlier run"
   // and "never fetched" are the same empty cell.
   { key: 'resumeStatus', header: 'Resume' },
+  // Appended, not interleaved: an existing CSV opened after this change must
+  // still find every prior column exactly where it was.
+  { key: 'acceptStatus', header: 'Accept' },
+  { key: 'acceptedAt', header: 'Accepted At', format: formatDateTime },
 ];
 
 const BOM = '\ufeff';
