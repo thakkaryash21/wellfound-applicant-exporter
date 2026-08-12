@@ -25,12 +25,23 @@ import { localDateTimeText } from '../lib/local-time.js';
 // NEEDS_REVIEW and no query this extension has can ever reach them again.
 const CAPTURED = new Set([RESUME_STATUS.DOWNLOADED, RESUME_STATUS.ALREADY]);
 
-// `[first_name]` is a greeting, not an identity: the record carries one `name`
-// field and the first whitespace-separated word of it is what a human would
-// type. An empty result is fine - composeMessage drops the name and keeps the
-// comma rather than skipping the candidate.
+// `[first_name]` is a greeting, not an identity: splitting `name` on
+// whitespace is a guess, wrong for a title, a mononym, or family-name-first
+// order. It exists only as a fallback for the rare record where Wellfound's
+// own `firstName` field is missing. An empty result is fine - composeMessage
+// drops the name and keeps the comma rather than skipping the candidate.
 export function firstNameOf(name) {
   return String(name ?? '').trim().split(/\s+/)[0] ?? '';
+}
+
+// Preference order: the field Wellfound sends, then the first word of the
+// display name, then nothing. Never the reverse - a split guess must never
+// override the real field, because the real field is what the candidate
+// actually typed as their first name.
+export function resolveFirstName(record) {
+  const real = String(record?.firstName ?? '').trim();
+  if (real) return real;
+  return firstNameOf(record?.name);
 }
 
 // Who this pass will try, who it refuses and why - decided before a single
@@ -204,7 +215,7 @@ export async function runAcceptPass(deps, options) {
       try {
         message = composeMessage({
           template,
-          firstName: firstNameOf(plan.rowsById.get(userId)?.[0]?.name),
+          firstName: resolveFirstName(plan.rowsById.get(userId)?.[0]),
           roleName: jobTitle,
         });
       } catch (composeError) {

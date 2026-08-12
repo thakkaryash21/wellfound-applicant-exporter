@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { runAcceptPass, planAccepts, firstNameOf } from '../src/panel/accept-pass.js';
+import { runAcceptPass, planAccepts, firstNameOf, resolveFirstName } from '../src/panel/accept-pass.js';
 import { ACCEPT_STATUS, RESUME_STATUS } from '../src/lib/csv.js';
 import { CX } from '../src/lib/messages.js';
 
@@ -128,6 +128,26 @@ describe('firstNameOf', () => {
   it('takes the first word, and nothing at all from an empty name', () => {
     expect(firstNameOf('Jane Q. Doe')).toBe('Jane');
     expect(firstNameOf(null)).toBe('');
+  });
+});
+
+describe('resolveFirstName', () => {
+  it('prefers the real firstName field over a split of the display name', () => {
+    expect(resolveFirstName({ firstName: 'Amogh', name: 'Dr. Amogh Wyawahare' })).toBe('Amogh');
+  });
+
+  it('falls back to the first word of name when firstName is missing', () => {
+    expect(resolveFirstName({ firstName: null, name: 'Jane Q. Doe' })).toBe('Jane');
+    expect(resolveFirstName({ name: 'Jane Q. Doe' })).toBe('Jane');
+  });
+
+  it('falls back to the first word of name when firstName is empty', () => {
+    expect(resolveFirstName({ firstName: '   ', name: 'Jane Q. Doe' })).toBe('Jane');
+  });
+
+  it('yields nothing when both firstName and name are missing', () => {
+    expect(resolveFirstName({ firstName: null, name: null })).toBe('');
+    expect(resolveFirstName(undefined)).toBe('');
   });
 });
 

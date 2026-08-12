@@ -134,6 +134,16 @@ describe('normalizeNode', () => {
     expect('headline' in normalizeNode(node(), ctx)).toBe(false);
   });
 
+  it('reads firstName as the field Wellfound returns directly', () => {
+    const out = normalizeNode(node({ candidate: { firstName: 'Jane' } }), ctx);
+    expect(out.firstName).toBe('Jane');
+  });
+
+  it('is null when Wellfound omits firstName, not a derived guess', () => {
+    const out = normalizeNode(node(), ctx);
+    expect(out.firstName).toBe(null);
+  });
+
   it('starts resumeFilename empty for the runner to fill in', () => {
     expect(normalizeNode(node(), ctx).resumeFilename).toBe(null);
   });

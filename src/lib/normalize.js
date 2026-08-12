@@ -39,6 +39,11 @@ export function normalizeNode(node, ctx) {
     applicantId: node?.id ?? null,
     userId: c.userId != null ? String(c.userId) : null,
     name: c.name ?? null,
+    // Wellfound returns this directly, confirmed present and non-null on 12 of
+    // 12 sampled applicants. Splitting `name` is a guess - wrong for a title,
+    // a mononym, or family-name-first order - so the real field is carried
+    // through and callers prefer it over deriving one themselves.
+    firstName: c.firstName ?? null,
     // `headline` is deliberately absent: Wellfound returns null for it on every
     // applicant sampled, and a column empty in every row of every export is
     // noise in the artifact.
