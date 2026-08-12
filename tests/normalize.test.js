@@ -10,8 +10,10 @@ const ctx = { jobId: '9100001', jobTitle: 'Backend Engineer' };
 //     production always takes.
 //   - currentLocation is an object. It used to be a bare string, so
 //     locationName() was never exercised through normalizeNode at all.
-// userId's raw type was never observed - every probe coerced it - so it is
-// covered in both shapes below rather than asserted as one.
+// userId is a string on the wire, confirmed 2026-08-12. Both shapes are still
+// covered below: the `String()` coercion is what makes dedup's Set agree with
+// reconcile's filename parsing, and a schema returning a string today can
+// return a number tomorrow.
 function node(overrides = {}) {
   return {
     id: 'JP7700001',

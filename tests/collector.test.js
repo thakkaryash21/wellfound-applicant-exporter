@@ -44,14 +44,17 @@ describe('unwrapPage', () => {
     const { unwrapPage } = load();
     const page = unwrapPage(
       capturedResponse({
-        nodes: [applicantNode({ userId: 9100001 }), applicantNode({ userId: 9100002 })],
+        nodes: [applicantNode({ userId: '9100001' }), applicantNode({ userId: '9100002' })],
       }),
     );
     // The regression this exists for: if the unwrap is dropped, every element
     // is `{ __typename, node }`, normalize reads userId: null for everyone, and
     // the run downloads nothing while reporting success.
     expect(page.edges).toHaveLength(2);
-    expect(page.edges.map((n) => n.recruitCandidate.userId)).toEqual([9100001, 9100002]);
+    expect(page.edges.map((n) => n.recruitCandidate.candidate.userId)).toEqual([
+      '9100001',
+      '9100002',
+    ]);
     expect(page.edges.every((n) => !('node' in n))).toBe(true);
   });
 
@@ -279,7 +282,7 @@ describe('the page-side message boundary', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     const reply = page.posted.find((m) => m.id === 'wfx-1');
     expect(reply).toMatchObject({ source: 'wfx-page', ok: true });
-    expect(reply.data.edges[0].recruitCandidate.name).toBe('Jane Doe');
+    expect(reply.data.edges[0].recruitCandidate.candidate.name).toBe('Jane Doe');
   });
 
   it('answers a failure as a message rather than leaving the caller waiting', async () => {

@@ -6,25 +6,43 @@
 // with `pageInfo` nested under `applicants`. Every other fixture in this suite
 // supplies the already-flattened result, which is why `edges.map(e => e.node)`
 // has never once been executed by a test.
+//
+// The candidate fields sit under `recruitCandidate.candidate`, one level below
+// `recruitCandidate`, which is what `normalize.js` reads. An earlier version of
+// this file flattened that level away and so returned null for every field it
+// claimed to prove. `tests/captured-shape-e2e.test.js` walks this fixture all
+// the way to the CSV precisely so that mistake cannot come back.
 
 export const OP_NAME = 'RecruitJobListingApplicants';
 
-export function applicantNode({ userId = 9100001, name = 'Jane Doe' } = {}) {
+// `userId` defaults to a string because that is what the wire sends. Callers
+// pass a number where the point is the `String()` coercion in normalize.js.
+export function applicantNode({ userId = '9100001', name = 'Jane Doe' } = {}) {
   return {
     __typename: 'Applicant',
     id: `applicant-${userId}`,
     recruitCandidate: {
       __typename: 'RecruitCandidate',
-      userId,
-      name,
-      headline: null,
-      resumeUrl: `/link/${userId}/tok/resume_url`,
-      currentLocation: {
-        __typename: 'Location',
-        id: 'loc-1',
-        name: 'Remote',
-        country: 'US',
-        state: null,
+      id: `rc-${userId}`,
+      removal: null,
+      candidate: {
+        __typename: 'Candidate',
+        id: `cand-${userId}`,
+        candidateId: `cand-${userId}`,
+        jobProfileId: `jp-${userId}`,
+        userId,
+        name,
+        firstName: String(name).split(' ')[0],
+        avatar: `/link/${userId}/tok/avatar`,
+        headline: null,
+        resumeUrl: `/link/${userId}/tok/resume_url`,
+        currentLocation: {
+          __typename: 'Location',
+          id: 'loc-1',
+          name: 'Remote',
+          country: 'US',
+          state: null,
+        },
       },
     },
     currentApplication: { __typename: 'Application', id: 'app-1', submittedAt: 1786465883 },
