@@ -1,6 +1,7 @@
 import { runJob, runActions } from '../lib/runner.js';
 import { toCsv, PREVIEW, ACCEPT_STATUS } from '../lib/csv.js';
-import { sleep as realSleep } from '../lib/jitter.js';
+import { PACING, sample, sleep as realSleep } from '../lib/jitter.js';
+import { normalizeNode } from '../lib/normalize.js';
 import { CX } from '../lib/messages.js';
 import { createTrace, scrubVariables } from '../lib/trace.js';
 import { localDateStamp } from '../lib/local-time.js';
@@ -26,6 +27,18 @@ const REDOWNLOAD_PAGE_CAP = 40;
 // The same page size a normal, non-"Faster" run asks for, so a re-download's
 // requests are indistinguishable from an ordinary one's.
 const REDOWNLOAD_PAGE_SIZE = 10;
+
+// The bucket the whole extension reads. The status enum is exactly
+// NEEDS_REVIEW, REJECTED and SHORTLISTED - there is no ACCEPTED - so the only
+// question the API can answer about an accept is whether the candidate has left
+// this collection. Nothing can positively confirm one.
+const REVIEW_BUCKET = 'NEEDS_REVIEW';
+// The queue check pages like a re-download does, at the same size and under a
+// cap, for the same reasons: its requests must look like every other one this
+// extension makes, and a walk with no stop of its own would keep asking for
+// pages a very large role would keep handing it.
+const QUEUE_CHECK_PAGE_SIZE = 10;
+const QUEUE_CHECK_PAGE_CAP = 40;
 
 // `sleep` is a seam, not a setting: the panel never passes one, so the shipped
 // extension always paces itself. A test supplies an instant one so that walking
@@ -101,6 +114,17 @@ export function createController({
         outcome: event.outcome,
         error: event.error,
       });
+    // The ambiguous path, in two entries rather than one: a send the page never
+    // confirmed, and then what the queue said about it. Both belong in the
+    // trace whatever the answer was - a run that resolved an unconfirmed send
+    // by itself must still leave a record that one happened, because the
+    // hypothesis about why they happen is not yet a fact.
+    else if (event.type === 'accept_unconfirmed')
+      trace.record('accept_unconfirmed', { jobId, userId: event.userId, error: event.error });
+    else if (event.type === 'accept_checked')
+      trace.record('accept_checked', { jobId, userId: event.userId, outcome: event.verdict });
+    else if (event.type === 'accept_reopen')
+      trace.record('accept_reopen', { jobId, count: event.accepted });
     else if (event.type === 'accept_done')
       trace.record('accept_done', {
         jobId,
@@ -162,6 +186,53 @@ export function createController({
       });
       throw error;
     }
+  }
+
+  // Is this person still in the review queue?
+  //
+  // Asked by the accept pass, and only when a send was clicked and the page
+  // never confirmed it. The extension is not out of options at that moment: it
+  // already reads an authoritative list, and an accepted candidate leaves it. So
+  // rather than reporting a shrug it establishes the fact.
+  //
+  // 'gone' is the whole of the evidence available and it is one-directional: no
+  // query can positively confirm an accept, because there is no ACCEPTED status
+  // to ask for. Absence is not infinite evidence either - a candidate could
+  // leave NEEDS_REVIEW for another reason - but over the seconds between the
+  // click and this walk the only other ways out are a human acting on the same
+  // queue by hand at that moment, or the application expiring in that window.
+  // And the direction of the remaining error is the safe one: a wrong 'gone'
+  // books somebody as accepted who was not, costing them a message, where the
+  // failure this replaces cost a run and mislabelled somebody who WAS messaged.
+  // Nothing here can ever cause a second message; only the ledger grows.
+  //
+  // Anything short of a complete walk of the collection is 'unknown', including
+  // a page that came back from some other bucket than the one this reads.
+  async function queueCheck(tabId, jobId, userId) {
+    const wanted = String(userId);
+    let after = null;
+    for (let page = 0; page < QUEUE_CHECK_PAGE_CAP; page += 1) {
+      const result = await tracedFetch(tabId, {
+        jobId,
+        pageSize: QUEUE_CHECK_PAGE_SIZE,
+        after,
+      });
+      // The walk copies whatever bucket the recruiter has open rather than
+      // forcing one, so it can legitimately be looking at REJECTED. Absence
+      // from a bucket this function did not mean to read says nothing at all.
+      if (result.bucket !== REVIEW_BUCKET) return 'unknown';
+      for (const node of result.edges ?? []) {
+        if (normalizeNode(node, { jobId }).userId === wanted) return 'queued';
+      }
+      if (!result.hasNextPage) return 'gone';
+      after = result.endCursor;
+      const ms = sample(PACING.downloadMs[0], PACING.downloadMs[1]);
+      emit({ type: 'resting', jobId, ms });
+      await sleep(ms);
+    }
+    // The cap, with pages still to come. The person was not on any page walked,
+    // but the collection was not exhausted, so nothing has been established.
+    return 'unknown';
   }
 
   async function writeCsv(jobId, records, folder) {
@@ -418,6 +489,10 @@ export function createController({
               {
                 review: (message) => tabs.ask(tab.id, message),
                 recordAccepted: (id, userId) => ledgerService.recordAccepted(id, userId),
+                // The way out of an unconfirmed send. It is the same tab and
+                // the same query pass 1 walked - there is no second Apollo
+                // caller - and the pass calls it only on the ambiguous path.
+                checkQueue: (userId) => queueCheck(tab.id, jobId, userId),
                 sleep,
                 emit,
               },

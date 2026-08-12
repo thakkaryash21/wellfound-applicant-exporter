@@ -187,12 +187,47 @@ export function planAccepts({ records = [], alreadyAccepted = [], limit = Infini
   return { targets: capped, rowsById, refusedNoResume, alreadyAccepted: alreadyCount };
 }
 
+// How many accepts this pass will make before it closes the reviewer and opens
+// it again.
+//
+// Measured, once, on a real run: the first two accepts confirmed and the third
+// did not. An accepted candidate is not removed from the applicant list right
+// away - their card is replaced in place by a row reading "<Name>'s application
+// was accepted", and the operator confirmed a reload clears those rows. So they
+// are transient page state that accumulates one per accept within a session,
+// and the completion signal (the shown id changes AND the total decrements)
+// reads a structure that is drifting underneath it.
+//
+// That is a hypothesis, not a fact: producing the post-accept reviewer DOM to
+// look at costs a real, irreversible message to a real person, so nobody has
+// seen it. The number below is therefore set from the only evidence there is -
+// two accepts worked, the third did not - rather than from a model of why. Two
+// is deliberately pessimistic. Reopening costs a close, a pause and a click; a
+// false negative costs the run.
+const REOPEN_EVERY = 2;
+
+// How many times one pass will fall back to the API to settle an unconfirmed
+// send. The check pages the whole NEEDS_REVIEW collection for the job, so it is
+// far and away the most expensive thing this pass can do, and it must never
+// become something a pass does per candidate. One is enough for the failure
+// that was actually observed - a single accept whose confirmation never
+// arrived - and a pass that produces a second one is a pass whose page state is
+// beyond what this module can reason about, which is exactly what `unclear` is
+// for.
+const QUEUE_CHECKS_PER_PASS = 1;
+
 // `review` is one call into the reviewer driver, `recordAccepted` is the
 // ledger write, and both are injected for the same reason the download walk
 // injects its own: this loop is the part worth testing, and neither a real tab
 // nor a real message may be involved in testing it.
+//
+// `checkQueue` is the third, and it is the only one that is optional: a caller
+// that cannot ask the API gets exactly the behaviour this pass had before it
+// existed. It answers 'gone', 'queued' or 'unknown' for one userId, and it is
+// never given the chance to answer anything about a send that was refused
+// before the click.
 export async function runAcceptPass(deps, options) {
-  const { review, recordAccepted, sleep, emit } = deps;
+  const { review, recordAccepted, sleep, emit, checkQueue } = deps;
   const rand = deps.rand ?? Math.random;
   const {
     jobId,
@@ -322,6 +357,42 @@ export async function runAcceptPass(deps, options) {
     return finish();
   }
 
+  // The two counters the reopen runs on. `acceptsSinceOpen` is the ordinary
+  // rhythm; `reopenPending` is the recovery, set when a send had to be settled
+  // by the API - at that point the page has DEMONSTRATED that its confirmation
+  // signal no longer reads, and carrying on against it would be trusting a
+  // structure that has already been wrong once.
+  let acceptsSinceOpen = 0;
+  let reopenPending = false;
+  let queueChecksLeft = QUEUE_CHECKS_PER_PASS;
+
+  // A reopen lands the reviewer back at position 1 and undoes every skip this
+  // pass has made, so a pass that has skipped anybody would walk those people
+  // again - re-reading them, re-skipping them, and counting the skips twice.
+  // The everyone case, which is the case the drift was observed in and the case
+  // an accept-only run over a whole role always is, skips nobody and reopening
+  // there costs nothing but the pause. A subset run keeps the behaviour it had.
+  const mayReopen = () => totals.skipped === 0;
+
+  // Close and open again, which is the state the confirmation signal was
+  // measured working in: a fresh reviewer over a freshly rendered list. It is
+  // paced like everything else - a close, a pause of the same length the pass
+  // takes between candidates, then the click - because a person navigating away
+  // and back does not do it instantly, and the pass must not read differently
+  // from one.
+  //
+  // It reads nothing back and assumes nothing about who is there. The loop's
+  // next act is READ_CANDIDATE, which is the only thing that decides who is on
+  // screen, so a reopen cannot step over anybody.
+  const reopen = async () => {
+    emit({ type: 'accept_reopen', jobId, accepted: totals.accepted, intended });
+    await review({ type: CX_CLOSE_REVIEWER });
+    await pace();
+    await review({ type: CX.OPEN_REVIEWER });
+    acceptsSinceOpen = 0;
+    reopenPending = false;
+  };
+
   try {
     touchedReviewer = true;
     await review({ type: CX.OPEN_REVIEWER });
@@ -330,6 +401,10 @@ export async function runAcceptPass(deps, options) {
       if (signal?.aborted) {
         stoppedBecause = 'aborted';
         break;
+      }
+
+      if (mayReopen() && (reopenPending || acceptsSinceOpen >= REOPEN_EVERY)) {
+        await reopen();
       }
 
       const at = await review({ type: CX.READ_CANDIDATE });
@@ -394,16 +469,59 @@ export async function runAcceptPass(deps, options) {
           },
         });
       } catch (sendError) {
-        // Either way the pass stops here. It is never retried and never
-        // followed by a skip: if the message may have gone out, a second one is
-        // a second message to a real person; and if the driver refused before
-        // clicking, whatever made it refuse is likely to refuse for the next
-        // person too.
+        // Nothing is ever retried here. The whole of what follows is about
+        // LEARNING what happened, never about trying again: the send has either
+        // gone out or it has not, and a second click would be a second message
+        // to a real person.
         //
-        // What differs is what the operator is told. The driver knows which of
-        // the two happened and says so; the panel used to flatten both into the
-        // alarming one.
+        // What differs is what the operator is told. The driver knows whether
+        // it refused before clicking and says so; the panel used to flatten
+        // both cases into the alarming one.
         const reason = String(sendError.message || sendError);
+
+        // The one case worth another question. `error` means the driver refused
+        // BEFORE the click - certain, nothing went out, and asking the API
+        // about it could only produce a wrong answer. `unclear` means the click
+        // happened and the DOM never confirmed it, which is the case the API
+        // can settle.
+        if (sendOutcome(reason) === 'unclear' && checkQueue && queueChecksLeft > 0) {
+          queueChecksLeft -= 1;
+          emit({ type: 'accept_unconfirmed', jobId, userId, error: reason });
+          // Its failure is an answer, not an exception: a check that cannot
+          // reach the API has learnt nothing, which is the same position the
+          // pass was in before it asked.
+          let verdict = 'unknown';
+          try {
+            verdict = String((await checkQueue(userId)) ?? 'unknown');
+          } catch {
+            verdict = 'unknown';
+          }
+          emit({ type: 'accept_checked', jobId, userId, verdict });
+          if (verdict === 'gone') {
+            // They are not in NEEDS_REVIEW any more, and the click that would
+            // remove them from it is the one this pass just made. The send
+            // landed. Booked exactly as a confirmed one - ledger first, so a
+            // later run cannot message them again - and the pass carries on.
+            //
+            // The page's confirmation signal has just been wrong, so the
+            // reviewer is reopened before the next candidate rather than
+            // trusted for a second one.
+            await recordAccepted(jobId, userId);
+            remaining.delete(userId);
+            mark(userId, ACCEPT_STATUS.ACCEPTED, localDateTimeText());
+            totals.accepted += 1;
+            emitCandidate(userId, 'accepted', { confirmedBy: 'queue' });
+            reopenPending = true;
+            await pace();
+            continue;
+          }
+        }
+
+        // Still queued, never asked, or asked and unanswerable. The pass stops
+        // here and is never followed by a skip either: if the message may have
+        // gone out, advancing past them loses the fact; and if the driver
+        // refused before clicking, whatever made it refuse is likely to refuse
+        // for the next person too.
         mark(userId, acceptFailure(reason));
         totals.failed += 1;
         emitCandidate(userId, 'failed', { error: reason });
@@ -419,6 +537,7 @@ export async function runAcceptPass(deps, options) {
       remaining.delete(userId);
       mark(userId, ACCEPT_STATUS.ACCEPTED, acceptedAt);
       totals.accepted += 1;
+      acceptsSinceOpen += 1;
       emitCandidate(userId, 'accepted');
 
       // No skip here, ever. A confirmed accept has already auto-advanced -
