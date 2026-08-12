@@ -28,9 +28,24 @@ function fakePage({
   // see in the modal. A queue, as measured live - an accept removes the
   // candidate and holds the index, a skip advances the index.
   bucketByJob = null,
+  // The failure the operator hit on a real run: one accept whose DOM
+  // confirmation never arrived. `landed` says whether the message actually went
+  // out - which is the whole question, and the reason the driver cannot answer
+  // it. On the real run it had gone out.
+  //
+  // Nothing here is a model of WHY the confirmation was missed. The
+  // post-accept reviewer DOM has never been seen, because producing it costs a
+  // real message to a real person, so this fake asserts nothing about markup:
+  // it reproduces only what was measured from outside - the send succeeded and
+  // the driver reported that it could not tell.
+  unconfirmed = null,
 }) {
   const calls = { fetches: [], listJobs: 0, reviewer: [] };
   const buckets = new Map();
+  // People the API no longer returns, because they were accepted. Accepting
+  // removes a candidate from NEEDS_REVIEW, which is the only fact any query can
+  // establish about an accept - there is no ACCEPTED status to ask for.
+  const leftTheQueue = new Set();
   const positions = new Map();
   const bucketFor = (jobId) => {
     if (!buckets.has(jobId)) buckets.set(jobId, (bucketByJob?.[jobId] ?? []).map(String));
@@ -54,14 +69,20 @@ function fakePage({
     if (message.type === CX.FETCH_PAGE) {
       const { pageSize, after } = message.payload;
       calls.fetches.push(message.payload);
-      const roster = peopleByJob?.[message.payload.jobId] ?? people;
+      const roster = (peopleByJob?.[message.payload.jobId] ?? people).filter(
+        (p) => !leftTheQueue.has(String(p.userId)),
+      );
       const start = after ? Number(after) : 0;
       const slice = roster.slice(start, start + pageSize);
       return {
         ok: true,
         data: {
           jobTitle,
-          bucket: 'IN_REVIEW',
+          // The measured value. The status enum is exactly NEEDS_REVIEW,
+          // REJECTED and SHORTLISTED, and this is the one the extension walks;
+          // the queue check refuses to conclude anything from a page that came
+          // back from a different bucket, so the fake has to send the real one.
+          bucket: 'NEEDS_REVIEW',
           // Wellfound's shapes, confirmed live: submittedAt a number of Unix
           // seconds, currentLocation an object. Both used to be pre-flattened
           // here, which meant this end-to-end suite never crossed formatDate's
@@ -99,6 +120,15 @@ function fakePage({
     // The reviewer, which is positional and knows nothing about jobs: it acts
     // on whatever the tab is showing, so the job comes from the URL exactly as
     // the readiness probe's does.
+    // Teardown, answered whether or not anything is open, exactly as the real
+    // driver answers it. It is logged with the rest so a test can see where the
+    // pass closed the reviewer - including the reopens it makes mid-pass, which
+    // is a close and an open around a pause rather than a new kind of message.
+    if (message.type === CX.CLOSE_REVIEWER) {
+      const jobId = String(context?.tab?.url ?? '').match(/jobs\/(\d+)/)?.[1] ?? null;
+      calls.reviewer.push({ jobId, type: message.type });
+      return { ok: true, data: { cancelled: false, closed: true, notes: [] } };
+    }
     const reviewerTypes = [
       CX.OPEN_REVIEWER,
       CX.READ_CANDIDATE,
@@ -124,7 +154,24 @@ function fakePage({
         if (!here || here.userId !== String(message.payload.expectedUserId)) {
           return { ok: false, error: `The reviewer is showing ${here?.userId}` };
         }
+        if (unconfirmed && String(unconfirmed.userId) === here.userId) {
+          // The send either landed or it did not; either way the driver says
+          // the same thing, word for word as src/content/reviewer.js writes it.
+          // Note what is missing from it: the `nothing was sent` phrase. That
+          // absence is what marks the outcome as one nobody can vouch for.
+          if (unconfirmed.landed) {
+            queue.splice((positions.get(jobId) ?? 1) - 1, 1);
+            leftTheQueue.add(here.userId);
+          }
+          return {
+            ok: false,
+            error:
+              `Could not confirm the accept for ${here.userId}. It may or may not have been ` +
+              'sent - check the candidate in Wellfound before running again. Nothing was retried.',
+          };
+        }
         queue.splice((positions.get(jobId) ?? 1) - 1, 1);
+        leftTheQueue.add(here.userId);
         return { ok: true, data: { userId: here.userId, accepted: true, next: at() } };
       }
       const now = at();
@@ -163,8 +210,9 @@ function setup({
   peopleByJob = null,
   actionableCount = null,
   bucketByJob = null,
+  unconfirmed = null,
 } = {}) {
-  const page = fakePage({ people, jobs, peopleByJob, actionableCount, bucketByJob });
+  const page = fakePage({ people, jobs, peopleByJob, actionableCount, bucketByJob, unconfirmed });
   fake = installFakeChrome({ tabs: [{ id: TAB, url: tabUrl }], pages: { [TAB]: page }, storage });
   return page;
 }
@@ -1375,6 +1423,89 @@ describe('the accept pass', () => {
   // reads as captured and acceptable. The one control the operator has over an
   // irreversible action did nothing at all - a limit of 3 sent a message to
   // everybody.
+  // The defect, as it happened. An operator ran an accept-only pass over a real
+  // role; two accepts confirmed, the third did not, and the pass stopped and
+  // sent them to Wellfound to check. The message HAD been sent - the role's
+  // queue had dropped by three and all three were gone from it - so the run was
+  // lost and the CSV recorded `failed` for somebody who had been messaged.
+  //
+  // The extension was not actually out of options at that moment: it already
+  // reads the authoritative list, and an accepted candidate leaves it.
+  describe('a send the page never confirmed', () => {
+    const ROSTER = ['7700001', '7700002', '7700003'];
+
+    async function runWith(unconfirmed) {
+      setup({
+        people: ROSTER.map((id) => person(id)),
+        bucketByJob: { [JOB]: ROSTER },
+        unconfirmed,
+      });
+      const controller = await controllerFor();
+      await acceptRun(controller, { pageSize: 10 });
+      return controller;
+    }
+
+    const sendsTo = (userId) =>
+      fake.calls.sendMessage.filter(
+        (call) =>
+          call.message.type === CX.ACCEPT_CANDIDATE &&
+          String(call.message.payload.expectedUserId) === userId,
+      ).length;
+
+    describe('when the queue says they are gone', () => {
+      // Absence from NEEDS_REVIEW is the only evidence available - there is no
+      // ACCEPTED status to query - and here it is decisive: the click happened
+      // and they are no longer in the collection the click removes people from.
+      it('books the accept, keeps going, and never sends a second message', async () => {
+        await runWith({ userId: '7700003', landed: true });
+
+        const done = events.find((e) => e.type === 'done');
+        expect(done).toMatchObject({ accepted: 3, acceptFailed: 0 });
+        // Not `unclear`. That word is the one thing that sends the operator to
+        // Wellfound, and this run settled the question by itself.
+        expect(done.jobs[0].acceptStoppedBecause).toBe('finished');
+        // In the ledger, so no later run can message them again.
+        expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(ROSTER);
+        // And in the CSV, which for an accepted candidate is the only
+        // surviving record of what happened to them.
+        const csv = await objectUrls[0].text();
+        expect(csv.match(/,accepted,/g)).toHaveLength(3);
+        // The rule nothing may ever break, asserted at the level that would
+        // show a second real message: one click each.
+        for (const id of ROSTER) expect(sendsTo(id)).toBe(1);
+      });
+
+      // A run that stopped had a symptom the operator could see. One that
+      // recovers must leave the same evidence behind, because why the
+      // confirmation was missed is still a hypothesis.
+      it('leaves both the unconfirmed send and the answer in the trace', async () => {
+        const controller = await runWith({ userId: '7700003', landed: true });
+        const text = traceText(controller.trace.entries());
+        expect(text).toContain('accept_unconfirmed');
+        expect(text).toContain('accept_checked');
+        expect(text).toContain('gone');
+      });
+    });
+
+    describe('when the queue still shows them', () => {
+      // The counterpart, and the reason the check is worth making at all: it
+      // has to be capable of the other answer. Nothing was established, so the
+      // outcome is exactly what it was before - unclear, stop, go and look.
+      it('stops, says unclear, and never sends a second message', async () => {
+        await runWith({ userId: '7700003', landed: false });
+
+        const done = events.find((e) => e.type === 'done');
+        expect(done).toMatchObject({ accepted: 2, acceptFailed: 1 });
+        expect(done.jobs[0].acceptStoppedBecause).toBe('unclear');
+        // Booked as neither accepted nor safe to retry.
+        expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(['7700001', '7700002']);
+        const csv = await objectUrls[0].text();
+        expect(csv).toContain('failed: Could not confirm the accept for 7700003');
+        expect(sendsTo('7700003')).toBe(1);
+      });
+    });
+  });
+
   describe('accept-only over a role that is already downloaded', () => {
     const ROSTER = Array.from({ length: 12 }, (_, i) => String(7700001 + i));
 

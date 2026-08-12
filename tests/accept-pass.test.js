@@ -6,6 +6,7 @@ import {
   firstNameOf,
   resolveFirstName,
   sendOutcome,
+  NOTHING_SENT,
   CX_CLOSE_REVIEWER,
 } from '../src/panel/accept-pass.js';
 import { ACCEPT_STATUS, RESUME_STATUS } from '../src/lib/csv.js';
@@ -19,7 +20,20 @@ const JOB = '9100001';
 // leaves the index alone (1 of 116 -> 1 of 115); a skip advances the index and
 // leaves the total alone (1 of 115 -> 2 of 115). Every message the pass sends
 // is logged, because half of what these tests assert is what was NOT sent.
-function fakeReviewer({ people, failAccept = null, closeFails = false } = {}) {
+// `failAccept` is the id whose send the page never confirms. `landed` is
+// whether the message nevertheless went out - the question the driver cannot
+// answer and the queue can. Nothing here models the post-accept DOM: it was
+// never observed, so this fake reproduces only the outside view.
+function fakeReviewer({
+  people,
+  failAccept = null,
+  landed = false,
+  // Whether the driver refused BEFORE the click. That is the certain half of
+  // its contract and it carries the phrase; an unconfirmed send carries none.
+  certain = false,
+  closeFails = false,
+} = {}) {
+  const failing = new Set([failAccept].flat().filter(Boolean).map(String));
   const queue = people.map(String);
   const log = [];
   let index = 1;
@@ -59,7 +73,9 @@ function fakeReviewer({ people, failAccept = null, closeFails = false } = {}) {
       if (here.userId !== String(message.payload.expectedUserId)) {
         throw new Error(`The reviewer is showing ${here.userId}`);
       }
-      if (failAccept === here.userId) {
+      if (failing.has(here.userId)) {
+        if (certain) throw new Error(`The reviewer is showing somebody else; ${NOTHING_SENT}`);
+        if (landed) queue.splice(index - 1, 1);
         throw new Error(`Could not confirm the accept for ${here.userId}`);
       }
       queue.splice(index - 1, 1);
@@ -78,12 +94,32 @@ const captured = (userId, name = `Person ${userId}`) => ({
 });
 
 // One row per person, in the shape pass 1 leaves behind.
-function harness({ people, records, failAccept = null, signal, template, rand, limit } = {}) {
-  const reviewer = fakeReviewer({ people, failAccept });
+function harness({
+  people,
+  records,
+  failAccept = null,
+  landed = false,
+  certain = false,
+  checkQueue = null,
+  signal,
+  template,
+  rand,
+  limit,
+} = {}) {
+  const reviewer = fakeReviewer({ people, failAccept, landed, certain });
   const events = [];
   const ledger = [];
   const sleeps = [];
+  const asked = [];
   const deps = {
+    ...(checkQueue
+      ? {
+          checkQueue: async (userId) => {
+            asked.push(userId);
+            return checkQueue(userId);
+          },
+        }
+      : {}),
     review: reviewer.review,
     recordAccepted: async (jobId, userId) => {
       // Written into the same log the reviewer writes to, so the ORDER of a
@@ -107,7 +143,7 @@ function harness({ people, records, failAccept = null, signal, template, rand, l
       signal,
       ...(limit === undefined ? {} : { limit }),
     });
-  return { run, reviewer, events, ledger, sleeps };
+  return { run, reviewer, events, ledger, sleeps, asked };
 }
 
 const typesOf = (log) => log.map((entry) => entry.type);
@@ -792,5 +828,189 @@ describe('leaving Wellfound as the pass found it', () => {
     // fail, because this pass swallows the refusal.
     const bridge = readFileSync(new URL('../src/content/bridge.js', import.meta.url), 'utf8');
     expect(bridge).toContain(`['${CX_CLOSE_REVIEWER}', 'CLOSE_REVIEWER']`);
+  });
+});
+
+// The defect the operator hit, at the level of the loop that has to survive it.
+// A send whose DOM confirmation never arrives is not the end of what this
+// extension knows: an accepted candidate leaves NEEDS_REVIEW, and the queue is
+// already being read. So the pass asks, once, before it spends the one word
+// that sends the operator to Wellfound.
+describe('an unconfirmed send', () => {
+  const three = ['1', '2', '3'];
+  const rowsFor = (ids) => ids.map((id) => captured(id));
+
+  it('books the accept and carries on when the queue says they are gone', async () => {
+    const h = harness({
+      people: three,
+      records: rowsFor(three),
+      failAccept: '1',
+      landed: true,
+      checkQueue: () => 'gone',
+    });
+    const result = await h.run();
+
+    expect(h.asked).toEqual(['1']);
+    expect(result).toMatchObject({ accepted: 3, failed: 0, stoppedBecause: 'finished' });
+    // Ledger first, exactly as a confirmed accept is booked: an accept the
+    // ledger does not know about gets sent a second time by a later run.
+    expect(h.ledger.map((e) => e.userId)).toEqual(three);
+    // One click each. This is the rule nothing may ever break.
+    const sends = h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE);
+    expect(sends.map((e) => e.expectedUserId)).toEqual(three);
+  });
+
+  it('writes accepted in the cell, not failed', async () => {
+    const records = rowsFor(three);
+    await harness({
+      people: three,
+      records,
+      failAccept: '1',
+      landed: true,
+      checkQueue: () => 'gone',
+    }).run();
+    expect(records.map((r) => r.acceptStatus)).toEqual(new Array(3).fill(ACCEPT_STATUS.ACCEPTED));
+  });
+
+  it('says how it was settled, so a resolved run still leaves the evidence', async () => {
+    const h = harness({
+      people: three,
+      records: rowsFor(three),
+      failAccept: '1',
+      landed: true,
+      checkQueue: () => 'gone',
+    });
+    await h.run();
+    expect(h.events.find((e) => e.type === 'accept_unconfirmed')).toMatchObject({ userId: '1' });
+    expect(h.events.find((e) => e.type === 'accept_checked')).toMatchObject({ verdict: 'gone' });
+    expect(h.events.find((e) => e.type === 'accept_candidate' && e.userId === '1')).toMatchObject({
+      outcome: 'accepted',
+      confirmedBy: 'queue',
+    });
+  });
+
+  // The page's confirmation signal has just been demonstrably wrong. Carrying
+  // on against it would be trusting a structure that has already failed once.
+  it('reopens the reviewer before it reads the next candidate', async () => {
+    const h = harness({
+      people: three,
+      records: rowsFor(three),
+      failAccept: '1',
+      landed: true,
+      checkQueue: () => 'gone',
+    });
+    await h.run();
+    const types = typesOf(h.reviewer.log);
+    const settled = types.indexOf(CX.ACCEPT_CANDIDATE);
+    const reopened = types.indexOf(CX_CLOSE_REVIEWER);
+    expect(reopened).toBeGreaterThan(settled);
+    expect(types[reopened + 1]).toBe(CX.OPEN_REVIEWER);
+    // And it re-reads who is there rather than assuming position 1 holds the
+    // next target, which is what makes a reopen unable to skip anybody.
+    expect(types[reopened + 2]).toBe(CX.READ_CANDIDATE);
+  });
+
+  for (const [name, answer] of [
+    ['still shows them', () => 'queued'],
+    ['cannot answer', () => 'unknown'],
+    ['fails outright', () => Promise.reject(new Error('Page did not respond in time'))],
+  ]) {
+    it(`stays unclear and stops when the queue ${name}`, async () => {
+      const h = harness({
+        people: three,
+        records: rowsFor(three),
+        failAccept: '1',
+        checkQueue: answer,
+      });
+      const result = await h.run();
+      expect(result).toMatchObject({ accepted: 0, failed: 1, stoppedBecause: 'unclear' });
+      expect(h.ledger).toEqual([]);
+      expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
+    });
+  }
+
+  // The check pages the whole collection, so it is by far the most expensive
+  // thing this pass can do. It settles the failure that was actually observed -
+  // one send - and a pass producing a second is a pass whose page state is
+  // beyond what this module can reason about.
+  it('asks at most once in a pass', async () => {
+    const h = harness({
+      people: three,
+      records: rowsFor(three),
+      failAccept: ['1', '2'],
+      landed: true,
+      checkQueue: () => 'gone',
+    });
+    const result = await h.run();
+    expect(h.asked).toEqual(['1']);
+    expect(result).toMatchObject({ accepted: 1, failed: 1, stoppedBecause: 'unclear' });
+  });
+
+  // The other half of the driver's contract. A refusal raised before the click
+  // is certain - nothing went out - and asking the queue about it could only
+  // produce a wrong answer, since the candidate is still in it either way.
+  it('never asks about a send the driver refused before clicking', async () => {
+    const h = harness({
+      people: three,
+      records: rowsFor(three),
+      failAccept: '1',
+      certain: true,
+      checkQueue: () => 'gone',
+    });
+    const result = await h.run();
+    expect(h.asked).toEqual([]);
+    expect(result.stoppedBecause).toBe('error');
+  });
+
+  // A caller with no way to ask gets exactly the behaviour this pass had
+  // before the check existed.
+  it('is unclear, as before, when no queue check was given', async () => {
+    const h = harness({ people: three, records: rowsFor(three), failAccept: '1', landed: true });
+    expect(await h.run()).toMatchObject({ failed: 1, stoppedBecause: 'unclear' });
+  });
+});
+
+// The other half of the fix. If transient confirmation rows are what breaks the
+// signal, a pass that accepts many people in one sitting walks into it
+// repeatedly; a reviewer closed and opened again is the state the signal was
+// measured working in.
+describe('the periodic reopen', () => {
+  const four = ['1', '2', '3', '4'];
+
+  it('closes and opens the reviewer as the pass goes, and still accepts everybody', async () => {
+    const h = harness({ people: four, records: four.map((id) => captured(id)) });
+    const result = await h.run();
+    expect(result).toMatchObject({ accepted: 4, skipped: 0, stoppedBecause: 'finished' });
+    const types = typesOf(h.reviewer.log);
+    // More than the one open every pass begins with.
+    expect(types.filter((t) => t === CX.OPEN_REVIEWER).length).toBeGreaterThan(1);
+    // Nobody was stepped over: a reopen lands at position 1 and the loop reads
+    // who is actually there.
+    expect(h.ledger.map((e) => e.userId)).toEqual(four);
+    expect(types).not.toContain(CX.SKIP_CANDIDATE);
+  });
+
+  // It is paced like everything else. A close, a click and no pause between
+  // them is not how a person navigates away and back.
+  it('pauses between closing and opening', async () => {
+    const h = harness({ people: four, records: four.map((id) => captured(id)) });
+    await h.run();
+    const rests = h.events.filter((e) => e.type === 'resting' || e.type === 'break');
+    expect(rests.length).toBeGreaterThan(4);
+  });
+
+  // A reopen undoes every skip the pass has made, so a subset run would walk
+  // the same people again and count them twice. It keeps the behaviour it had.
+  it('leaves a pass that has skipped somebody alone', async () => {
+    const people = ['1', '99', '2', '3'];
+    const h = harness({
+      people,
+      records: ['1', '2', '3'].map((id) => captured(id)),
+    });
+    const result = await h.run();
+    expect(result).toMatchObject({ accepted: 3, skipped: 1 });
+    const types = typesOf(h.reviewer.log);
+    expect(types.filter((t) => t === CX.OPEN_REVIEWER)).toHaveLength(1);
+    expect(types.filter((t) => t === CX_CLOSE_REVIEWER)).toHaveLength(1);
   });
 });
