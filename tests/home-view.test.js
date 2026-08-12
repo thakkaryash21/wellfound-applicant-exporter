@@ -37,7 +37,7 @@ const setting = (over = {}) => ({
   ...over,
 });
 
-const settings = { folder: 'wellfound-resumes', fast: false, dry: false, advancedOpen: false };
+const settings = { folder: 'wellfound-resumes', fast: false, preview: false, advancedOpen: false };
 
 function model(jobs, settingsByJob = {}, over = {}) {
   return homeModel({

@@ -183,7 +183,7 @@ describe('Home', () => {
     });
     byId('folder').value = 'my-resumes';
     byId('advanced').open = true;
-    byId('dry').checked = true;
+    byId('preview').checked = true;
     byId('fast').checked = true;
 
     const pick = screen.querySelector('.job-pick');
@@ -191,7 +191,7 @@ describe('Home', () => {
     await pick.dispatch('change');
 
     expect(byId('folder').value).toBe('my-resumes');
-    expect(byId('dry').checked).toBe(true);
+    expect(byId('preview').checked).toBe(true);
     expect(byId('fast').checked).toBe(true);
     expect(byId('advanced').open).toBe(true);
   });
@@ -205,14 +205,14 @@ describe('Home', () => {
     await pick.dispatch('change');
     byId('folder').value = '  my-resumes  ';
     byId('fast').checked = true;
-    byId('dry').checked = true;
+    byId('preview').checked = true;
     await byId('start').click();
 
     expect(controller.startRun).toHaveBeenCalledWith({
       jobs: [{ jobId: JOB_A, limit: Infinity, forceFullWalk: false }],
       folder: 'my-resumes',
       pageSize: 20,
-      dryRun: true,
+      actions: { download: false, accept: false },
     });
   });
 

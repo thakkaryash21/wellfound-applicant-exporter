@@ -66,7 +66,7 @@ const state = {
 };
 let lane = null;
 let restTimer = null;
-const settings = { folder: 'wellfound-resumes', fast: false, dry: false, advancedOpen: false };
+const settings = { folder: 'wellfound-resumes', fast: false, preview: false, advancedOpen: false };
 
 function jobSettings(jobId) {
   if (!state.jobSettings.has(jobId)) {
@@ -94,7 +94,7 @@ function captureSettings() {
   if (!el(HOME_IDS.folder)) return;
   settings.folder = el(HOME_IDS.folder).value;
   settings.fast = el(HOME_IDS.fast).checked;
-  settings.dry = el(HOME_IDS.dry).checked;
+  settings.preview = el(HOME_IDS.preview).checked;
   settings.advancedOpen = el(HOME_IDS.advanced).open;
   // The console mirror is the one thing in this extension allowed to print, so
   // it is read straight back out of the checkbox and never remembered anywhere:
@@ -124,7 +124,9 @@ function globalSettings() {
   return {
     folder: settings.folder.trim() || 'wellfound-resumes',
     pageSize: settings.fast ? 20 : 10,
-    dryRun: settings.dry,
+    // Accepting is the other action a run can take. Nothing on this screen
+    // turns it on yet, so it is stated as off rather than left to a default.
+    actions: { download: !settings.preview, accept: false },
   };
 }
 

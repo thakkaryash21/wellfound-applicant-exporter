@@ -17,7 +17,7 @@ import { escapeHtml } from './escape-html.js';
 export const HOME_IDS = {
   folder: 'folder',
   fast: 'fast',
-  dry: 'dry',
+  preview: 'preview',
   advanced: 'advanced',
   verbose: 'verbose',
   start: 'start',
@@ -262,7 +262,7 @@ export function renderHome(model) {
       <summary>Advanced</summary>
       <div class="advanced-body">
         <label class="choice">
-          <input id="${HOME_IDS.dry}" type="checkbox" ${s.dry ? 'checked' : ''} />
+          <input id="${HOME_IDS.preview}" type="checkbox" ${s.preview ? 'checked' : ''} />
           Preview only: write the CSV, download nothing
         </label>
         <div class="advanced-item">

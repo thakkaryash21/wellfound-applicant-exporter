@@ -585,7 +585,11 @@ guess. A run that has fetched everyone offers **Check for new applicants**.
 One word per concept, all the way to the CSV. The mode that writes the CSV and
 downloads nothing is **preview** everywhere a reader can see it — the checkbox,
 the running breakdown, the summary and the Resume column — while the code calls
-the flag `dryRun`. The seen set is `seenUserIds`. The GraphQL page size is
+it the absence of an action: `actions.download` off. A run carries one
+`actions` value, `{ download, accept }`, so the four modes a run can be in - the
+CSV alone, download, accept, or both - are each expressible; `download` defaults
+on because that is what a run has always done, and `accept` is only ever
+opt-in. The seen set is `seenUserIds`. The GraphQL page size is
 `pageSize` and the number of candidates to take from a role is `limit`; they used
 to share the name `first`, which is why the constant that means "25 candidates"
 was once called `DEFAULT_FIRST`.
