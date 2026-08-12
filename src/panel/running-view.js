@@ -26,6 +26,7 @@ export const RUN_IDS = {
   body: 'run-body',
   status: 'run-status',
   lane: 'lane',
+  alert: 'run-alert',
   abort: 'abort',
 };
 
@@ -105,6 +106,67 @@ export function acceptCandidateLine(outcome, { accepted = 0, intended = 0, error
   if (outcome === 'accepted') return `accepted and messaged${DOT}${accepted} of ${intended}`;
   if (outcome === 'failed') return `could not accept${DOT}${error ?? 'no reason given'}`;
   return 'passed over: not someone this run is accepting';
+}
+
+// The settle window, said out loud.
+//
+// A send the page did not confirm starts up to four looks at the review queue,
+// with growing waits between them, and the whole thing can occupy a minute or
+// more. Until this existed the panel said nothing for that entire time, so the
+// most delicate moment this software has - deciding whether a real person was
+// messaged - was indistinguishable on screen from ordinary pacing.
+//
+// Nothing is known yet at this point, so nothing here may read as bad news.
+// It says what is being done, not what it found.
+export function acceptUnconfirmedLine() {
+  return `the page did not confirm that send${DOT}checking the review queue`;
+}
+
+// The verdict of one look. `queued` and `unknown` are not failures either: a
+// send still in flight puts somebody in the queue exactly as a send that never
+// happened does, and a check that could not reach the API has learnt nothing.
+const CHECK_VERDICT = {
+  gone: 'gone from the review queue',
+  queued: 'still in the review queue',
+  unknown: 'the review queue did not answer',
+};
+
+// One line carries both the verdict and the wait after it, because the wait is
+// the only thing on screen for the next fifteen to thirty seconds and a bare
+// countdown there would hide the look that just landed. `seconds` null is the
+// moment the verdict arrives; a number is the pause before the next look.
+export function acceptCheckedLine({ verdict, look = 1, seconds = null } = {}) {
+  const said = CHECK_VERDICT[verdict] ?? CHECK_VERDICT.unknown;
+  const line = `check ${look}${DOT}${said}`;
+  if (seconds == null) return line;
+  if (seconds <= 0) return `${line}${DOT}checking again`;
+  return `${line}${DOT}checking again in ${seconds}s`;
+}
+
+// A reload is maintenance, not an error: the applicant list degrades over a
+// long pass and letting go of the page is what keeps the pass alive.
+//
+// `accept_slow` is folded in here rather than given a line of its own. It is
+// the reason a reload was scheduled, it is emitted one candidate before the
+// reload happens, and its own line would be overwritten by that candidate's
+// outcome within a second. Two lines saying nearly the same thing, one of them
+// unreadably brief; this is the one that says it well.
+export function acceptReloadLine({ reload = true, slow = false } = {}) {
+  const what = reload ? 'reloading the page' : 'reopening the review queue';
+  const why = slow ? 'the last accept was slow' : 'routine, it keeps a long pass working';
+  return `${what}${DOT}${why}`;
+}
+
+// The worst state this pass has: the message went out and the ledger refused to
+// remember it, so nothing here knows that person was messaged. The pass carries
+// the whole explanation, remedy included, so this passes it through rather than
+// writing a second version of it that could drift.
+export function acceptUnrecordedLine({ error } = {}) {
+  return (
+    error ??
+    'A message was sent and could not be recorded. Check that role in Wellfound before ' +
+      'running it again, or that person will be messaged a second time.'
+  );
 }
 
 // Coarse on purpose. The pace of this run swings by whole seconds per candidate
@@ -211,10 +273,19 @@ export function renderRunBody(model) {
     ${model.acceptText ? `<p class="run-accept">${escapeHtml(model.acceptText)}</p>` : ''}`;
 }
 
+// The alert sits above the lane and outlives every renderProgress, because the
+// one thing it carries - a message that went out and was not recorded - stops
+// the run and must not be scrolled off by the next status line.
+//
+// It is the only region on this screen that is not polite. The activity line
+// says forty things a minute and none of them may interrupt; this says one
+// thing, once, and the run is over. role="alert" announces it without moving
+// focus, so nothing is taken out of the operator's hands.
 export function renderRunning(model) {
   return `
     <section class="run" aria-label="Export in progress">
       <div id="${RUN_IDS.body}">${renderRunBody(model)}</div>
+      <p class="run-alert warn" id="${RUN_IDS.alert}" role="alert" hidden></p>
       <div class="run-lane">
         <div id="${RUN_IDS.lane}"></div>
         <p class="run-status" id="${RUN_IDS.status}" role="status" aria-live="polite"></p>

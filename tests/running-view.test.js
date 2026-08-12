@@ -13,6 +13,11 @@ import {
   acceptText,
   acceptConsideringLine,
   acceptCandidateLine,
+  acceptUnconfirmedLine,
+  acceptCheckedLine,
+  acceptReloadLine,
+  acceptUnrecordedLine,
+  DOT,
   ETA_MIN_SAMPLE,
   RUN_IDS,
 } from '../src/panel/running-view.js';
@@ -230,6 +235,76 @@ describe('the running screen markup', () => {
   it('offers the only control the screen has', () => {
     expect(renderRunning(model)).toContain(`id="${RUN_IDS.abort}"`);
     expect(renderRunning(model)).toContain('Stop the run');
+  });
+
+  // The unrecorded send is the one thing on this screen that has to survive the
+  // next status line, so it is its own region and not the activity line.
+  it('carries an alert region that is announced without taking focus', () => {
+    const html = renderRunning(model);
+    expect(html).toContain(`id="${RUN_IDS.alert}"`);
+    expect(html).toContain('role="alert"');
+    // Nothing is wrong yet, so nothing is on screen.
+    expect(html).toContain('hidden');
+    expect(html).not.toContain('tabindex');
+    // And it is outside the part rebuilt on every candidate.
+    expect(renderRunBody(model)).not.toContain(`id="${RUN_IDS.alert}"`);
+  });
+});
+
+// The settle window. Everything below is what the operator reads during the
+// minute after a send the page would not confirm.
+describe('the settle window on the running screen', () => {
+  it('says the queue is being checked, and does not call it bad news', () => {
+    const line = acceptUnconfirmedLine();
+    expect(line).toBe(`the page did not confirm that send${DOT}checking the review queue`);
+    expect(line).not.toMatch(/fail|error|unclear|lost/i);
+  });
+
+  it('names the look and its verdict, so a settle in progress reads as progress', () => {
+    expect(acceptCheckedLine({ verdict: 'queued', look: 1 })).toBe(
+      `check 1${DOT}still in the review queue`,
+    );
+    expect(acceptCheckedLine({ verdict: 'gone', look: 3 })).toBe(
+      `check 3${DOT}gone from the review queue`,
+    );
+    expect(acceptCheckedLine({ verdict: 'unknown', look: 2 })).toBe(
+      `check 2${DOT}the review queue did not answer`,
+    );
+  });
+
+  // A verdict anything other than the three the pass emits is treated as having
+  // learnt nothing, which is what `unknown` means.
+  it('treats a verdict it does not know as no answer', () => {
+    expect(acceptCheckedLine({ verdict: 'something else', look: 1 })).toContain('did not answer');
+    expect(acceptCheckedLine()).toBe(`check 1${DOT}the review queue did not answer`);
+  });
+
+  it('keeps the last verdict on screen through the wait before the next look', () => {
+    expect(acceptCheckedLine({ verdict: 'queued', look: 2, seconds: 15 })).toBe(
+      `check 2${DOT}still in the review queue${DOT}checking again in 15s`,
+    );
+    expect(acceptCheckedLine({ verdict: 'queued', look: 2, seconds: 0 })).toBe(
+      `check 2${DOT}still in the review queue${DOT}checking again`,
+    );
+  });
+
+  it('calls a reload maintenance, and says when a slow accept brought it on', () => {
+    expect(acceptReloadLine({ reload: true })).toBe(
+      `reloading the page${DOT}routine, it keeps a long pass working`,
+    );
+    expect(acceptReloadLine({ reload: true, slow: true })).toBe(
+      `reloading the page${DOT}the last accept was slow`,
+    );
+    expect(acceptReloadLine({ reload: false })).toContain('reopening the review queue');
+    expect(acceptReloadLine({ reload: true })).not.toMatch(/error|problem|fail/i);
+  });
+
+  it('passes the unrecorded send through with its remedy intact', () => {
+    const error =
+      'The message to 70000001 was sent, and writing it to the ledger failed: quota. ' +
+      'Check that person in Wellfound.';
+    expect(acceptUnrecordedLine({ error })).toBe(error);
+    expect(acceptUnrecordedLine({})).toContain('messaged a second time');
   });
 });
 
