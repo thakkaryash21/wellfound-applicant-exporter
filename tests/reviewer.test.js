@@ -68,7 +68,10 @@ function createPage(options = {}) {
     const link = currentId() ? `<a href="/link/${currentId()}/tok9/resume_url">Resume</a>` : '';
     const composer = state.composer
       ? '<textarea id="msg"></textarea>' +
-        '<button id="send">Accept application &amp; send message</button>'
+        '<button id="send">Accept application &amp; send message</button>' +
+        // Only while the composer is open, and exactly one, as measured.
+        // Clicking it clears the box and returns to the profile.
+        '<button id="cancel">Cancel response</button>'
       : '';
     document.body.innerHTML =
       openers() +
@@ -79,12 +82,29 @@ function createPage(options = {}) {
           `<button id="accept"${aria}>Accept</button>` +
           '<button id="reject">Reject</button>' +
           '<button id="next">Next applicant</button>' +
-          // The keyboard-shortcut legend. On the real page a query for buttons
-          // whose text is exactly `Accept` returns this as well as the action
-          // button; here it is markup rather than a control, which is the half
-          // of the disambiguation this harness can honestly represent. The
-          // visibility half gets its own test below.
-          '<div class="legend"><kbd>A</kbd><span>Accept</span></div>' +
+          '<button id="exit">Exit</button>' +
+          // The noise the live page carries around the Accept button, which the
+          // earlier shape of this harness did not, and which is the whole reason
+          // the anchor on ACCEPT_LABEL is load-bearing. Counted live with the
+          // driver's own predicates: `/^accept$/i` matches 2 controls of which 1
+          // is usable; `/accept/i` matches 4 of which 3 are usable.
+          //
+          // Both of these are real controls the selector CAN see, and both merely
+          // CONTAIN "accept". A harness that omitted them agreed with any
+          // selector it was given - loosening the anchor to /accept/i passed all
+          // 660 tests while being dangerous on the page.
+          '<button class="profile">Ken Onyekwere - accepting new roles</button>' +
+          '<div role="button" class="ideal">' +
+          'Ideal next opportunity - open to accepting offers</div>' +
+          // The second EXACT `Accept` match, and the other half of the same
+          // point. It is a button, not a span: the selector reaches it, and the
+          // only thing standing between it and `Found 2 Accept controls` is the
+          // visible/enabled filter - which is what uniqueControl exists for, and
+          // which the old span could never exercise because usableControls never
+          // queried it. Its zero box is applied in wire(), so it survives every
+          // re-render.
+          '<div class="legend"><kbd>A</kbd>' +
+          '<button id="accept-legend">Accept</button></div>' +
           (options.extraMarkup ?? '') +
           composer +
           '</div>'
@@ -93,6 +113,10 @@ function createPage(options = {}) {
   }
 
   function wire() {
+    // The page does not render it, so nothing can click it. A browser answers
+    // this with layout; here the harness says so directly.
+    const legend = document.getElementById('accept-legend');
+    if (legend) legend.rect = { width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 };
     for (const button of document.querySelectorAll('button, [role="button"]')) {
       button.addEventListener('click', () => {
         state.clicks.push(button.textContent.trim());
@@ -118,6 +142,21 @@ function createPage(options = {}) {
     });
     document.getElementById('reject')?.addEventListener('click', () => {
       state.rejected = true;
+    });
+    // The two ways out, as measured. Cancel clears the composer and leaves the
+    // profile up; Exit closes the reviewer entirely. Neither sends anything, and
+    // the harness records nothing extra about them - the assertion that matters
+    // is what the page looks like afterwards.
+    document.getElementById('cancel')?.addEventListener('click', () => {
+      if (options.cancelDoesNothing) return;
+      state.composer = false;
+      render();
+    });
+    document.getElementById('exit')?.addEventListener('click', () => {
+      if (options.exitDoesNothing) return;
+      state.open = false;
+      state.composer = false;
+      render();
     });
     document.getElementById('next')?.addEventListener('click', () => {
       if (options.onNextClick) {
@@ -654,13 +693,56 @@ describe('the identity interlock', () => {
 // --- guard: exactly one match -------------------------------------------------
 
 describe('the exactly-one-control guard', () => {
-  it('ignores a shortcut legend that is not a control', async () => {
+  // Counted on the live page on 2026-08-12 with the driver's own predicates,
+  // and reproduced by the default dialog above. These two rows are the reason
+  // ACCEPT_LABEL is anchored, and a harness that could not produce them agreed
+  // with any selector it was handed.
+  //
+  // Counted with the driver's OWN predicate, not with a copy of it: a harness
+  // that reimplements the rule it is checking can only ever agree with itself.
+  const count = (pattern) => {
+    const { matching, usable } = driver.usableControls(
+      page.document.querySelector('[role="dialog"]'),
+      pattern,
+    );
+    return { matched: matching.length, usable: usable.length };
+  };
+
+  it('presents the same Accept ambiguity the live page was measured to have', async () => {
     start();
     await driver.openReviewer();
-    // The legend reads `Accept` too. Role is what separates them.
+    // Anchored: the action button plus the shortcut legend's own button, of
+    // which only the action button is rendered.
+    expect(count(/^accept$/i)).toEqual({ matched: 2, usable: 1 });
+    // Unanchored: both of those, plus the profile header and the "Ideal next
+    // opportunity" block, which merely contain the word.
+    expect(count(/accept/i)).toEqual({ matched: 4, usable: 3 });
+  });
+
+  it('would abort every accept if the anchor were loosened', async () => {
+    start();
+    await driver.openReviewer();
+    // The mutation, run against the harness rather than against the file: this
+    // is what `ACCEPT_LABEL = /accept/i` would hand uniqueControl on the real
+    // page. Three usable matches, and the driver does not guess between them.
+    expect(() => driver.uniqueControl(page.document.body, /accept/i, 'Accept')).toThrow(
+      /Found 3 Accept controls/,
+    );
+    // The anchored pattern, on the same DOM, finds the one that acts.
+    expect(driver.uniqueControl(page.document.body, /^accept$/i, 'Accept').id).toBe('accept');
+  });
+
+  it('accepts through the noise, picking the one control that is rendered', async () => {
+    start();
+    await driver.openReviewer();
     await expect(
       driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
     ).resolves.toMatchObject({ accepted: true });
+    expect(page.state.clicks).toEqual([
+      'View application',
+      'Accept',
+      'Accept application & send message',
+    ]);
   });
 
   it('ignores a matching control the page is not showing', async () => {
@@ -852,6 +934,193 @@ describe('skipping', () => {
     const settled = expect(pending).rejects.toThrow(/did not move on to the next candidate/);
     await vi.advanceTimersByTimeAsync(15000);
     await settled;
+  });
+});
+
+// --- leaving ------------------------------------------------------------------
+
+// The state this driver used to be able to leave behind: the reviewer open, the
+// composer expanded, and the operator's message sitting in the textarea one
+// click from a real person's inbox - after a stop the operator pressed on
+// purpose. Nothing in the file could close it, because nothing in the file
+// could close anything.
+describe('leaving the page as it was found', () => {
+  const dialog = () => page.document.querySelector('[role="dialog"]');
+  const composer = () => page.document.querySelector('textarea');
+
+  it('does nothing, and says so, when there is nothing to tear down', async () => {
+    start();
+    // Never opened. Teardown runs on every exit path, including the ones where
+    // the pass touched Wellfound's UI not at all.
+    await expect(driver.closeReviewer()).resolves.toEqual({
+      cancelled: false,
+      closed: true,
+      notes: [],
+    });
+    expect(page.state.clicks).toEqual([]);
+  });
+
+  it('closes a reviewer that has no composer open', async () => {
+    start();
+    await driver.openReviewer();
+    const report = await driver.closeReviewer();
+    expect(report).toMatchObject({ cancelled: false, closed: true });
+    expect(dialog()).toBe(null);
+    expect(page.state.clicks).toEqual(['View application', 'Exit']);
+  });
+
+  it('cancels the composed message first, then closes what is left', async () => {
+    start();
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({
+      expectedUserId: '21527289',
+      message: MESSAGE,
+      afterPasteMs: 30000,
+    });
+    const settled = expect(pending).rejects.toThrow(/Stopped before the message was sent/);
+    await vi.advanceTimersByTimeAsync(200);
+    await driver.handlers.STOP();
+    await vi.advanceTimersByTimeAsync(200);
+    await settled;
+
+    // The state the operator would have been left staring at: their message, in
+    // the box, on somebody's profile.
+    expect(composer().value).toBe(MESSAGE);
+
+    const report = await driver.closeReviewer();
+    expect(report).toEqual({ cancelled: true, closed: true, notes: [] });
+    expect(composer()).toBe(null);
+    expect(dialog()).toBe(null);
+    // Cancel before Exit, and no other click of any kind on the way out.
+    expect(page.state.clicks.slice(-2)).toEqual(['Cancel response', 'Exit']);
+    expect(page.state.sentText).toBe(null);
+  });
+
+  it('is safe to call twice', async () => {
+    start();
+    await driver.openReviewer();
+    await driver.closeReviewer();
+    await expect(driver.closeReviewer()).resolves.toEqual({
+      cancelled: false,
+      closed: true,
+      notes: [],
+    });
+  });
+
+  it('refuses to touch the modal while an accept is still unresolved', async () => {
+    // The send has been clicked and the outcome is not known yet. Clicking
+    // Cancel response next to a message that may already have gone is how a
+    // teardown becomes the thing that needed tearing down.
+    start({ onSendClick: () => {} });
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    const settled = pending.catch((e) => e);
+    await vi.advanceTimersByTimeAsync(1000);
+
+    const before = page.state.clicks.length;
+    const report = await driver.closeReviewer();
+    expect(report.closed).toBe(false);
+    expect(report.notes).toEqual(['an accept is still in flight; left the reviewer alone']);
+    expect(page.state.clicks.length).toBe(before);
+
+    await vi.advanceTimersByTimeAsync(15000);
+    await settled;
+  });
+
+  it('reports a control it cannot find rather than throwing over the run error', async () => {
+    start();
+    await driver.openReviewer();
+    page.document.getElementById('exit').remove();
+    const report = await driver.closeReviewer();
+    expect(report.closed).toBe(false);
+    expect(report.notes).toEqual(['no usable Exit control (0 matched by text)']);
+    // Still on the page - but the pass's own error reaches the operator intact,
+    // which is the property that matters more.
+    expect(dialog()).not.toBe(null);
+  });
+
+  it('reports a control that was clicked and did nothing, without waiting long', async () => {
+    start({ exitDoesNothing: true });
+    await driver.openReviewer();
+    const pending = driver.closeReviewer();
+    await vi.advanceTimersByTimeAsync(2000);
+    const report = await pending;
+    expect(report.closed).toBe(false);
+    expect(report.notes).toEqual(['Clicked Exit, but the page did not respond to it']);
+  });
+
+  it('clicks nothing when two controls could be the way out', async () => {
+    start({ extraMarkup: '<div role="button">Exit</div>' });
+    await driver.openReviewer();
+    const report = await driver.closeReviewer();
+    expect(report.closed).toBe(false);
+    expect(report.notes).toEqual(['found 2 Exit controls, so clicked none']);
+    expect(page.state.clicks).toEqual(['View application']);
+  });
+
+  it('refuses a way out that reads as accept or reject, whatever it is called', async () => {
+    // A renamed button, or a page that shifted under the pattern. Teardown is
+    // the one path where clicking the wrong thing sends the message it was
+    // called to abandon, so it refuses both verbs before clickSafely sees it.
+    start();
+    await driver.openReviewer();
+    const exit = page.document.getElementById('exit');
+    exit.setAttribute('aria-label', 'Accept and exit');
+    const report = await driver.closeReviewer();
+    expect(report.closed).toBe(false);
+    expect(report.notes[0]).toMatch(/Refusing to click "Exit Accept and exit" on the way out/);
+    expect(page.state.clicks).toEqual(['View application']);
+    expect(page.state.sentText).toBe(null);
+  });
+
+  it('answers CLOSE_REVIEWER on the wire, and never as a rejection', async () => {
+    start();
+    const wire = load(page);
+    wire.deliver({ source: 'wfx-cs', id: 'c1', type: 'CLOSE_REVIEWER' });
+    await vi.advanceTimersByTimeAsync(0);
+    const answer = wire.posted.find((m) => m.source === 'wfx-page' && m.id === 'c1');
+    expect(answer).toEqual({
+      source: 'wfx-page',
+      id: 'c1',
+      ok: true,
+      data: { cancelled: false, closed: true, notes: [] },
+    });
+  });
+});
+
+// --- the budget this driver promises to stay inside ----------------------------
+
+describe('the accept round trip fitting inside the relay budget', () => {
+  it('honours no more of a pause than its own stated maximum', async () => {
+    start();
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({
+      expectedUserId: '21527289',
+      message: MESSAGE,
+      // Far past what the panel samples, which is the point: the bound is this
+      // file's promise about how long it may hold the wire, not a request.
+      beforePasteMs: 60000,
+      afterPasteMs: 60000,
+    });
+    // The first pause is clamped to 5000, so the message is in the box shortly
+    // after that - not sixty seconds later, which is a whole minute past the
+    // point the relay would have given up and told the panel the page was quiet
+    // while the send was still coming.
+    await vi.advanceTimersByTimeAsync(5200);
+    expect(page.state.pasted).toEqual([MESSAGE]);
+    expect(page.state.sentText).toBe(null);
+    // And the second to 3000.
+    await vi.advanceTimersByTimeAsync(3200);
+    await expect(pending).resolves.toMatchObject({ accepted: true });
+  });
+
+  it('states a worst case that its own constants add up to', async () => {
+    start();
+    // composer 5000 + before 5000 + after 3000 + confirm 15000 + slack 2000.
+    // Named here rather than derived, so a change to any of them has to be a
+    // change to this number too - which is what the relay's budget is checked
+    // against in tests/bridge.test.js.
+    expect(driver.ACCEPT_WORST_CASE_MS).toBe(30000);
   });
 });
 

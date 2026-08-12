@@ -30,6 +30,18 @@
   const OPEN_LABEL = /^view application$/i;
   // Advance without acting on the current candidate. Exactly one on the page.
   const NEXT_LABEL = /^next applicant$/i;
+  // The two ways out, measured live. `Cancel response` exists only while the
+  // composer is open - exactly one match - and clicking it clears the composer
+  // and returns to the profile. `Exit` sits in the reviewer itself and closes
+  // it. Both are anchored for the same reason `Accept` is: an unanchored
+  // /exit/i would reach an "Exit interview" block, and a teardown that clicks
+  // the wrong thing is a teardown that can act on a candidate.
+  const CANCEL_LABEL = /^cancel response$/i;
+  const EXIT_LABEL = /^exit$/i;
+  // Nothing on the way out may read as either irreversible verb. `clickSafely`
+  // already refuses reject; leaving refuses accept as well, because the one
+  // thing teardown must never do is finish a send it was called to abandon.
+  const LEAVING_FORBIDDEN = /accept|reject/i;
   // Never clicked, whatever else matched.
   const REJECT_TEXT = /reject/i;
   // Never sent. `R` is Reject and `X` is Quick Reject, one key from `A`.
@@ -76,6 +88,51 @@
   const CONFIRM_POLL_MS = 250;
   const COMPOSER_TIMEOUT_MS = 5000;
   const COMPOSER_POLL_MS = 100;
+  // Teardown is not allowed to be slow. It runs after the pass has already
+  // ended, so the operator is waiting on it with nothing left to watch, and a
+  // control that does not respond in two seconds is reported rather than waited
+  // on.
+  const TEARDOWN_TIMEOUT_MS = 2000;
+  const TEARDOWN_POLL_MS = 100;
+
+  // The longest an ACCEPT_CANDIDATE round trip may occupy, and the reason the
+  // pauses below are clamped rather than trusted.
+  //
+  // The bridge (src/content/bridge.js) gives every message a budget, and if that
+  // budget expires around a send the panel is told the page went quiet while the
+  // message is still going out: booked as failed, absent from the ledger, and a
+  // candidate for being messaged again on a later run. The two numbers used to
+  // live in two files with no stated relationship and roughly 2 s between them.
+  //
+  // So this file states its own worst case, in its own constants, and enforces
+  // it: the panel hands the pauses in, and whatever it hands in, the driver
+  // honours no more than these. The upper bounds mirror PACING.beforePasteMs
+  // and PACING.afterPasteMs in src/lib/jitter.js - duplicated here for the same
+  // reason the message types are, since a MAIN-world classic script cannot
+  // import - and a clamp cannot drift the wrong way: a panel that samples higher
+  // is bounded, and one that samples lower is simply obeyed.
+  const MAX_BEFORE_PASTE_MS = 5000;
+  const MAX_AFTER_PASTE_MS = 3000;
+  // Poll granularity (a waitFor may overshoot its deadline by one interval),
+  // click dispatch, and the page's own re-render. Not measured, deliberately
+  // generous, and inside the figure below rather than outside it.
+  const ACCEPT_SLACK_MS = 2000;
+  // 5000 + 5000 + 3000 + 15000 + 2000 = 30000. Read by bridge.js's budget, and
+  // by a test that fails if the two ever stop agreeing.
+  const ACCEPT_WORST_CASE_MS =
+    COMPOSER_TIMEOUT_MS +
+    MAX_BEFORE_PASTE_MS +
+    MAX_AFTER_PASTE_MS +
+    CONFIRM_TIMEOUT_MS +
+    ACCEPT_SLACK_MS;
+
+  // A pause the driver is willing to serve. Not an error when it is exceeded:
+  // the panel's pacing is a courtesy, and the bound is this file's own promise
+  // about how long it may hold the wire.
+  function clampPause(ms, max) {
+    const asked = Math.max(0, Number(ms) || 0);
+    return asked > max ? max : asked;
+  }
 
   // --- the page ---------------------------------------------------------------
 
@@ -87,7 +144,15 @@
   // dialog. Widening the search can only make the exactly-one guard below more
   // likely to abort, never less.
   function dialogRoot() {
-    return document.querySelector('[role="dialog"]') || pageRoot();
+    return reviewerRoot() || pageRoot();
+  }
+
+  // The modal itself, or null. Every operation reads through dialogRoot, which
+  // widens to the page rather than failing; teardown is the one caller that
+  // needs the narrow answer, because "there is no modal" is its success case
+  // and not something to go looking for controls about.
+  function reviewerRoot() {
+    return document.querySelector('[role="dialog"]');
   }
 
   function text(el) {
@@ -168,6 +233,33 @@
     el.click();
   }
 
+  // The way out of a state, as distinct from the way through it. A missing
+  // control is an answer here rather than a throw: teardown asks about controls
+  // that legitimately may not be on the page, and two matches means the same
+  // thing it means everywhere else in this file - do not click.
+  function leavingControl(scope, pattern, name) {
+    const { matching, usable } = usableControls(scope, pattern);
+    if (usable.length === 1) return { el: usable[0], note: null };
+    if (usable.length === 0) {
+      return { el: null, note: `no usable ${name} control (${matching.length} matched by text)` };
+    }
+    return { el: null, note: `found ${usable.length} ${name} controls, so clicked none` };
+  }
+
+  // Leaving goes through clickSafely like everything else, so the never-reject
+  // guard covers it - and through this extra refusal first. The controls above
+  // are anchored and cannot match `Accept application & send message` today;
+  // this is the guard that keeps that true after somebody renames a button. A
+  // teardown that cannot find its way out must leave the page alone, never
+  // press the nearest thing.
+  function clickToLeave(el, name) {
+    const seen = label(el);
+    if (LEAVING_FORBIDDEN.test(seen)) {
+      throw new Error(`Refusing to click "${seen}" on the way out (asked for ${name})`);
+    }
+    clickSafely(el, name);
+  }
+
   // Nothing in this file calls this, and nothing should. Measured on the live
   // page: a synthetic keydown+keyup for ArrowRight on the document moved the
   // reviewer not at all - userId and `1 of 115` both unchanged - because a
@@ -201,6 +293,13 @@
   // this flag is what an in-flight accept reads. Cleared when the reviewer is
   // opened, which is where a pass begins.
   let stopped = false;
+
+  // True from the first guard of an accept to the moment its outcome is known.
+  // Read by teardown and by nothing else: an accept and a teardown are two
+  // drivers of the same modal, and the only one of the two that is allowed to
+  // touch it while a send is unresolved is the one that knows whether the send
+  // happened.
+  let accepting = false;
 
   // Sleeping in slices, so a stop pressed four seconds into a five-second pause
   // is felt now rather than at the end of it. The panel's own sleep is
@@ -362,12 +461,14 @@
       what: 'The response composer did not open',
     });
 
-    // A beat while the composer opens and the wording is gathered.
-    await pause(beforePasteMs);
+    // A beat while the composer opens and the wording is gathered. Clamped, so
+    // this round trip cannot outlast the budget the relay gives it however the
+    // panel sampled.
+    await pause(clampPause(beforePasteMs, MAX_BEFORE_PASTE_MS));
     if (stopped) throw new Error('Stopped before the message was entered');
     pasteMessage(composerBox(), message);
     // A beat to read it back, which is what the pause after a paste is.
-    await pause(afterPasteMs);
+    await pause(clampPause(afterPasteMs, MAX_AFTER_PASTE_MS));
     // After the pause and before the click, so a stop during either pause takes
     // effect while nothing has yet gone out. Past this point a send is
     // possible, and nothing here ever retries one.
@@ -385,7 +486,18 @@
     return { before, send };
   }
 
-  async function acceptCurrent({ expectedUserId, message, beforePasteMs, afterPasteMs } = {}) {
+  // The wrapper exists for the flag and for nothing else: for as long as an
+  // accept is unresolved, no other operation in this file may drive the modal.
+  async function acceptCurrent(payload) {
+    accepting = true;
+    try {
+      return await runAccept(payload ?? {});
+    } finally {
+      accepting = false;
+    }
+  }
+
+  async function runAccept({ expectedUserId, message, beforePasteMs, afterPasteMs } = {}) {
     const expected = expectedUserId == null ? '' : String(expectedUserId);
 
     let before;
@@ -491,6 +603,79 @@
     }
   }
 
+  // --- leaving ----------------------------------------------------------------
+
+  // The way out, for every state this file can leave the page in.
+  //
+  // There are three, and they nest. NOTHING OPEN: the pass never touched the
+  // modal, or already left it - there is nothing to do and saying so is the
+  // whole answer. REVIEWER OPEN, NO COMPOSER: a read failed, a skip failed, the
+  // operator stopped between candidates - one click on `Exit`. REVIEWER OPEN
+  // WITH THE COMPOSER EXPANDED: the dangerous one, because the operator's
+  // message is sitting in the textarea one click from a real person's inbox.
+  // `Cancel response` clears it, and only then does `Exit` close what is left.
+  //
+  // Three properties hold whatever it finds:
+  //
+  //   - It never throws. It runs on the way out of a pass that may already be
+  //     carrying the error the operator needs to read, and a teardown that
+  //     throws over that error replaces a message about a candidate with a
+  //     message about a button. Every failure becomes a note in the report.
+  //   - It never sends. Every click goes through clickToLeave, which refuses
+  //     anything reading `accept` or `reject`, and then through clickSafely.
+  //     Ambiguity - two matches - clicks nothing at all.
+  //   - It is safe to call when there is nothing to tear down, twice in a row,
+  //     or on a page that was never the reviewer.
+  //
+  // What it does NOT do is interrupt an accept. While one is unresolved the
+  // modal belongs to it: clicking `Cancel response` next to a send that may
+  // have landed is how a teardown becomes the thing that needed tearing down.
+  async function closeReviewer() {
+    const report = { cancelled: false, closed: false, notes: [] };
+
+    if (accepting) {
+      report.notes.push('an accept is still in flight; left the reviewer alone');
+      return report;
+    }
+    if (!reviewerRoot()) {
+      report.closed = true;
+      return report;
+    }
+
+    if (composerBox()) {
+      await leave(CANCEL_LABEL, 'Cancel response', () => !composerBox(), report, 'cancelled');
+    }
+    if (reviewerRoot()) {
+      await leave(EXIT_LABEL, 'Exit', () => !reviewerRoot(), report, 'closed');
+    } else {
+      report.closed = true;
+    }
+    return report;
+  }
+
+  // One step of the walk out: find the control, click it, and confirm the state
+  // it was supposed to leave is actually gone. Confirmation matters as much
+  // here as it does after a send - "clicked Cancel" is not "the message is no
+  // longer in the box" - but its failure is a note, never a throw.
+  async function leave(pattern, name, gone, report, field) {
+    const { el, note } = leavingControl(dialogRoot(), pattern, name);
+    if (!el) {
+      report.notes.push(note);
+      return;
+    }
+    try {
+      clickToLeave(el, name);
+      await waitFor(gone, {
+        timeoutMs: TEARDOWN_TIMEOUT_MS,
+        pollMs: TEARDOWN_POLL_MS,
+        what: `Clicked ${name}, but the page did not respond to it`,
+      });
+      report[field] = true;
+    } catch (error) {
+      report.notes.push(String(error.message || error));
+    }
+  }
+
   // --- the wire ---------------------------------------------------------------
 
   const handlers = {
@@ -505,6 +690,19 @@
       stopped = true;
       return { stopped: true };
     },
+    // Leaving, which is deliberately NOT part of the message above.
+    //
+    // STOP is a signal and must stay one: it arrives DURING an accept, has to
+    // answer immediately, and must touch nothing - a STOP that also clicked
+    // would be clicking the modal an unfinished send is still holding. Teardown
+    // is an action, and it is only correct AFTER the pass has unwound.
+    //
+    // They also do not cover the same occasions. Most teardowns follow no stop
+    // at all: a guard refusing, a read failing, a pass simply finishing. Sending
+    // STOP on those would record that the operator pressed stop when they did
+    // not, and would leave the flag set for the next pass to clear. One message
+    // per idea, and these are two ideas.
+    CLOSE_REVIEWER: () => closeReviewer(),
   };
 
   window.addEventListener('message', async (event) => {
@@ -534,8 +732,16 @@
       readCounter,
       acceptCurrent,
       skipCurrent,
+      closeReviewer,
+      // The budget this file promises to stay inside for one accept. Exposed so
+      // the relay's own budget can be checked against it rather than against a
+      // number somebody added up in a comment once.
+      ACCEPT_WORST_CASE_MS,
       uniqueControl,
       firstOfMany,
+      // The predicate itself, so a test can count what the driver counts rather
+      // than reimplement it and agree with itself.
+      usableControls,
       clickSafely,
       sendKey,
       pasteMessage,
