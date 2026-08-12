@@ -649,27 +649,35 @@ describe('listJobs hydration', () => {
     return page;
   }
 
-  // The second half of the owner's report: the panel opens, navigates for the
-  // counts and reads the cache back before the answer has landed in it, so the
-  // roles show no count until the panel is closed and opened again.
+  // The second half of the owner's report, as it actually happened on a
+  // sixteen-role account: the panel navigated, the count for the role it
+  // navigated to arrived first - the applicants query is what the new document
+  // runs first - and every other count arrived later, from the job list query.
+  // A wait that ended on a count being present ended between the two, so the
+  // panel showed one count and fifteen roles reading "not loaded yet" while
+  // Wellfound's own sidebar showed them all.
   //
-  // `focusJob` proves the query is REGISTERED, which is asking, not answering.
-  // Here the page takes three more reads to write the count, exactly as a real
-  // one does while the response is in flight.
-  function countsLandLate(reads = 3) {
+  // `late` is how many reads after the navigation the second query takes.
+  function countsLandInTwoWaves({ late = 3, roles = 3 } = {}) {
     let navigated = false;
-    let after = 0;
+    let reads = 0;
+    const others = Array.from({ length: roles - 1 }, (_, i) => String(9100002 + i));
     setup({
       tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
       jobs: () => {
-        if (navigated) after += 1;
+        if (navigated) reads += 1;
         return [
-          { jobId: JOB, title: 'Backend Engineer', actionableCount: 4 },
-          {
-            jobId: OTHER,
-            title: 'Data Scientist',
-            actionableCount: navigated && after > reads ? 7 : null,
-          },
+          // The role the panel navigates to. Its count comes from the
+          // applicants query, which the new document runs first, so it is there
+          // on the very next read.
+          { jobId: JOB, title: 'Platform Engineer', actionableCount: navigated ? 4 : null },
+          // Every other role. These counts come from the job list query, which
+          // lands afterwards - and this gap is the whole bug.
+          ...others.map((jobId, i) => ({
+            jobId,
+            title: `Data Scientist ${i + 1}`,
+            actionableCount: navigated && reads > late ? 7 : null,
+          })),
         ];
       },
     });
@@ -678,19 +686,26 @@ describe('listJobs hydration', () => {
       navigated = true;
       return original(tabId, props);
     };
+    return { others };
   }
 
-  it('waits for the count to reach the cache instead of reading it straight back', async () => {
-    countsLandLate();
+  it('waits for every count the page is going to give, not the first one', async () => {
+    countsLandInTwoWaves();
     const controller = await controllerFor();
     const jobs = await controller.listJobs();
-    expect(jobs.map((j) => j.actionableCount)).toEqual([4, 7]);
+    expect(jobs.map((j) => j.actionableCount)).toEqual([4, 7, 7]);
   });
 
-  // And it is the count that is waited on, not a length of time: the pass ends
-  // on the read that has it and does not keep going.
-  it('stops reading as soon as the count is there', async () => {
-    countsLandLate();
+  // The condition is quiet, not completeness: a role the page never counts must
+  // not hold the panel open to the bound, and it must not be asked for again.
+  it('settles on a cache that has stopped changing, counts or no counts', async () => {
+    setup({
+      tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
+      jobs: [
+        { jobId: JOB, title: 'Platform Engineer', actionableCount: 4 },
+        { jobId: OTHER, title: 'Data Scientist', actionableCount: null },
+      ],
+    });
     const page = fake.chrome.tabs.sendMessage;
     let reads = 0;
     fake.chrome.tabs.sendMessage = async (tabId, message) => {
@@ -699,9 +714,38 @@ describe('listJobs hydration', () => {
     };
     const controller = await controllerFor();
     await controller.listJobs();
-    // The first read, then four more: three that came back null and the one
-    // that carried the count.
+    // The first read, then the four identical ones that say the page is done.
     expect(reads).toBe(5);
+    // And the role is now known to have no count, so a second load leaves the
+    // tab where it is.
+    await controller.listJobs();
+    expect(fake.calls.updates).toHaveLength(1);
+  });
+
+  // A cache that never goes quiet establishes nothing about any role, so
+  // nothing is written down and the next load tries again.
+  it('asks again for a role whose count was still in flight at the bound', async () => {
+    let reads = 0;
+    setup({
+      tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
+      jobs: () => {
+        reads += 1;
+        return [
+          { jobId: JOB, title: 'Platform Engineer', actionableCount: 4 },
+          // A cache still filling on every single read.
+          ...Array.from({ length: reads }, (_, i) => ({
+            jobId: String(9100002 + i),
+            title: `Data Scientist ${i + 1}`,
+            actionableCount: null,
+          })),
+        ];
+      },
+    });
+    const controller = await controllerFor();
+    const told = [];
+    await controller.listJobs({ onHydrating: () => told.push('reading') });
+    await controller.listJobs({ onHydrating: () => told.push('reading') });
+    expect(told).toEqual(['reading', 'reading']);
   });
 
   it('loads an applicant list once to fill in the missing counts', async () => {

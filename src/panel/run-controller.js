@@ -41,9 +41,33 @@ const QUEUE_CHECK_PAGE_SIZE = 10;
 const QUEUE_CHECK_PAGE_CAP = 40;
 
 // The wait for the counts to land in the page's Apollo cache, in re-reads
-// rather than in seconds. Counted in tries so the pace is the test's to set:
-// twenty at the driver's poll cadence is about ten seconds of real waiting.
-export const COUNTS_TRIES = 20;
+// rather than in seconds. Counted in reads so the pace is the test's to set:
+// at the driver's poll cadence this is about twelve seconds of waiting at the
+// very worst, and about two on a page that answers.
+export const COUNTS_READS = 24;
+
+// How many identical reads in a row mean the cache has stopped changing.
+//
+// The counts do not arrive together. The job the panel navigates to gets its
+// count from the applicants query, which the new document runs first; the other
+// fifteen roles get theirs from the job list query, which lands afterwards. A
+// wait that stopped on the first count present stopped between the two, which
+// is how a recruiter with sixteen roles saw one count and fifteen blanks.
+//
+// So what is waited on is not a count but quiet: the number of listings, and
+// how many of them carry a count, unchanged across four consecutive reads. It
+// is a local cache read costing Wellfound nothing, so the asymmetry is all one
+// way - a second of extra quiet against a screen of roles reading "not loaded
+// yet" - and this is deliberately the more patient side of it.
+export const SETTLED_READS = 4;
+
+// The listings and the counts among them, as one comparable value. Two numbers
+// rather than the jobs themselves: what is being watched is the cache filling
+// up, and a title that changed under us is not that.
+export function countsSignature(jobs) {
+  const counted = jobs.filter((job) => job.actionableCount != null).length;
+  return `${jobs.length}:${counted}`;
+}
 
 // How long a reload is given to commit before the page is called dead. It is a
 // deadline, not a pause: nothing waits on it when the navigation arrives. The
@@ -430,22 +454,33 @@ export function createController({
         onHydrating?.();
         try {
           await tabs.focusJob(tab.id, blank.jobId);
-          // focusJob proves the page has ASKED for this job's applicants. The
-          // count arrives with the answer, so it is the count itself that is
-          // waited on: re-read the cache until it is there. The old code read
-          // once, straight after focusJob, and got the null it had just been
-          // told about - which is the missing counts the owner reopens the
-          // panel to fix. Nothing here touches the network; this is the page's
-          // own cache, read again.
-          for (let attempt = 1; attempt <= COUNTS_TRIES; attempt += 1) {
+          // focusJob proves the page has ASKED for this job's applicants, and
+          // the counts arrive with the answers - plural, from two queries that
+          // land at different times. So what is waited on is the cache going
+          // quiet rather than any one count appearing. Nothing here touches the
+          // network; this is the page's own cache, read again.
+          let signature = null;
+          let quiet = 0;
+          for (let read = 1; read <= COUNTS_READS; read += 1) {
             jobs = await tabs.ask(tab.id, { type: CX.LIST_JOBS });
-            const counted = jobs.find((job) => job.jobId === blank.jobId)?.actionableCount;
-            if (counted != null) break;
-            // The role may simply have no count to give. Waited out in full
-            // first, and only then written down as such.
-            if (attempt === COUNTS_TRIES) noCountFor.add(blank.jobId);
-            else await sleep(READY_POLL_MS);
+            const seen = countsSignature(jobs);
+            quiet = seen === signature ? quiet + 1 : 0;
+            signature = seen;
+            if (quiet + 1 >= SETTLED_READS) {
+              // A settled cache is the only place a missing count is a fact
+              // about the role rather than about the moment. Every role still
+              // without one is written down here, so the panel does not send
+              // the tab travelling for them again.
+              for (const job of jobs) {
+                if (job.actionableCount == null) noCountFor.add(job.jobId);
+              }
+              break;
+            }
+            await sleep(READY_POLL_MS);
           }
+          // Falling out of that loop is the cache still changing at the bound.
+          // Nothing is remembered: the pass established nothing about any role,
+          // and the counts it does have are still worth showing.
         } catch {
           // The list is still usable without counts, and a failed navigation is
           // not worth throwing away the jobs we already have. Nothing is
