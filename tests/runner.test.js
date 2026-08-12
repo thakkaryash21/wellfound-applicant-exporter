@@ -59,6 +59,10 @@ function deps(overrides = {}) {
   };
 }
 
+// Neither action: the CSV and nothing else. Named once so every preview test
+// says the same thing.
+const PREVIEW_ONLY = { download: false, accept: false };
+
 const options = {
   jobId: '9100001',
   jobTitle: 'Backend Engineer',
@@ -67,7 +71,7 @@ const options = {
   folder: 'wellfound-resumes',
   limit: 250,
   forceFullWalk: false,
-  dryRun: false,
+  actions: { download: true, accept: false },
 };
 
 describe('runJob', () => {
@@ -149,14 +153,14 @@ describe('runJob', () => {
     expect(out.stoppedBecause).toBe('limit');
   });
 
-  // C2: `previewed` is the dry run's `downloaded`, and gating the limit on
+  // C2: `previewed` is a preview's `downloaded`, and gating the limit on
   // `downloaded` alone let a preview walk every page of a role the real run
   // would have stopped 375 people earlier. Three screens then showed three
   // different numbers and none of them was what a real run would do.
-  describe('the limit a dry run has to honour too', () => {
-    it('stops a dry run at the same number a real run would stop at', async () => {
+  describe('the limit a run with downloads off has to honour too', () => {
+    it('stops a preview at the same number a real run would stop at', async () => {
       const d = deps({ fetchPage: pager([page([1, 2, 3, 4, 5])]) });
-      const out = await runJob(d, { ...options, limit: 2, dryRun: true });
+      const out = await runJob(d, { ...options, limit: 2, actions: PREVIEW_ONLY });
       expect(out.previewed).toHaveLength(2);
       expect(out.stoppedBecause).toBe('limit');
     });
@@ -164,32 +168,50 @@ describe('runJob', () => {
     it('previews exactly the number the real run downloads, for the same limit', async () => {
       const pages = () => [page([1, 2, 3, 4, 5], true), page([6, 7, 8, 9, 10], false)];
       const live = await runJob(deps({ fetchPage: pager(pages()) }), { ...options, limit: 3 });
-      const dry = await runJob(deps({ fetchPage: pager(pages()) }), {
+      const preview = await runJob(deps({ fetchPage: pager(pages()) }), {
         ...options,
         limit: 3,
-        dryRun: true,
+        actions: PREVIEW_ONLY,
       });
-      expect(dry.previewed).toHaveLength(live.downloaded.length);
-      expect(dry.previewed.map((r) => r.userId)).toEqual(live.downloaded.map((r) => r.userId));
-      expect(dry.stoppedBecause).toBe(live.stoppedBecause);
+      expect(preview.previewed).toHaveLength(live.downloaded.length);
+      expect(preview.previewed.map((r) => r.userId)).toEqual(live.downloaded.map((r) => r.userId));
+      expect(preview.stoppedBecause).toBe(live.stoppedBecause);
     });
 
-    it('stops paging once a dry run has met the limit, rather than walking on', async () => {
-      const d = deps({ fetchPage: pager([page([1, 2, 3]), page([4, 5, 6]), page([7, 8], false)]) });
-      await runJob(d, { ...options, limit: 2, dryRun: true });
+    // The same arithmetic, for the mode the accept pass introduced: downloads
+    // off but the run is not idle. `previewed` is still what the limit is spent
+    // on, so an accept-only walk stops where a download run would have, rather
+    // than paging through the whole role.
+    it('stops an accept-only walk at the limit, the same as a preview', async () => {
+      const d = deps({ fetchPage: pager([page([1, 2, 3]), page([4, 5, 6], false)]) });
+      const out = await runJob(d, {
+        ...options,
+        limit: 2,
+        actions: { download: false, accept: true },
+      });
+      expect(out.previewed).toHaveLength(2);
+      expect(out.downloaded).toHaveLength(0);
+      expect(out.previewed.length + out.downloaded.length).toBe(2);
+      expect(out.stoppedBecause).toBe('limit');
       expect(d.fetchPage).toHaveBeenCalledTimes(1);
     });
 
-    it('leaves an unlimited dry run free to preview everybody', async () => {
+    it('stops paging once a preview has met the limit, rather than walking on', async () => {
+      const d = deps({ fetchPage: pager([page([1, 2, 3]), page([4, 5, 6]), page([7, 8], false)]) });
+      await runJob(d, { ...options, limit: 2, actions: PREVIEW_ONLY });
+      expect(d.fetchPage).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves an unlimited preview free to list everybody', async () => {
       const d = deps({ fetchPage: pager([page([1, 2, 3, 4, 5], false)]) });
-      const out = await runJob(d, { ...options, limit: Infinity, dryRun: true });
+      const out = await runJob(d, { ...options, limit: Infinity, actions: PREVIEW_ONLY });
       expect(out.previewed).toHaveLength(5);
       expect(out.stoppedBecause).toBe('exhausted');
     });
 
     it('does not count a previewed candidate against a live run limit', async () => {
       const d = deps({ fetchPage: pager([page([1, 2, 3], false)]) });
-      const out = await runJob(d, { ...options, limit: 3, dryRun: false });
+      const out = await runJob(d, { ...options, limit: 3, actions: { download: true, accept: false } });
       expect(out.downloaded).toHaveLength(3);
       expect(out.previewed).toHaveLength(0);
       expect(out.stoppedBecause).toBe('exhausted');
@@ -238,7 +260,7 @@ describe('runJob', () => {
 
   it('records nothing in preview mode', async () => {
     const d = deps();
-    await runJob(d, { ...options, dryRun: true });
+    await runJob(d, { ...options, actions: PREVIEW_ONLY });
     expect(d.recordDownloaded).not.toHaveBeenCalled();
   });
 
@@ -275,9 +297,9 @@ describe('runJob', () => {
 
   // Counted into no array at all, a preview had nothing to report but
   // "0 downloaded".
-  it('counts what a dry run previewed, so the summary has a number to say', async () => {
+  it('counts what a preview listed, so the summary has a number to say', async () => {
     const d = deps();
-    const out = await runJob(d, { ...options, dryRun: true });
+    const out = await runJob(d, { ...options, actions: PREVIEW_ONLY });
     expect(out.previewed).toHaveLength(2);
     expect(out.downloaded).toHaveLength(0);
   });
@@ -430,7 +452,7 @@ describe('runJob', () => {
 
     it('marks previewed rows as previewed, not as missing resumes', async () => {
       const d = deps({ fetchPage: pager([page([1], false)]) });
-      const out = await runJob(d, { ...options, dryRun: true });
+      const out = await runJob(d, { ...options, actions: PREVIEW_ONLY });
       expect(out.records[0].resumeStatus).toBe(RESUME_STATUS.PREVIEW);
     });
 

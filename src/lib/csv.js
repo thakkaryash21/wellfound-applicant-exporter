@@ -3,9 +3,10 @@ import { localDateStamp } from './local-time.js';
 // The run that writes the CSV and downloads nothing had five names: `dryRun`
 // in the options, `'dry-run'` as an outcome key and a trace kind, "Preview
 // only" on the checkbox, "listed" in the running screen, and "dry run" in this
-// column. The code word is `dryRun` - it names the flag, and a flag reads as a
-// flag. The word a reader ever sees is "preview", and this is the one place
-// that says so: the outcome key, the counts bucket and the Resume cell are all
+// column. In code it is no longer a name at all but the absence of an action -
+// `actions.download` off - because a run can now also accept, and one boolean
+// could not say which. The word a reader ever sees is "preview", and this is
+// the one place that says so: the outcome key, the counts bucket and the Resume cell are all
 // this constant, so a grep for one finds all three.
 export const PREVIEW = 'preview';
 

@@ -9,6 +9,16 @@ import { RESUME_STATUS, PREVIEW } from './csv.js';
 
 export const MAX_CONSECUTIVE_FAILURES = 5;
 
+// What a run does to each candidate, as one value rather than a flag per
+// action, so the four modes are every combination: neither (a preview - the CSV
+// and nothing else), download, accept, or both.
+//
+// The defaults are not symmetric, on purpose. Fetching a resume is what this
+// extension has always done when not told otherwise, so `download` stays on.
+// Accepting sends a message to a person under the operator's name, so it is
+// never anything but opt-in.
+export const runActions = ({ download = true, accept = false } = {}) => ({ download, accept });
+
 export async function runJob(deps, options) {
   const { fetchPage, downloadResume, recordDownloaded, sleep, emit } = deps;
   const rand = deps.rand ?? Math.random;
@@ -20,7 +30,11 @@ export async function runJob(deps, options) {
     folder,
     limit,
     forceFullWalk,
-    dryRun,
+    // What this run is here to do - see runActions above. Only `download`
+    // belongs to this walk; accepting drives the applicant reviewer, not the
+    // API. The whole object still travels together so no caller has to
+    // remember which half goes where.
+    actions: askedActions,
     signal,
     jobIndex,
     jobTotal,
@@ -33,6 +47,7 @@ export async function runJob(deps, options) {
     pageCap = Infinity,
   } = options;
 
+  const actions = runActions(askedActions);
   const seen = new Set(seenUserIds);
   const wanted = only ? new Set(only) : null;
   // A targeted walk starts with an empty `seen`, so no page can ever look fully
@@ -46,7 +61,7 @@ export async function runJob(deps, options) {
   const skippedNoId = [];
   const masked = [];
   const failed = [];
-  // A previewed candidate used to be counted into nothing at all, so a dry run
+  // A previewed candidate used to be counted into nothing at all, so a preview
   // over 400 applicants ended its summary with "0 downloaded" and no other
   // number anywhere.
   const previewed = [];
@@ -148,7 +163,7 @@ export async function runJob(deps, options) {
         break;
       }
       // A preview counts into `previewed`, never into `downloaded`, so gating on
-      // `downloaded` alone meant a dry run could never reach its limit: it
+      // `downloaded` alone meant a preview could never reach its limit: it
       // walked all forty pages of a 400-applicant role that the real run would
       // have stopped at 25. The two buckets are mutually exclusive - a candidate
       // lands in exactly one - so their sum is "how many of the limit this walk
@@ -189,7 +204,7 @@ export async function runJob(deps, options) {
         continue;
       }
 
-      if (dryRun) {
+      if (!actions.download) {
         record.resumeStatus = RESUME_STATUS.PREVIEW;
         previewed.push(record);
         emitCandidate(record, PREVIEW);
