@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { runAcceptPass, planAccepts, firstNameOf, resolveFirstName } from '../src/panel/accept-pass.js';
+import {
+  runAcceptPass,
+  planAccepts,
+  firstNameOf,
+  resolveFirstName,
+  sendOutcome,
+} from '../src/panel/accept-pass.js';
 import { ACCEPT_STATUS, RESUME_STATUS } from '../src/lib/csv.js';
 import { CX } from '../src/lib/messages.js';
 import { PACING } from '../src/lib/jitter.js';
@@ -125,6 +131,94 @@ describe('planAccepts', () => {
     expect(plan.targets).toEqual(['1']);
     expect(plan.rowsById.get('1')).toHaveLength(2);
   });
+
+  // The shape the review found and nothing covered: ONE person, TWO rows, and
+  // the row whose download was attempted failed. The other row only points at
+  // it. Deciding row by row refused the first and accepted the second - the
+  // same person, both cells in the same CSV, and a resume gone for good,
+  // because accepting removes them from the only query this extension has.
+  it('refuses a person whose other row failed its download, however the second row reads', () => {
+    const rows = [
+      { userId: '7', name: 'Person 7', resumeStatus: 'failed: NETWORK_FAILED' },
+      { userId: '7', name: 'Person 7', resumeStatus: RESUME_STATUS.ANOTHER_ROW },
+    ];
+    const plan = planAccepts({ records: rows });
+    expect(plan.targets).toEqual([]);
+    expect(plan.refusedNoResume).toBe(2);
+    // Both cells agree. One row saying "refused" beside another saying
+    // "accepted" was the CSV this bug wrote, and the CSV is the only surviving
+    // record of an accepted person.
+    expect(rows.map((r) => r.acceptStatus)).toEqual([
+      ACCEPT_STATUS.NO_RESUME,
+      ACCEPT_STATUS.NO_RESUME,
+    ]);
+  });
+
+  // The accept-only corollary: nobody was downloaded at all, so the first row
+  // is a preview and the second points at it. Neither is evidence of a file.
+  it('refuses a person whose only real row was a preview', () => {
+    const rows = [
+      { userId: '7', resumeStatus: RESUME_STATUS.PREVIEW },
+      { userId: '7', resumeStatus: RESUME_STATUS.ANOTHER_ROW },
+    ];
+    expect(planAccepts({ records: rows }).targets).toEqual([]);
+  });
+
+  // The pointer must not swing the other way either: a person whose real row
+  // downloaded cleanly is acceptable, and their second row must not block them.
+  it('accepts a person whose other row downloaded, and moves both rows together', () => {
+    const rows = [captured('7'), { userId: '7', resumeStatus: RESUME_STATUS.ANOTHER_ROW }];
+    const plan = planAccepts({ records: rows });
+    expect(plan.targets).toEqual(['7']);
+    expect(rows.map((r) => r.acceptStatus)).toEqual([
+      ACCEPT_STATUS.NOT_REACHED,
+      ACCEPT_STATUS.NOT_REACHED,
+    ]);
+  });
+
+  // A row that points at nothing - the other row never arrived, a walk that
+  // stopped between them - is not a capture. The default is refusal.
+  it('refuses a person who has only a pointer row', () => {
+    const rows = [{ userId: '7', resumeStatus: RESUME_STATUS.ANOTHER_ROW }];
+    expect(planAccepts({ records: rows }).targets).toEqual([]);
+    expect(rows[0].acceptStatus).toBe(ACCEPT_STATUS.NO_RESUME);
+  });
+});
+
+// The driver knows two very different things and used to have one way to say
+// them. `unclear` is the only state in this panel that tells the operator a
+// stranger may have been messaged and sends them to Wellfound to check; every
+// guard that fires BEFORE the send click knows for certain that nothing went
+// out, and must not raise it.
+describe('sendOutcome', () => {
+  it('reads the driver s certain refusals as a plain stop', () => {
+    for (const reason of [
+      'The response composer did not open; nothing was sent',
+      'The reviewer is showing 21373701, not 21527289; nothing was sent',
+      'Refusing to send a message with an unsubstituted token; nothing was sent',
+      'Refusing to click a reject control (asked for Accept, found "Reject"); nothing was sent',
+    ]) {
+      expect(sendOutcome(reason)).toBe('error');
+    }
+  });
+
+  it('keeps unclear for the one failure that follows the click', () => {
+    expect(
+      sendOutcome(
+        'Could not confirm the accept for 21527289. It may or may not have been sent - ' +
+          'check the candidate in Wellfound before running again. Nothing was retried.',
+      ),
+    ).toBe('unclear');
+  });
+
+  // The polarity that matters. Only certainty is marked, so anything this
+  // extension did not write - the relay's own timeout, an exception from
+  // somewhere unforeseen - falls to the cautious reading rather than the
+  // reassuring one.
+  it('treats an outcome nobody vouched for as unclear', () => {
+    expect(sendOutcome('Page did not respond in time')).toBe('unclear');
+    expect(sendOutcome('')).toBe('unclear');
+  });
 });
 
 describe('firstNameOf', () => {
@@ -205,6 +299,41 @@ describe('runAcceptPass', () => {
     expect(records[0].acceptStatus).toMatch(/^failed: /);
     expect(records[1].acceptStatus).toBe(ACCEPT_STATUS.NOT_REACHED);
     expect(events.at(-1)).toMatchObject({ type: 'accept_done', stoppedBecause: 'unclear' });
+  });
+
+  // The same halt, the other cause. The composer failed to open, so the driver
+  // never clicked anything and says so. Calling this `unclear` sent the
+  // operator to audit a role where provably nothing happened - and an alert
+  // that cries wolf gets discounted on the run where it is real.
+  it('stops without the alarm when the driver refused before clicking send', async () => {
+    const records = [captured('1'), captured('2')];
+    const reviewer = fakeReviewer({ people: ['1', '2'] });
+    const events = [];
+    const ledger = [];
+    const result = await runAcceptPass(
+      {
+        review: async (message) => {
+          if (message.type === CX.ACCEPT_CANDIDATE) {
+            throw new Error('The response composer did not open; nothing was sent');
+          }
+          return reviewer.review(message);
+        },
+        recordAccepted: async () => ledger.push(1),
+        sleep: async () => {},
+        emit: (event) => events.push(event),
+      },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+    );
+
+    expect(result.stoppedBecause).toBe('error');
+    expect(result.stoppedBecause).not.toBe('unclear');
+    // Everything else about a halt is unchanged: nothing retried, nobody
+    // behind them touched, the cell honest about which of the two it was.
+    expect(result.failed).toBe(1);
+    expect(ledger).toEqual([]);
+    expect(typesOf(reviewer.log)).not.toContain(CX.SKIP_CANDIDATE);
+    expect(records[0].acceptStatus).toMatch(/^failed: .*nothing was sent/);
+    expect(records[1].acceptStatus).toBe(ACCEPT_STATUS.NOT_REACHED);
   });
 
   // Rule 5. The ledger write lands before anything else can interrupt - an

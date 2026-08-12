@@ -19,11 +19,44 @@ import { localDateTimeText } from '../lib/local-time.js';
 // selector, never retries a send, and never accepts anybody whose resume this
 // extension does not already have on disk.
 
-// The two Resume outcomes that mean "we have their file". Anything else -
-// no resume, locked, previewed, failed, never reached - means accepting them
-// would forfeit their resume forever, because an accepted candidate leaves
-// NEEDS_REVIEW and no query this extension has can ever reach them again.
+// The two Resume outcomes that mean "we have their file": fetched by this run,
+// or fetched by an earlier one. Anything else - no resume, locked, previewed,
+// failed, never reached - means accepting them would forfeit their resume
+// forever, because an accepted candidate leaves NEEDS_REVIEW and no query this
+// extension has can ever reach them again.
 const CAPTURED = new Set([RESUME_STATUS.DOWNLOADED, RESUME_STATUS.ALREADY]);
+
+// The one status that is neither a capture nor a refusal. A person with two
+// applications has two rows; the walk spends one download and the other row
+// says only "the outcome is on the other row". Read as a capture it would
+// launder a failed download into an accept, which is the loss this whole
+// module exists to prevent. Read as a refusal it would block a person whose
+// download plainly succeeded. It is a pointer, so it is neither.
+const POINTER = RESUME_STATUS.ANOTHER_ROW;
+
+// The panel's half of the driver's one classification. src/content/reviewer.js
+// appends this phrase to every refusal it raises BEFORE the send is clicked,
+// and to nothing else; a test asserts the driver's own copy of it is this exact
+// string. The two live apart because the driver is a MAIN-world classic script
+// with no imports, the same reason the message types are duplicated into it.
+export const NOTHING_SENT = 'nothing was sent';
+
+// Which of the two a failed accept was. Only certainty is recognised: an error
+// this extension did not write - a relay timeout, anything unforeseen - carries
+// no phrase and is read as unclear, because an outcome nobody can vouch for is
+// exactly what `unclear` means.
+//
+// `unclear` is the one word in this panel that sends the operator to Wellfound
+// to check whether a stranger got a message. Spending it on a composer that was
+// slow to render teaches them to ignore it on the run where it is real.
+//
+// The certain half is `error`, which is not a new word: it is already what this
+// pass reports when opening the reviewer, reading a position or skipping fails
+// - the same concept, "the pass stopped and nothing went out", and the summary
+// already says so in those words. One term, one meaning.
+export function sendOutcome(reason) {
+  return String(reason).includes(NOTHING_SENT) ? 'error' : 'unclear';
+}
 
 // `[first_name]` is a greeting, not an identity: splitting `name` on
 // whitespace is a guess, wrong for a title, a mononym, or family-name-first
@@ -50,36 +83,59 @@ export function resolveFirstName(record) {
 // whether it was refused, missed, or never attempted.
 export function planAccepts({ records = [], alreadyAccepted = [] } = {}) {
   const already = new Set(alreadyAccepted.map(String));
-  // One person can hold two rows on the same page, so the plan is keyed by
-  // userId and every row for that id moves together.
+  // Grouped before anything is decided, because the decision is about a PERSON
+  // and the evidence is spread across their rows. Deciding row by row let one
+  // person be refused on the row whose download failed and accepted on the
+  // row that merely pointed at it - the same person, both cells in the CSV,
+  // and a resume lost for good.
   const rowsById = new Map();
+  // Rows with no userId at all, kept apart: nobody without an id can be
+  // accepted, since the interlock in the reviewer matches on the id and there
+  // is no name-based fallback anywhere.
+  const anonymous = [];
+  for (const record of records) {
+    const userId = record.userId == null ? null : String(record.userId);
+    if (!userId) {
+      anonymous.push(record);
+      continue;
+    }
+    if (rowsById.has(userId)) rowsById.get(userId).push(record);
+    else rowsById.set(userId, [record]);
+  }
+
   const targets = [];
   let refusedNoResume = 0;
   let alreadyCount = 0;
 
-  for (const record of records) {
-    const userId = record.userId == null ? null : String(record.userId);
-    // Nobody without an id can be accepted: the interlock in the reviewer
-    // matches on the id and there is no name-based fallback anywhere.
-    if (!userId || !CAPTURED.has(record.resumeStatus)) {
-      record.acceptStatus = ACCEPT_STATUS.NO_RESUME;
-      refusedNoResume += 1;
+  const refuse = (rows) => {
+    for (const row of rows) row.acceptStatus = ACCEPT_STATUS.NO_RESUME;
+    refusedNoResume += rows.length;
+  };
+
+  refuse(anonymous);
+
+  for (const [userId, rows] of rowsById) {
+    // Both halves are load-bearing and neither implies the other. `some`
+    // rules out a person whose every row is a pointer or a refusal; `every`
+    // rules out the person one of whose rows records a failure or a refusal,
+    // whatever their other rows say. A run holds their resume only if a row
+    // says so and no row says otherwise.
+    const captured =
+      rows.some((row) => CAPTURED.has(row.resumeStatus)) &&
+      rows.every((row) => CAPTURED.has(row.resumeStatus) || row.resumeStatus === POINTER);
+    if (!captured) {
+      refuse(rows);
       continue;
     }
     if (already.has(userId)) {
-      record.acceptStatus = ACCEPT_STATUS.ALREADY;
-      alreadyCount += 1;
+      for (const row of rows) row.acceptStatus = ACCEPT_STATUS.ALREADY;
+      alreadyCount += rows.length;
       continue;
     }
-    if (rowsById.has(userId)) {
-      rowsById.get(userId).push(record);
-    } else {
-      rowsById.set(userId, [record]);
-      targets.push(userId);
-    }
+    targets.push(userId);
     // Held until the walk reaches them. A pass that stops early leaves this
     // word in the cell, which is the honest one.
-    record.acceptStatus = ACCEPT_STATUS.NOT_REACHED;
+    for (const row of rows) row.acceptStatus = ACCEPT_STATUS.NOT_REACHED;
   }
 
   return { targets, rowsById, refusedNoResume, alreadyAccepted: alreadyCount };
@@ -262,14 +318,20 @@ export async function runAcceptPass(deps, options) {
           },
         });
       } catch (sendError) {
-        // An unclear outcome stops the pass and reports it. It is never
-        // retried and never followed by a skip: the message may have gone out,
-        // and a second one is a second message to a real person.
+        // Either way the pass stops here. It is never retried and never
+        // followed by a skip: if the message may have gone out, a second one is
+        // a second message to a real person; and if the driver refused before
+        // clicking, whatever made it refuse is likely to refuse for the next
+        // person too.
+        //
+        // What differs is what the operator is told. The driver knows which of
+        // the two happened and says so; the panel used to flatten both into the
+        // alarming one.
         const reason = String(sendError.message || sendError);
         mark(userId, acceptFailure(reason));
         totals.failed += 1;
         emitCandidate(userId, 'failed', { error: reason });
-        stoppedBecause = 'unclear';
+        stoppedBecause = sendOutcome(reason);
         error = reason;
         break;
       }
