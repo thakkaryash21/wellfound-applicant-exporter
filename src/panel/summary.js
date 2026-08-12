@@ -92,13 +92,27 @@ function skippedNote(counts) {
 // operator to go and look at Wellfound before running again, so it is lifted
 // out of the notes and rendered above the headline.
 export function acceptAlert(jobs = []) {
+  const lines = [];
   const unclear = jobs.filter((job) => job.acceptStoppedBecause === 'unclear');
-  if (unclear.length === 0) return null;
-  const names = listNames(unclear.map((job) => job.jobTitle));
-  return (
-    `${names}: an accept did not confirm, so that message may or may not have gone out. ` +
-    'Nothing was retried. Check that role in Wellfound before running it again.'
-  );
+  if (unclear.length) {
+    lines.push(
+      `${listNames(unclear.map((job) => job.jobTitle))}: an accept did not confirm, so that ` +
+        'message may or may not have gone out. Nothing was retried. Check that role in ' +
+        'Wellfound before running it again.',
+    );
+  }
+  // The other hands-on state, and the more definite of the two: the message
+  // certainly went out and the ledger - the only thing that stops the next run
+  // sending a second one - does not know it did.
+  const unrecorded = jobs.filter((job) => job.acceptStoppedBecause === 'unrecorded');
+  if (unrecorded.length) {
+    lines.push(
+      `${listNames(unrecorded.map((job) => job.jobTitle))}: a message was sent that could not ` +
+        'be recorded, so nothing here remembers it. Check that role in Wellfound before ' +
+        'running it again, or that person will be messaged a second time.',
+    );
+  }
+  return lines.length ? lines.join(' ') : null;
 }
 
 // Everything the run knows, said out loud. Nothing here may read better than
@@ -114,6 +128,11 @@ export function summarize(event, trace = []) {
     aborted: 'Stopped by you',
     failing: 'Stopped: downloads kept failing',
     error: 'The run did not finish',
+    // The two accept outcomes that stop the whole run. Without them a run that
+    // halted at role one of three opened with a plain count and read as a
+    // complete export.
+    unclear: 'Stopped: an accept did not confirm',
+    unrecorded: 'Stopped: a message was sent and could not be recorded',
   }[event.stoppedBecause];
   if (prefix) headline = `${prefix} \u00b7 ${headline}`;
 
@@ -199,8 +218,36 @@ export function summarize(event, trace = []) {
     if (event.acceptAlready) {
       both(`${event.acceptAlready} were accepted on an earlier run, so nothing was sent again.`);
     }
-    if (event.acceptFailed) {
-      both(`${event.acceptFailed} could not be accepted. Nothing was sent to them.`);
+    // The unclear send is counted into acceptFailed like every other failure,
+    // and it is not like every other failure: "nothing was sent to them" is
+    // exactly what nobody can say about it. The report used to print that
+    // sentence about the same person the alert above sends the operator to
+    // Wellfound to check, so one of the two was always lying and the operator
+    // learnt to discount whichever they read second.
+    //
+    // One pass ends on at most one unclear send - it stops there - so the count
+    // of roles that ended that way is the count of people it concerns.
+    const unclear = jobs.filter((j) => j.acceptStoppedBecause === 'unclear').length;
+    const certain = Math.max(0, (event.acceptFailed ?? 0) - unclear);
+    if (certain) {
+      both(`${certain} could not be accepted. Nothing was sent to them.`);
+    }
+    if (unclear) {
+      both(
+        `${unclear} ${unclear === 1 ? 'accept' : 'accepts'} did not confirm: the message may ` +
+          'or may not have gone out, and nothing was retried.',
+      );
+    }
+    // Sent, and not written down. Kept apart from both of the above because the
+    // remedy is different again: it is the only note here about a message this
+    // extension knows went out and cannot prove to itself later.
+    const unrecorded = jobs.filter((j) => j.acceptStoppedBecause === 'unrecorded');
+    if (unrecorded.length) {
+      both(
+        `${unrecorded.length} ${unrecorded.length === 1 ? 'message' : 'messages'} went out and ` +
+          'could not be recorded. The CSV for that role is the only record of it, and the run ' +
+          'stopped there rather than sending more.',
+      );
     }
     // Held back, not merely absent. When a role's downloads failed five times
     // in a row the run declines to start sending irreversible messages through

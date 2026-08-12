@@ -276,6 +276,58 @@ describe('the accept pass, afterwards', () => {
     expect(s.alert).toContain('Check that role in Wellfound');
   });
 
+  // The contradiction the review found: the alert above said the message may or
+  // may not have gone out, and the notes below said "Nothing was sent to them"
+  // about the same person. Whichever the operator read second, they discounted.
+  it('never says nothing was sent about a send nobody can vouch for', () => {
+    const s = summarize(
+      accepting({
+        accepted: 3,
+        acceptFailed: 1,
+        stoppedBecause: 'unclear',
+        jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptStoppedBecause: 'unclear' }],
+      }),
+    );
+    const notes = s.notes.join('\n');
+    expect(notes).not.toContain('Nothing was sent to them');
+    expect(notes).toContain('did not confirm');
+    expect(notes).toContain('may or may not have gone out');
+    // And the two surfaces agree, because they are now saying one thing.
+    expect(s.alert).toContain('may or may not have gone out');
+    // A run that stopped there does not open as though it finished.
+    expect(s.headline).toContain('Stopped: an accept did not confirm');
+  });
+
+  // The certain failures still read as certain: they are the ones the driver
+  // refused before the click, and "nothing was sent to them" is true of those.
+  it('keeps a certain failure apart from the unclear one in the same run', () => {
+    const notes = summarize(
+      accepting({
+        accepted: 3,
+        acceptFailed: 3,
+        jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptStoppedBecause: 'unclear' }],
+      }),
+    ).notes.join('\n');
+    expect(notes).toContain('2 could not be accepted. Nothing was sent to them.');
+    expect(notes).toContain('1 accept did not confirm');
+  });
+
+  // A message that went out and could not be written down. Neither of the two
+  // above: the send is a fact, and the record of it is what failed.
+  it('says plainly when a message went out and could not be recorded', () => {
+    const s = summarize(
+      accepting({
+        accepted: 3,
+        stoppedBecause: 'unrecorded',
+        jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptStoppedBecause: 'unrecorded' }],
+      }),
+    );
+    expect(s.alert).toContain('could not be recorded');
+    expect(s.alert).toContain('messaged a second time');
+    expect(s.notes.join('\n')).toContain('went out and could not be recorded');
+    expect(s.headline).toContain('Stopped: a message was sent and could not be recorded');
+  });
+
   it('has no alert when every accept confirmed', () => {
     expect(summarize(accepting({ accepted: 3 })).alert).toBe(null);
   });
