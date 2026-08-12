@@ -1,3 +1,5 @@
+import { localDateTimeText } from './local-time.js';
+
 export const MAX_SEEN = 5000;
 
 const KEY_PREFIX = 'job:';
@@ -11,6 +13,12 @@ function emptyRecord(jobId) {
     lastRunAt: null,
     totalDownloaded: 0,
     folder: null,
+    // userId -> local date/time text of the accept. A plain map, not a list
+    // like seenUserIds, because an accept is unrepeatable and the moment it
+    // happened matters - a raw Unix timestamp has already been a reported
+    // defect on this project, so this reuses local-time.js rather than
+    // inventing a second way to stamp a record.
+    accepted: {},
   };
 }
 
@@ -32,6 +40,13 @@ function knownCount(record) {
 // the only site that could have been forgotten.
 function seenUserIds(record) {
   return record?.seenUserIds ?? [];
+}
+
+// Same defaulting rule as seenUserIds, and for the same reason: this is the
+// one place allowed to know the field is called `accepted`, so a rename
+// fails loudly here instead of quietly re-sending messages to everyone.
+function acceptedMap(record) {
+  return record?.accepted ?? {};
 }
 
 // What a caller outside this module may know about a job. Named fields, not the
@@ -137,8 +152,39 @@ export function createLedger(storage) {
         folder: folder ?? record.folder ?? null,
       });
     },
+    // Everyone this job has already been sent an accept message for. Mirrors
+    // seenUserIds: the accept pass subtracts from this list, it never reaches
+    // into the record itself.
+    async acceptedUserIds(jobId) {
+      return Object.keys(acceptedMap(await get(jobId)));
+    },
+    // Written per person, not batched at end of run - a stronger version of
+    // why markDownloaded is written per file, because a lost accept record
+    // means a real person gets messaged a second time. Idempotent: a second
+    // call for the same userId keeps the original acceptedAt rather than
+    // overwriting it, so retrying after a crash never lies about when the
+    // message actually went out.
+    async markAccepted(jobId, userId) {
+      const record = await get(jobId);
+      const accepted = acceptedMap(record);
+      if (userId in accepted) return;
+      await put({
+        ...record,
+        accepted: { ...accepted, [userId]: localDateTimeText() },
+      });
+    },
     async forget(jobId) {
       await storage.remove(key(jobId));
+    },
+    // The accept-only equivalent of forget. Deliberately narrower: it clears
+    // who has been messaged for this job without touching seenUserIds or
+    // totalDownloaded, so a rerun after clearing it re-walks accept targets
+    // but does not re-fetch resumes already on disk. Named to say exactly
+    // what it clears, so it can never be wired to the same button as forget
+    // by accident.
+    async forgetAccepted(jobId) {
+      const record = await get(jobId);
+      await put({ ...record, accepted: {} });
     },
   };
 }

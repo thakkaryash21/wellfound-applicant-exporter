@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { createLedger, MAX_SEEN } from '../src/lib/ledger.js';
 
 function fakeStorage() {
@@ -176,5 +176,68 @@ describe('ledger.forget', () => {
     await ledger.forget('1');
     expect(await ledger.describeAll()).toEqual([]);
     expect((await ledger.get('1')).seenUserIds).toEqual([]);
+  });
+});
+
+describe('ledger.markAccepted', () => {
+  it('records the userId as accepted for that job', async () => {
+    await ledger.markAccepted('1', '111');
+    expect(await ledger.acceptedUserIds('1')).toEqual(['111']);
+  });
+
+  it('stamps a local date/time string, not a raw timestamp', async () => {
+    await ledger.markAccepted('1', '111');
+    const record = await ledger.get('1');
+    expect(typeof record.accepted['111']).toBe('string');
+    expect(record.accepted['111']).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+  });
+
+  it('is idempotent: a second call for the same userId does not overwrite the first acceptedAt', async () => {
+    // Fake timers force the clock to actually move between the two calls -
+    // real time can land both calls in the same second, which would make a
+    // broken (non-idempotent) implementation pass this test by coincidence.
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-12T10:00:00'));
+    await ledger.markAccepted('1', '111');
+    const first = (await ledger.get('1')).accepted['111'];
+    vi.setSystemTime(new Date('2026-08-12T10:05:00'));
+    await ledger.markAccepted('1', '111');
+    const record = await ledger.get('1');
+    vi.useRealTimers();
+    expect(Object.keys(record.accepted)).toEqual(['111']);
+    expect(record.accepted['111']).toBe(first);
+  });
+
+  it('does not affect seenUserIds or totalDownloaded', async () => {
+    await ledger.markDownloaded('1', ['1'], { jobTitle: 'a' });
+    await ledger.markAccepted('1', '2');
+    const record = await ledger.get('1');
+    expect(record.seenUserIds).toEqual(['1']);
+    expect(record.totalDownloaded).toBe(1);
+  });
+
+  it('keeps accepts separate per job', async () => {
+    await ledger.markAccepted('1', '111');
+    await ledger.markAccepted('2', '222');
+    expect(await ledger.acceptedUserIds('1')).toEqual(['111']);
+    expect(await ledger.acceptedUserIds('2')).toEqual(['222']);
+  });
+});
+
+describe('ledger.acceptedUserIds', () => {
+  it('is empty for a job the ledger has never seen', async () => {
+    expect(await ledger.acceptedUserIds('nope')).toEqual([]);
+  });
+});
+
+describe('ledger.forgetAccepted', () => {
+  it('clears accepts but leaves downloads untouched', async () => {
+    await ledger.markDownloaded('1', ['1'], { jobTitle: 'a' });
+    await ledger.markAccepted('1', '1');
+    await ledger.forgetAccepted('1');
+    expect(await ledger.acceptedUserIds('1')).toEqual([]);
+    const record = await ledger.get('1');
+    expect(record.seenUserIds).toEqual(['1']);
+    expect(record.totalDownloaded).toBe(1);
   });
 });

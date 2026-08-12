@@ -43,6 +43,14 @@ export function createLedgerService(storage) {
     // credit for resumes already on disk.
     recordDownloaded: (jobId, record, meta) => ledger.markDownloaded(jobId, [record.userId], meta),
 
+    acceptedUserIdsFor: (jobId) => ledger.acceptedUserIds(jobId),
+
+    // Written per person, immediately - never batched. An accept sends a
+    // message that cannot be undone, so losing this record to an interrupted
+    // run risks messaging the same person twice, which is worse than losing
+    // credit for a download ever was.
+    recordAccepted: (jobId, userId) => ledger.markAccepted(jobId, userId),
+
     // `folder` is remembered with the run so a later re-download lands beside
     // the originals rather than in whatever default the Library would guess.
     finishRun: (jobId, { folder }) => ledger.finishRun(jobId, { folder }),
@@ -91,5 +99,10 @@ export function createLedgerService(storage) {
     },
 
     forget: (jobId) => ledger.forget(jobId),
+
+    // The accept-only equivalent of forget. Named forgetAccepted, not
+    // forget2 or a shared flag, so a caller can never wire the wrong button
+    // to it and clear both dimensions of the ledger at once.
+    forgetAccepted: (jobId) => ledger.forgetAccepted(jobId),
   };
 }
