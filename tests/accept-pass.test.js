@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, it, expect } from 'vitest';
 import {
   runAcceptPass,
@@ -5,6 +6,7 @@ import {
   firstNameOf,
   resolveFirstName,
   sendOutcome,
+  CX_CLOSE_REVIEWER,
 } from '../src/panel/accept-pass.js';
 import { ACCEPT_STATUS, RESUME_STATUS } from '../src/lib/csv.js';
 import { CX } from '../src/lib/messages.js';
@@ -17,7 +19,7 @@ const JOB = '9100001';
 // leaves the index alone (1 of 116 -> 1 of 115); a skip advances the index and
 // leaves the total alone (1 of 115 -> 2 of 115). Every message the pass sends
 // is logged, because half of what these tests assert is what was NOT sent.
-function fakeReviewer({ people, failAccept = null } = {}) {
+function fakeReviewer({ people, failAccept = null, closeFails = false } = {}) {
   const queue = people.map(String);
   const log = [];
   let index = 1;
@@ -34,6 +36,16 @@ function fakeReviewer({ people, failAccept = null } = {}) {
       opened = true;
       index = 1;
       return { opened: true, ...at() };
+    }
+    // Teardown, answered whether or not anything is open - the driver's own
+    // teardown is safe to call when there is nothing to tear down, and a fake
+    // that insisted on an open modal would be a stricter page than the real one.
+    // `opened` is what a test reads to ask whether the pass left the reviewer
+    // sitting there with a composed message in it.
+    if (message.type === CX_CLOSE_REVIEWER) {
+      if (closeFails) throw new Error('Page did not respond in time');
+      opened = false;
+      return { cancelled: false, closed: true, notes: [] };
     }
     if (!opened) throw new Error('The reviewer is not open');
     if (message.type === CX.READ_CANDIDATE) return at();
@@ -56,7 +68,7 @@ function fakeReviewer({ people, failAccept = null } = {}) {
     throw new Error(`unexpected message ${message.type}`);
   };
 
-  return { review, log, queue };
+  return { review, log, queue, isOpen: () => opened };
 }
 
 const captured = (userId, name = `Person ${userId}`) => ({
@@ -516,5 +528,161 @@ describe('runAcceptPass', () => {
     );
 
     expect(typesOf(reviewer.log)).toContain(CX.STOP_REVIEWER);
+  });
+});
+
+// The pass used to end and leave the reviewer standing - and on the stop path,
+// with the operator's message typed into the composer, one click from a real
+// person. The panel showed a post-run summary; the tab showed a half-written
+// message to a stranger. Closing it is the driver's job, but remembering to ask
+// is this file's, on EVERY way out and not just the ones that throw.
+describe('leaving Wellfound as the pass found it', () => {
+  const closedOn = async (make) => {
+    const { reviewer, result } = await make();
+    expect(typesOf(reviewer.log)).toContain(CX_CLOSE_REVIEWER);
+    expect(reviewer.isOpen()).toBe(false);
+    return result;
+  };
+
+  it('closes the reviewer after a pass that finished normally', async () => {
+    const records = [captured('1'), captured('2')];
+    const { run, reviewer } = harness({ people: ['1', '2'], records });
+    const result = await closedOn(async () => ({ reviewer, result: await run() }));
+    expect(result).toMatchObject({ accepted: 2, stoppedBecause: 'finished' });
+    // Last, after the work and before the pass reports: the page is quiet by
+    // the time the operator is looking at the summary.
+    expect(typesOf(reviewer.log).at(-1)).toBe(CX_CLOSE_REVIEWER);
+  });
+
+  it('closes it after the send the driver could not confirm', async () => {
+    const records = [captured('1'), captured('2')];
+    const { run, reviewer } = harness({ people: ['1', '2'], records, failAccept: '1' });
+    const result = await closedOn(async () => ({ reviewer, result: await run() }));
+    expect(result.stoppedBecause).toBe('unclear');
+  });
+
+  it('closes it after a refusal raised before the send was clicked', async () => {
+    // The composer never opened, so the message is not in the box - but the
+    // reviewer is still up, and the next thing to click it will be a person.
+    const records = [captured('1')];
+    const reviewer = fakeReviewer({ people: ['1'] });
+    const result = await runAcceptPass(
+      {
+        review: async (message) => {
+          if (message.type === CX.ACCEPT_CANDIDATE) {
+            throw new Error('Stopped before the message was sent; nothing was sent');
+          }
+          return reviewer.review(message);
+        },
+        recordAccepted: async () => {},
+        sleep: async () => {},
+        emit: () => {},
+      },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+    );
+    expect(result.stoppedBecause).toBe('error');
+    expect(typesOf(reviewer.log)).toContain(CX_CLOSE_REVIEWER);
+    expect(reviewer.isOpen()).toBe(false);
+  });
+
+  // The path that mattered most: the operator pressed stop, and the composer
+  // they were left staring at is the one thing the panel could not show them.
+  it('closes it when the operator aborts, after telling the page to stop', async () => {
+    const records = [captured('1'), captured('2')];
+    const controller = new AbortController();
+    const reviewer = fakeReviewer({ people: ['1', '2'] });
+    await runAcceptPass(
+      {
+        review: async (message) => {
+          const answer = await reviewer.review(message);
+          if (message.type === CX.ACCEPT_CANDIDATE) controller.abort();
+          return answer;
+        },
+        recordAccepted: async () => {},
+        sleep: async () => {},
+        emit: () => {},
+      },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records, signal: controller.signal },
+    );
+    const types = typesOf(reviewer.log);
+    // Stop first - it is a signal, and it has to reach an accept that is
+    // mid-pause. Teardown second, once the pass has unwound and there is
+    // nothing in flight for it to interrupt.
+    expect(types.indexOf(CX.STOP_REVIEWER)).toBeLessThan(types.indexOf(CX_CLOSE_REVIEWER));
+    expect(reviewer.isOpen()).toBe(false);
+  });
+
+  it('closes it even when opening it was what failed', async () => {
+    // An open that fails part-way leaves the modal up at the wrong position,
+    // which is precisely a state to leave rather than to abandon.
+    const records = [captured('1')];
+    const log = [];
+    const result = await runAcceptPass(
+      {
+        review: async (message) => {
+          log.push(message.type);
+          if (message.type === CX.OPEN_REVIEWER) {
+            throw new Error('The reviewer opened at position 2, not 1');
+          }
+          return { cancelled: false, closed: true, notes: [] };
+        },
+        recordAccepted: async () => {},
+        sleep: async () => {},
+        emit: () => {},
+      },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+    );
+    expect(result.stoppedBecause).toBe('error');
+    expect(log).toEqual([CX.OPEN_REVIEWER, CX_CLOSE_REVIEWER]);
+  });
+
+  it('says nothing to the page when the pass never touched it', async () => {
+    // Nobody to accept. The rule is unchanged: an accept-only run over a job
+    // whose resumes were never captured touches Wellfound's UI not once, and a
+    // teardown is a touch.
+    const records = [{ userId: '1', name: 'No Resume', resumeStatus: RESUME_STATUS.NO_RESUME }];
+    const { run, reviewer } = harness({ people: ['1'], records });
+    await run();
+    expect(reviewer.log).toEqual([]);
+  });
+
+  it('says nothing to the page when the operator aborted before it opened', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const records = [captured('1')];
+    const { run, reviewer } = harness({ people: ['1'], records, signal: controller.signal });
+    const result = await run();
+    expect(result.stoppedBecause).toBe('aborted');
+    expect(reviewer.log).toEqual([]);
+  });
+
+  it('lets the pass report its own error when the teardown itself fails', async () => {
+    // A teardown that threw would replace a message about a candidate with a
+    // message about a button - and the candidate's is the one the operator
+    // needs. It is swallowed, and the pass reports exactly what it would have.
+    const records = [captured('1'), captured('2')];
+    const reviewer = fakeReviewer({ people: ['1', '2'], failAccept: '1', closeFails: true });
+    const events = [];
+    const result = await runAcceptPass(
+      {
+        review: reviewer.review,
+        recordAccepted: async () => {},
+        sleep: async () => {},
+        emit: (event) => events.push(event),
+      },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+    );
+    expect(result.stoppedBecause).toBe('unclear');
+    expect(result.error).toContain('Could not confirm the accept');
+    expect(events.at(-1)).toMatchObject({ type: 'accept_done', stoppedBecause: 'unclear' });
+  });
+
+  it('agrees with the bridge on the name of the teardown message', () => {
+    // The bridge is a classic content script and carries the literal inline, as
+    // it does for every other type. A divergence here is a teardown that is
+    // never forwarded and a composer that is never closed - and nothing would
+    // fail, because this pass swallows the refusal.
+    const bridge = readFileSync(new URL('../src/content/bridge.js', import.meta.url), 'utf8');
+    expect(bridge).toContain(`['${CX_CLOSE_REVIEWER}', 'CLOSE_REVIEWER']`);
   });
 });

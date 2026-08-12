@@ -41,6 +41,20 @@ const POINTER = RESUME_STATUS.ANOTHER_ROW;
 // with no imports, the same reason the message types are duplicated into it.
 export const NOTHING_SENT = 'nothing was sent';
 
+// Leave the page as this pass found it: no reviewer modal, and above all no
+// composer sitting there with the operator's message typed into it, one click
+// from a stranger's inbox. src/content/reviewer.js does the clicking - `Cancel
+// response`, then `Exit` - and never throws doing it.
+//
+// It is its own message rather than a second duty on CX_STOP_REVIEWER because
+// stopping and leaving are two different moments: a stop arrives DURING an
+// accept and must touch nothing, and most teardowns follow no stop at all.
+//
+// Declared here rather than beside the other CX names purely because this pass
+// is the only sender; bridge.js carries the same literal in its table, exactly
+// as the message types are duplicated into it, and a test asserts the two agree.
+export const CX_CLOSE_REVIEWER = 'CX_CLOSE_REVIEWER';
+
 // Which of the two a failed accept was. Only certainty is recognised: an error
 // this extension did not write - a relay timeout, anything unforeseen - carries
 // no phrase and is read as unclear, because an outcome nobody can vouch for is
@@ -224,7 +238,25 @@ export async function runAcceptPass(deps, options) {
   };
   signal?.addEventListener('abort', forwardStop, { once: true });
 
-  const finish = () => {
+  // Set immediately BEFORE the reviewer is opened, not after it answers: an
+  // open that fails part-way - the modal up but at the wrong position - is
+  // exactly the case that leaves something behind to close.
+  let touchedReviewer = false;
+
+  const finish = async () => {
+    // Every exit from this pass runs through here, including the two that
+    // return rather than throw, which is why the teardown lives in it. Its own
+    // failure is swallowed: this pass may already be carrying the error the
+    // operator needs to read, and a teardown that threw over it would replace a
+    // message about a candidate with a message about a button.
+    if (touchedReviewer) {
+      try {
+        await review({ type: CX_CLOSE_REVIEWER });
+      } catch {
+        // Nothing to say and nowhere useful to say it. A tab that has gone away
+        // has no composer left open on it either.
+      }
+    }
     signal?.removeEventListener('abort', forwardStop);
     emit({
       type: 'accept_done',
@@ -248,6 +280,7 @@ export async function runAcceptPass(deps, options) {
   }
 
   try {
+    touchedReviewer = true;
     await review({ type: CX.OPEN_REVIEWER });
 
     while (remaining.size > 0) {
