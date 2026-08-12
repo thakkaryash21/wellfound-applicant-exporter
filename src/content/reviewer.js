@@ -24,14 +24,16 @@
   const ACCEPT_LABEL = /^accept$/i;
   // The composer's confirm button: `Accept application & send message`.
   const SEND_LABEL = /accept application/i;
-  // The control on the applicant list that opens the reviewer.
+  // The control on the applicant list that opens the reviewer. There is one per
+  // applicant card - fifteen of them on a full page - so plurality here is the
+  // page working normally, not ambiguity.
   const OPEN_LABEL = /^view application$/i;
+  // Advance without acting on the current candidate. Exactly one on the page.
+  const NEXT_LABEL = /^next applicant$/i;
   // Never clicked, whatever else matched.
   const REJECT_TEXT = /reject/i;
   // Never sent. `R` is Reject and `X` is Quick Reject, one key from `A`.
   const FORBIDDEN_KEYS = /^(r|x)$/i;
-  // Advance without acting on the current candidate.
-  const NEXT_KEY = 'ArrowRight';
   // The candidate's identity, as the modal carries it:
   // /link/{userId}/{token}/resume_url. The same id the ledger and the CSV key
   // on. There is no name-based fallback anywhere in this file, on purpose.
@@ -85,14 +87,20 @@
     return !el.disabled && el.getAttribute?.('aria-disabled') !== 'true';
   }
 
+  function usableControls(scope, pattern) {
+    const controls = Array.from(scope.querySelectorAll('button, [role="button"]'));
+    const matching = controls.filter((el) => pattern.test(text(el)));
+    return { matching, usable: matching.filter((el) => isVisible(el) && isEnabled(el)) };
+  }
+
   // Exactly one visible, enabled control whose label matches - or nothing
   // happens. Zero and two are both aborts: on the real page the text `Accept`
   // matches two elements, and picking "the first one" is how an extension ends
-  // up clicking a legend row, or worse, whatever sits next to it.
+  // up clicking a legend row, or worse, whatever sits next to it. `Accept`,
+  // `Accept application & send message` and `Next applicant` are all singular on
+  // the real page, and all three are read through here.
   function uniqueControl(scope, pattern, name) {
-    const controls = Array.from(scope.querySelectorAll('button, [role="button"]'));
-    const matching = controls.filter((el) => pattern.test(text(el)));
-    const usable = matching.filter((el) => isVisible(el) && isEnabled(el));
+    const { matching, usable } = usableControls(scope, pattern);
     if (usable.length === 0) {
       throw new Error(
         `Could not find the ${name} control (${matching.length} matched by text, none usable)`,
@@ -100,6 +108,22 @@
     }
     if (usable.length > 1) {
       throw new Error(`Found ${usable.length} ${name} controls, expected exactly one`);
+    }
+    return usable[0];
+  }
+
+  // The other situation, and the reason it gets its own name rather than a flag
+  // on the one above: on the applicant list `View application` appears once per
+  // card - fifteen matches on a full page, all visible and enabled - and that
+  // is the page working normally, not ambiguity about what a click will do.
+  // Which one is clicked still matters, so the choice is not arbitrary; see
+  // openReviewer.
+  function firstOfMany(scope, pattern, name) {
+    const { matching, usable } = usableControls(scope, pattern);
+    if (usable.length === 0) {
+      throw new Error(
+        `Could not find a ${name} control (${matching.length} matched by text, none usable)`,
+      );
     }
     return usable[0];
   }
@@ -115,6 +139,17 @@
     el.click();
   }
 
+  // Nothing in this file calls this, and nothing should. Measured on the live
+  // page: a synthetic keydown+keyup for ArrowRight on the document moved the
+  // reviewer not at all - userId and `1 of 115` both unchanged - because a
+  // scripted KeyboardEvent is not a trusted one and never reaches the site's
+  // handlers. The reviewer's shortcut legend advertises keys the extension
+  // therefore cannot use, so every operation here clicks instead.
+  //
+  // It stays as the single gate any future key path would have to pass through,
+  // refusing R (Reject) and X (Quick Reject) - a guard over something that
+  // provably cannot happen today, kept because the cost of being wrong about
+  // that is a rejected candidate.
   function sendKey(key) {
     if (FORBIDDEN_KEYS.test(key)) {
       throw new Error(`Refusing to send the ${key} key: it rejects the candidate`);
@@ -189,26 +224,47 @@
   // One click. Not two, and no retry: the double-click that was once observed
   // was an artifact of a scrolling harness, and a second click on a modal that
   // is already open lands somewhere unknown.
-  function openReviewer() {
-    const control = uniqueControl(pageRoot(), OPEN_LABEL, 'View application');
-    clickSafely(control, 'View application');
-    return { opened: true };
+  //
+  // Which opener is clicked decides where the reviewer opens: card N opens the
+  // reviewer AT position N. The first card gives `1 of M`, which is where the
+  // loop wants to be - a confirmed accept holds the index and drains the
+  // bucket, so position 1 is a place to stay rather than a place to start.
+  // Where it landed is read back from the same DOM the rest of this file
+  // trusts, rather than assumed from which button was clicked.
+  async function openReviewer() {
+    clickSafely(firstOfMany(pageRoot(), OPEN_LABEL, 'View application'), 'View application');
+    const at = await waitFor(() => readCurrentOrNull(), {
+      timeoutMs: COMPOSER_TIMEOUT_MS,
+      pollMs: COMPOSER_POLL_MS,
+      what: 'The reviewer did not open',
+    });
+    if (at.index !== 1) {
+      throw new Error(`The reviewer opened at position ${at.index}, not 1`);
+    }
+    return { opened: true, ...at };
   }
 
-  // Advance past the current candidate without acting on them. They stay in the
-  // bucket, so the index rises and the denominator does not.
+  // Advance past the current candidate without acting on them. A click, not a
+  // key: a synthetic ArrowRight was measured moving the reviewer not at all.
   async function skipCurrent() {
     const before = readCurrent();
-    sendKey(NEXT_KEY);
+    clickSafely(uniqueControl(dialogRoot(), NEXT_LABEL, 'Next applicant'), 'Next applicant');
     return waitFor(
       () => {
         const now = readCurrentOrNull();
-        return now && now.userId !== before.userId ? now : null;
+        if (!now) return null;
+        // Skipping and accepting move the reviewer in two different, measured
+        // ways: a skip raises the index and leaves the total alone
+        // (1 of 115 -> 2 of 115); an accept holds the index and drops the total
+        // (1 of 116 -> 1 of 115). Reusing the accept's signal here would let a
+        // skip report success for a message that had gone out.
+        const moved = now.userId !== before.userId && now.index > before.index;
+        return moved && now.total === before.total ? now : null;
       },
       {
         timeoutMs: CONFIRM_TIMEOUT_MS,
         pollMs: CONFIRM_POLL_MS,
-        what: 'The reviewer did not move to the next candidate',
+        what: 'The reviewer did not move on to the next candidate',
       },
     );
   }
@@ -353,6 +409,7 @@
       acceptCurrent,
       skipCurrent,
       uniqueControl,
+      firstOfMany,
       clickSafely,
       sendKey,
       typeMessage,
