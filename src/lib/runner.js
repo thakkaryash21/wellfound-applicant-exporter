@@ -5,7 +5,7 @@ import { PACING, sample, sampleInt } from './jitter.js';
 // declares the column. This module used to own these strings and csv.js
 // imported upward from it - a run loop owning presentation text, and the
 // smallest module in lib/ depending on the largest.
-import { RESUME_STATUS } from './csv.js';
+import { RESUME_STATUS, PREVIEW } from './csv.js';
 
 export const MAX_CONSECUTIVE_FAILURES = 5;
 
@@ -83,7 +83,7 @@ export async function runJob(deps, options) {
       break;
     }
 
-    const pageResult = await fetchPage({ jobId, first: pageSize, after });
+    const pageResult = await fetchPage({ jobId, pageSize, after });
     pageNumber += 1;
     const pageRecords = pageResult.edges.map((n) =>
       normalizeNode(n, { jobId, jobTitle: pageResult.jobTitle ?? jobTitle }),
@@ -190,9 +190,9 @@ export async function runJob(deps, options) {
       }
 
       if (dryRun) {
-        record.resumeStatus = RESUME_STATUS.DRY_RUN;
+        record.resumeStatus = RESUME_STATUS.PREVIEW;
         previewed.push(record);
-        emitCandidate(record, 'dry-run');
+        emitCandidate(record, PREVIEW);
         continue;
       }
 

@@ -3,7 +3,7 @@ import { renderTraceRegion, TRACE_LABEL_ID, TRACE_TEXT_ID } from '../src/panel/t
 import { setVerbose, isVerbose, consoleSink } from '../src/panel/verbose-console.js';
 
 const ENTRIES = [
-  { t: 0, step: 'run_start', count: 2, kind: 'live', first: 10 },
+  { t: 0, step: 'run_start', count: 2, kind: 'live', pageSize: 10 },
   { t: 1500, step: 'focus_ready', jobId: '9100001', attempts: 3, ms: 1500 },
   { t: 2100, step: 'fetch', jobId: '9100001', count: 10, ms: 600 },
 ];

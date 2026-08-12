@@ -1,5 +1,5 @@
 import { runJob } from '../lib/runner.js';
-import { toCsv } from '../lib/csv.js';
+import { toCsv, PREVIEW } from '../lib/csv.js';
 import { sleep as realSleep } from '../lib/jitter.js';
 import { CX } from '../lib/messages.js';
 import { createTrace, scrubVariables } from '../lib/trace.js';
@@ -216,8 +216,8 @@ export function createController({
       trace.reset();
       trace.record('run_start', {
         count: requested.length,
-        kind: dryRun ? 'dry-run' : 'live',
-        first: pageSize,
+        kind: dryRun ? PREVIEW : 'live',
+        pageSize,
       });
 
       const totals = {
@@ -262,8 +262,8 @@ export function createController({
           // ledger's memory of having downloaded it once.
           const status = await reconcileJob(jobId);
           const gone = new Set(status.missing);
-          const known = await ledgerService.knownUserIdsFor(jobId);
-          const seenUserIds = known.filter((id) => !gone.has(id));
+          const seen = await ledgerService.seenUserIdsFor(jobId);
+          const seenUserIds = seen.filter((id) => !gone.has(id));
 
           const result = await runJob(
             {

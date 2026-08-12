@@ -42,7 +42,7 @@ describe('the headline', () => {
 describe('a dry run', () => {
   it('says how many it listed', () => {
     const s = summarize(done({ dryRun: true, previewed: 400 }));
-    expect(s.headline).toBe('0 downloaded \u00b7 400 listed');
+    expect(s.headline).toBe('0 downloaded \u00b7 400 previewed');
   });
 
   it('says that nothing was downloaded on purpose, and how to fetch them', () => {

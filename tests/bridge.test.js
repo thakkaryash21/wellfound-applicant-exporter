@@ -64,11 +64,11 @@ describe('the bridge', () => {
 
   it('asks the page in the page own vocabulary, carrying the payload', () => {
     const bridge = load();
-    bridge.send({ type: 'CX_FETCH_PAGE', payload: { jobId: '9100001', first: 50 } });
+    bridge.send({ type: 'CX_FETCH_PAGE', payload: { jobId: '9100001', pageSize: 50 } });
     expect(bridge.lastAsk()).toMatchObject({
       source: 'wfx-cs',
       type: 'FETCH_PAGE',
-      payload: { jobId: '9100001', first: 50 },
+      payload: { jobId: '9100001', pageSize: 50 },
     });
   });
 

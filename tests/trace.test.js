@@ -116,13 +116,14 @@ describe('scrubVariables', () => {
     expect(
       scrubVariables({
         jobId: 9100001,
+        // `first` is what the wire sends; the trace records it as `pageSize`.
         first: 10,
         after: 'CURSOR9',
         filters: { status: 'IN_REVIEW', search: 'Jane Doe' },
       }),
     ).toEqual({
       jobId: '9100001',
-      first: 10,
+      pageSize: 10,
       after: 'CURSOR9',
       filterKeys: 'search,status',
       bucket: 'IN_REVIEW',

@@ -3,7 +3,7 @@ import { installFakeChrome } from './helpers/fake-chrome.js';
 import { CX } from '../src/lib/messages.js';
 import { APPLICANTS_URL } from '../src/panel/tab-driver.js';
 import {
-  DEFAULT_FIRST,
+  DEFAULT_LIMIT,
   sanitizeLimit,
   estimateFor,
   askedFor,
@@ -31,7 +31,7 @@ const job = (over = {}) => ({
 const setting = (over = {}) => ({
   selected: false,
   mode: 'all',
-  limit: DEFAULT_FIRST,
+  limit: DEFAULT_LIMIT,
   rereadPages: false,
   ...over,
 });
@@ -48,9 +48,9 @@ function model(jobs, settingsByJob = {}, over = {}) {
 }
 
 // Moved from panel.test.js with its subject. The coercion has one caller - the
-// box below Home's "first" radio - and both readers of that number, the
+// box below Home's "first N" radio - and both readers of that number, the
 // button's label and the run's limit, go through it.
-describe('the first-n box', () => {
+describe('the limit-n box', () => {
   it('keeps a plain number', () => {
     expect(sanitizeLimit('25')).toBe(25);
     expect(sanitizeLimit(7)).toBe(7);
@@ -65,14 +65,14 @@ describe('the first-n box', () => {
   });
 
   it('takes the default for an empty box', () => {
-    expect(sanitizeLimit('')).toBe(DEFAULT_FIRST);
-    expect(sanitizeLimit(null)).toBe(DEFAULT_FIRST);
-    expect(sanitizeLimit(undefined)).toBe(DEFAULT_FIRST);
+    expect(sanitizeLimit('')).toBe(DEFAULT_LIMIT);
+    expect(sanitizeLimit(null)).toBe(DEFAULT_LIMIT);
+    expect(sanitizeLimit(undefined)).toBe(DEFAULT_LIMIT);
   });
 
   it('takes the default for something that is not a number', () => {
-    expect(sanitizeLimit('twelve')).toBe(DEFAULT_FIRST);
-    expect(sanitizeLimit('12a')).toBe(DEFAULT_FIRST);
+    expect(sanitizeLimit('twelve')).toBe(DEFAULT_LIMIT);
+    expect(sanitizeLimit('12a')).toBe(DEFAULT_LIMIT);
   });
 
   it('floors a fraction, because a fraction is not a number of people', () => {
@@ -113,9 +113,9 @@ describe('what the button promises against what the run fetches', () => {
         };
       }
       if (message.type === CX.FETCH_PAGE) {
-        const { first, after } = message.payload;
+        const { pageSize, after } = message.payload;
         const start = after ? Number(after) : 0;
-        const slice = ROSTER.slice(start, start + first);
+        const slice = ROSTER.slice(start, start + pageSize);
         return {
           ok: true,
           data: {
@@ -185,7 +185,7 @@ describe('what the button promises against what the run fetches', () => {
       const limit = sanitizeLimit(typed);
       const m = homeModel({
         jobs: [{ jobId: JOB, title: 'Platform Engineer', actionableCount: ROSTER.length, estimatedNew: ROSTER.length }],
-        settingFor: () => setting({ selected: true, mode: 'first', limit }),
+        settingFor: () => setting({ selected: true, mode: 'limit', limit }),
         settings,
       });
       const promised = Number(m.startLabel.match(/\d+/)?.[0]);
@@ -212,9 +212,9 @@ describe('what a role can honestly claim is waiting', () => {
   });
 
   it('is capped by the number the role was asked for', () => {
-    expect(askedFor(job(), setting({ mode: 'first', limit: 2 }))).toBe(2);
+    expect(askedFor(job(), setting({ mode: 'limit', limit: 2 }))).toBe(2);
     // Asking for more than there are does not invent people.
-    expect(askedFor(job(), setting({ mode: 'first', limit: 90 }))).toBe(3);
+    expect(askedFor(job(), setting({ mode: 'limit', limit: 90 }))).toBe(3);
   });
 });
 
@@ -295,7 +295,7 @@ describe('homeModel', () => {
   });
 
   it('gives the button and the running screen the same number', () => {
-    const m = model([job()], { '9100001': setting({ selected: true, mode: 'first', limit: 2 }) });
+    const m = model([job()], { '9100001': setting({ selected: true, mode: 'limit', limit: 2 }) });
     expect(m.startLabel).toBe('Download 2 resumes');
     expect(m.estimate).toBe(2);
   });

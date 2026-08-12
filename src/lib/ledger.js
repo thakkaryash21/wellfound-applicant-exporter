@@ -31,7 +31,7 @@ function knownCount(record) {
 // error anywhere. This module is the one place that knows the shape, so it is
 // the one place allowed to default it, and a rename inside it fails loudly at
 // the only site that could have been forgotten.
-function seenIds(record) {
+function seenUserIds(record) {
   return record?.seenUserIds ?? [];
 }
 
@@ -43,8 +43,14 @@ function describeRecord(record) {
     jobId: record.jobId,
     jobTitle: record.jobTitle ?? null,
     // Files this ledger fetched. Deliberately unmoved by a CSV import or an
-    // orphan adoption, which is why `known` exists beside it.
+    // orphan adoption.
     downloaded: record.totalDownloaded ?? 0,
+    // The one place this codebase says `known` rather than `seenUserIds`, and
+    // deliberately: everywhere else the seen set is the list of userIds a run
+    // subtracts from, while this is the strictly broader public count - the
+    // same set plus everyone a CSV import or an orphan adoption taught it.
+    // After importing 400 people, `downloaded` is still 0 and only this number
+    // shows the import did anything.
     known: knownCount(record),
     lastRunAt: record.lastRunAt ?? null,
     folder: record.folder ?? null,
@@ -81,8 +87,8 @@ export function createLedger(storage) {
     get,
     // Everyone this job will not fetch again. The run subtracts from this list;
     // it never reaches into the record to build it.
-    async knownUserIds(jobId) {
-      return seenIds(await get(jobId));
+    async seenUserIds(jobId) {
+      return seenUserIds(await get(jobId));
     },
     async describe(jobId) {
       return describeRecord(await get(jobId));
@@ -97,23 +103,26 @@ export function createLedger(storage) {
         .filter(([k]) => k.startsWith(KEY_PREFIX))
         .map(([, v]) => describeRecord(v));
     },
-    async markDownloaded(jobId, entries, meta = {}) {
+    // Takes the userIds themselves. It used to take `{ applicantId, userId }`
+    // entries and drop the applicantId on the floor, which meant two call sites
+    // passed a literal `null` for a field no ledger function has ever read.
+    async markDownloaded(jobId, userIds, meta = {}) {
       const record = await get(jobId);
-      const users = merge(seenIds(record), entries.map((e) => e.userId));
+      const users = merge(seenUserIds(record), userIds);
       await put({
         ...record,
         jobTitle: meta.jobTitle ?? record.jobTitle,
         seenUserIds: users.list,
         // Counted on unique userIds: one person who applied to the job twice is
-        // one file on disk, so they must not count twice. An applicantId list
-        // was kept alongside this for a while; nothing ever read it, and two
-        // identity sets that could drift apart is a bug waiting to be found.
+        // one file on disk, so they must not count twice. userId is the only
+        // identity this ledger keeps; two identity sets that could drift apart
+        // is a bug waiting to be found.
         totalDownloaded: record.totalDownloaded + users.addedCount,
       });
     },
-    async adopt(jobId, entries) {
+    async adopt(jobId, userIds) {
       const record = await get(jobId);
-      const users = merge(seenIds(record), entries.map((e) => e.userId));
+      const users = merge(seenUserIds(record), userIds);
       await put({ ...record, seenUserIds: users.list });
     },
     // `folder` is remembered so a later re-download lands beside the originals

@@ -23,7 +23,7 @@ const FIELDS = [
   'fresh',
   'attempts',
   // A page size, not a person.
-  'first',
+  'pageSize',
   'ms',
   'outcome',
   'kind',
@@ -75,7 +75,8 @@ export function scrubVariables(variables) {
   if (!variables || typeof variables !== 'object') return null;
   const out = {};
   if (variables.jobId != null) out.jobId = String(variables.jobId);
-  if (typeof variables.first === 'number') out.first = variables.first;
+  // `first` on the wire, `pageSize` in every event this extension emits.
+  if (typeof variables.first === 'number') out.pageSize = variables.first;
   if (variables.after != null) out.after = String(variables.after).slice(0, 40);
   const filters = variables.filters;
   if (filters && typeof filters === 'object') {

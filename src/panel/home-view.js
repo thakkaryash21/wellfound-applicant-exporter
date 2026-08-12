@@ -25,8 +25,8 @@ export const HOME_IDS = {
   title: (jobId) => `title-${jobId}`,
   options: (jobId) => `opts-${jobId}`,
   modeAll: (jobId) => `mode-all-${jobId}`,
-  modeFirst: (jobId) => `mode-first-${jobId}`,
-  first: (jobId) => `first-${jobId}`,
+  modeLimit: (jobId) => `mode-limit-${jobId}`,
+  limit: (jobId) => `limit-${jobId}`,
   reread: (jobId) => `reread-${jobId}`,
 };
 
@@ -38,9 +38,12 @@ export const HOME_IDS = {
 // a run that downloaded one resume. `min="1"` on the input validates nothing
 // outside a form, so the sanitising has to happen here, at the one place both
 // readers get their number from.
-export const DEFAULT_FIRST = 25;
+// `limit` is how many candidates to take from one role. The GraphQL page size
+// is `pageSize` and is a different number entirely; this constant was called
+// DEFAULT_FIRST, which read like the page size and was not.
+export const DEFAULT_LIMIT = 25;
 
-export function sanitizeLimit(value, fallback = DEFAULT_FIRST) {
+export function sanitizeLimit(value, fallback = DEFAULT_LIMIT) {
   const n = Number(value);
   // Empty, blank and non-numeric all mean "the user has not said": take the
   // default rather than inventing a number from a typo.
@@ -195,12 +198,12 @@ function renderJobRow(row) {
           </label>
           <div class="choice-row">
             <label class="choice">
-              <input type="radio" name="mode-${id}" id="${HOME_IDS.modeFirst(id)}" value="first"
-                     ${row.mode === 'first' ? 'checked' : ''} />
+              <input type="radio" name="mode-${id}" id="${HOME_IDS.modeLimit(id)}" value="limit"
+                     ${row.mode === 'limit' ? 'checked' : ''} />
               first
             </label>
-            <input class="first-n" type="number" inputmode="numeric" min="1"
-                   id="${HOME_IDS.first(id)}" data-id="${id}" autocomplete="off"
+            <input class="limit-n" type="number" inputmode="numeric" min="1"
+                   id="${HOME_IDS.limit(id)}" data-id="${id}" autocomplete="off"
                    value="${escapeHtml(String(row.limit))}"
                    aria-label="How many to get from ${title}" />
           </div>

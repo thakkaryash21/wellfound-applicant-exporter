@@ -24,25 +24,24 @@ export function createLedgerService(storage) {
   // as a closure, not only as a method, so callers may destructure the service
   // without `this` going undefined.
   async function reconcileJob(jobId) {
-    const userIds = await ledger.knownUserIds(jobId);
+    const seenUserIds = await ledger.seenUserIds(jobId);
     const items = await chrome.downloads.search({
       filenameRegex: filenameRegexForJob(jobId),
       limit: 0,
     });
-    return reconcile({ record: { jobId, userIds }, items });
+    return reconcile({ jobId, seenUserIds, items });
   }
 
   return {
     reconcileJob,
 
-    knownUserIdsFor: (jobId) => ledger.knownUserIds(jobId),
+    seenUserIdsFor: (jobId) => ledger.seenUserIds(jobId),
 
     describe: (jobId) => ledger.describe(jobId),
 
     // Written per file, not per job: a run that stops early must not lose
     // credit for resumes already on disk.
-    recordDownloaded: (jobId, record, meta) =>
-      ledger.markDownloaded(jobId, [{ applicantId: record.applicantId, userId: record.userId }], meta),
+    recordDownloaded: (jobId, record, meta) => ledger.markDownloaded(jobId, [record.userId], meta),
 
     // `folder` is remembered with the run so a later re-download lands beside
     // the originals rather than in whatever default the Library would guess.
@@ -77,12 +76,7 @@ export function createLedgerService(storage) {
       // rows, and adopting those would mark people seen who were never fetched -
       // permanently, since nothing ever revisits the ledger.
       const userIds = userIdsFromCsv(text);
-      // No invented applicantIds: dedup keys on userId, and merge() drops the
-      // null applicantId so nothing fake ever lands in seenIds.
-      await ledger.adopt(
-        jobId,
-        userIds.map((userId) => ({ applicantId: null, userId })),
-      );
+      await ledger.adopt(jobId, userIds);
       return { imported: userIds.length };
     },
 
@@ -92,10 +86,7 @@ export function createLedgerService(storage) {
     async adoptOrphans(jobId) {
       const status = await reconcileJob(jobId);
       if (status.orphans.length === 0) return { adopted: 0 };
-      await ledger.adopt(
-        jobId,
-        status.orphans.map((userId) => ({ applicantId: null, userId })),
-      );
+      await ledger.adopt(jobId, status.orphans);
       return { adopted: status.orphans.length };
     },
 

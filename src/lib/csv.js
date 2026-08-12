@@ -4,13 +4,22 @@ import { localDateStamp } from './local-time.js';
 // these strings are nothing but the text that goes in it, so this is where
 // they live; the runner imports them to write one, and the panel and the tests
 // name the same strings the CSV does.
+// The run that writes the CSV and downloads nothing had five names: `dryRun`
+// in the options, `'dry-run'` as an outcome key and a trace kind, "Preview
+// only" on the checkbox, "listed" in the running screen, and "dry run" in this
+// column. The code word is `dryRun` - it names the flag, and a flag reads as a
+// flag. The word a reader ever sees is "preview", and this is the one place
+// that says so: the outcome key, the counts bucket and the Resume cell are all
+// this constant, so a grep for one finds all three.
+export const PREVIEW = 'preview';
+
 export const RESUME_STATUS = {
   DOWNLOADED: 'downloaded',
   ALREADY: 'already downloaded',
   NO_RESUME: 'no resume on file',
   NO_ID: 'not identifiable',
   LOCKED: 'locked on Wellfound',
-  DRY_RUN: 'dry run',
+  PREVIEW: PREVIEW,
   NOT_REACHED: 'not fetched: the run stopped first',
 };
 
@@ -115,7 +124,7 @@ function parseRow(line) {
 
 // The only two Resume values that mean "the file is on disk". Everything else -
 // "not fetched: the run stopped first", "no resume on file", "not
-// identifiable", "dry run", "locked on Wellfound", "failed: ..." - means the
+// identifiable", "preview", "locked on Wellfound", "failed: ..." - means the
 // import must not teach the ledger that this person is done, or they would
 // never be fetched again.
 export const ADOPTABLE_RESUME_STATUSES = new Set([

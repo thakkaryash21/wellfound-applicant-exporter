@@ -132,10 +132,10 @@ describe('the breakdown', () => {
     expect(text).toContain('6 skipped');
   });
 
-  it('names failures and dry-run listings separately', () => {
-    const text = breakdownText(counts({ downloaded: 1, failed: 3, 'dry-run': 2 }));
+  it('names failures and previews separately', () => {
+    const text = breakdownText(counts({ downloaded: 1, failed: 3, preview: 2 }));
     expect(text).toContain('3 failed');
-    expect(text).toContain('2 listed');
+    expect(text).toContain('2 previewed');
   });
 });
 
@@ -256,7 +256,7 @@ describe('the activity line', () => {
     expect(candidateLine('failed', 'A Candidate')).toBe('could not download A Candidate');
     expect(candidateLine('skipped', 'A Candidate')).toBe('skipped A Candidate');
     expect(candidateLine('no-id', 'A Candidate')).toBe('skipped A Candidate');
-    expect(candidateLine('dry-run', 'A Candidate')).toBe('listed A Candidate');
+    expect(candidateLine('preview', 'A Candidate')).toBe('previewed A Candidate');
   });
 
   it('still says something when the person had no name to show', () => {

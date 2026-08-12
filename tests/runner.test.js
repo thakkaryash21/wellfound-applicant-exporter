@@ -112,10 +112,10 @@ describe('runJob', () => {
   it('follows the cursor across pages', async () => {
     const d = deps({ fetchPage: pager([page([1, 2]), page([3, 4], false)]) });
     await runJob(d, options);
-    expect(d.fetchPage).toHaveBeenNthCalledWith(1, { jobId: '9100001', first: 10, after: null });
+    expect(d.fetchPage).toHaveBeenNthCalledWith(1, { jobId: '9100001', pageSize: 10, after: null });
     expect(d.fetchPage).toHaveBeenNthCalledWith(2, {
       jobId: '9100001',
-      first: 10,
+      pageSize: 10,
       after: 'cursor-1',
     });
   });
@@ -236,7 +236,7 @@ describe('runJob', () => {
     expect(d.recordDownloaded.mock.calls[0][0].userId).toBe('2');
   });
 
-  it('records nothing in dry-run mode', async () => {
+  it('records nothing in preview mode', async () => {
     const d = deps();
     await runJob(d, { ...options, dryRun: true });
     expect(d.recordDownloaded).not.toHaveBeenCalled();
@@ -428,10 +428,10 @@ describe('runJob', () => {
       expect(out.records[0].resumeStatus).toBe('failed: 403 Forbidden');
     });
 
-    it('marks dry-run rows as dry run, not as missing resumes', async () => {
+    it('marks previewed rows as previewed, not as missing resumes', async () => {
       const d = deps({ fetchPage: pager([page([1], false)]) });
       const out = await runJob(d, { ...options, dryRun: true });
-      expect(out.records[0].resumeStatus).toBe(RESUME_STATUS.DRY_RUN);
+      expect(out.records[0].resumeStatus).toBe(RESUME_STATUS.PREVIEW);
     });
 
     it('marks an unidentifiable record as not identifiable', async () => {

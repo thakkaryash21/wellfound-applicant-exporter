@@ -191,7 +191,9 @@ describe('mergeVariables', () => {
 
   it('replaces only the three it owns and leaves the recruiter filters alone', () => {
     const { mergeVariables } = load();
-    expect(mergeVariables(base, { jobId: 9100001, first: 50, after: 'c1' })).toEqual({
+    // `first` on the way out: it is Wellfound's variable name, and the only
+    // place in this codebase that word survives.
+    expect(mergeVariables(base, { jobId: 9100001, pageSize: 50, after: 'c1' })).toEqual({
       jobId: '9100001',
       first: 50,
       after: 'c1',
@@ -204,12 +206,14 @@ describe('mergeVariables', () => {
     const { mergeVariables } = load();
     // `after: undefined` disappears from the request; a real null is what asks
     // for the start of the connection.
-    expect(mergeVariables(base, { jobId: '9100001', first: 50, after: undefined }).after).toBe(null);
+    expect(mergeVariables(base, { jobId: '9100001', pageSize: 50, after: undefined }).after).toBe(
+      null,
+    );
   });
 
   it('does not hand the live query own objects to the request', () => {
     const { mergeVariables } = load();
-    const merged = mergeVariables(base, { jobId: '9100001', first: 50, after: null });
+    const merged = mergeVariables(base, { jobId: '9100001', pageSize: 50, after: null });
     merged.filters.status = 'mutated';
     // Apollo is still reading `base`. A shallow copy would have shared
     // `filters` and rewritten what the UI is showing.
@@ -223,7 +227,7 @@ describe('fetchPage', () => {
       variables: { jobId: '9100002', filters: { status: 'inbox' }, sort: 'RECENT' },
     });
     const { fetchPage } = load({ apollo: apollo.client });
-    await fetchPage({ jobId: 9100001, first: 50, after: 'c1' });
+    await fetchPage({ jobId: 9100001, pageSize: 50, after: 'c1' });
     expect(apollo.calls[0].query).toBe(apollo.observable.options.query);
     expect(apollo.calls[0].fetchPolicy).toBe('network-only');
     expect(apollo.calls[0].variables).toMatchObject({
@@ -237,13 +241,13 @@ describe('fetchPage', () => {
   it('reports the bucket the recruiter is looking at, not one of its own', async () => {
     const apollo = fakeApollo({ variables: { filters: { status: 'shortlisted' } } });
     const { fetchPage } = load({ apollo: apollo.client });
-    expect((await fetchPage({ jobId: 9100001, first: 50 })).bucket).toBe('shortlisted');
+    expect((await fetchPage({ jobId: 9100001, pageSize: 50 })).bucket).toBe('shortlisted');
   });
 
   it('reports no bucket when the UI is filtering on something else', async () => {
     const apollo = fakeApollo({ variables: { sort: 'RECENT' } });
     const { fetchPage } = load({ apollo: apollo.client });
-    expect((await fetchPage({ jobId: 9100001, first: 50 })).bucket).toBe(null);
+    expect((await fetchPage({ jobId: 9100001, pageSize: 50 })).bucket).toBe(null);
   });
 
   it('raises the first GraphQL error instead of unwrapping a partial response', async () => {
@@ -253,19 +257,19 @@ describe('fetchPage', () => {
     const { fetchPage } = load({ apollo: apollo.client });
     // Apollo answers 200 with `errors` and whatever data it managed. Reading
     // that as a page would export a truncated list as a complete one.
-    await expect(fetchPage({ jobId: 9100001, first: 50 })).rejects.toThrow('Not authorized');
+    await expect(fetchPage({ jobId: 9100001, pageSize: 50 })).rejects.toThrow('Not authorized');
   });
 
   it('refuses when the applicants query has not been opened yet', async () => {
     const apollo = fakeApollo();
     apollo.client.getObservableQueries = () => new Map();
     const { fetchPage } = load({ apollo: apollo.client });
-    await expect(fetchPage({ jobId: 9100001, first: 50 })).rejects.toThrow(/not active yet/);
+    await expect(fetchPage({ jobId: 9100001, pageSize: 50 })).rejects.toThrow(/not active yet/);
   });
 
   it('says the app is not loaded when there is no Apollo client', async () => {
     const { fetchPage } = load({ apollo: undefined });
-    await expect(fetchPage({ jobId: 9100001, first: 50 })).rejects.toThrow(/not loaded/);
+    await expect(fetchPage({ jobId: 9100001, pageSize: 50 })).rejects.toThrow(/not loaded/);
   });
 });
 
@@ -277,7 +281,7 @@ describe('the page-side message boundary', () => {
       source: 'wfx-cs',
       id: 'wfx-1',
       type: 'FETCH_PAGE',
-      payload: { jobId: 9100001, first: 50 },
+      payload: { jobId: 9100001, pageSize: 50 },
     });
     await new Promise((resolve) => setTimeout(resolve, 0));
     const reply = page.posted.find((m) => m.id === 'wfx-1');

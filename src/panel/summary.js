@@ -1,5 +1,6 @@
 import { breakdownText } from './running-view.js';
 import { scrubUrls } from '../lib/trace.js';
+import { PREVIEW } from '../lib/csv.js';
 
 // The account a run gives of itself once it is over: a function of the `done`
 // event and nothing else.
@@ -26,7 +27,7 @@ export function countsFromEvent(event) {
     skipped: event.skippedNoResume ?? 0,
     'no-id': event.skippedNoId ?? 0,
     masked: event.masked ?? 0,
-    'dry-run': event.previewed ?? 0,
+    [PREVIEW]: event.previewed ?? 0,
   };
 }
 
@@ -76,10 +77,10 @@ export function summarize(event, trace = []) {
   // A preview counts nobody into `downloaded` by design, so without this a dry
   // run over 400 applicants ended with "0 downloaded" and nothing else.
   if (event.dryRun) {
-    const listed = counts['dry-run'];
+    const previewed = counts[PREVIEW];
     both(
       `Preview only: nothing was downloaded. ` +
-        `Untick "Preview only" and run again to fetch ${listed === 1 ? 'this resume' : `these ${listed} resumes`}.`,
+        `Untick "Preview only" and run again to fetch ${previewed === 1 ? 'this resume' : `these ${previewed} resumes`}.`,
     );
   }
 

@@ -7,7 +7,7 @@ import { TRACE_TEXT_ID } from '../src/panel/trace-view.js';
 // in its own module. Everything below reads the string the panel would insert.
 
 const ENTRIES = [
-  { t: 0, step: 'run_start', count: 2, kind: 'live', first: 10 },
+  { t: 0, step: 'run_start', count: 2, kind: 'live', pageSize: 10 },
   { t: 1500, step: 'focus_ready', jobId: '9100001', attempts: 3, ms: 1500 },
 ];
 

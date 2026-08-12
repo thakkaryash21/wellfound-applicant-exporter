@@ -14,7 +14,7 @@ import {
   takeInterruptedRun,
 } from './summary-store.js';
 import { setVerbose, isVerbose } from './verbose-console.js';
-import { HOME_IDS, DEFAULT_FIRST, sanitizeLimit, homeModel, renderHome } from './home-view.js';
+import { HOME_IDS, DEFAULT_LIMIT, sanitizeLimit, homeModel, renderHome } from './home-view.js';
 import {
   RUN_IDS,
   runModel,
@@ -68,7 +68,7 @@ function jobSettings(jobId) {
       selected: false,
       // The default costs no decision: pick a role, press the button.
       mode: 'all',
-      limit: DEFAULT_FIRST,
+      limit: DEFAULT_LIMIT,
       rereadPages: false,
     });
   }
@@ -98,11 +98,11 @@ function captureSettings() {
   const jobId = state.expanded;
   if (jobId == null) return;
   const setting = jobSettings(jobId);
-  const first = el(HOME_IDS.first(jobId));
+  const limitInput = el(HOME_IDS.limit(jobId));
   const reread = el(HOME_IDS.reread(jobId));
-  const firstRadio = el(HOME_IDS.modeFirst(jobId));
-  if (firstRadio) setting.mode = firstRadio.checked ? 'first' : 'all';
-  if (first) setting.limit = sanitizeLimit(first.value);
+  const limitRadio = el(HOME_IDS.modeLimit(jobId));
+  if (limitRadio) setting.mode = limitRadio.checked ? 'limit' : 'all';
+  if (limitInput) setting.limit = sanitizeLimit(limitInput.value);
   if (reread) setting.rereadPages = reread.checked;
 }
 
@@ -265,13 +265,13 @@ function renderRun() {
       renderRun();
     });
   }
-  for (const input of screen.querySelectorAll('.first-n')) {
+  for (const input of screen.querySelectorAll('.limit-n')) {
     input.addEventListener('change', () => {
       captureSettings();
       const setting = jobSettings(input.dataset.id);
       // Typing a number is asking for that number. Making the user then find
       // the radio would be a trap.
-      setting.mode = 'first';
+      setting.mode = 'limit';
       setting.limit = sanitizeLimit(input.value);
       renderRun();
     });

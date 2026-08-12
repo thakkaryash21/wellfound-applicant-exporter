@@ -236,11 +236,11 @@ describe('Home', () => {
     pick.checked = true;
     await pick.dispatch('change');
     await screen.querySelector('.job-row').click();
-    const box = byId(`first-${JOB_A}`);
+    const box = byId(`limit-${JOB_A}`);
     box.value = '2';
     await box.dispatch('change');
 
-    expect(byId(`mode-first-${JOB_A}`).hasAttribute('checked')).toBe(true);
+    expect(byId(`mode-limit-${JOB_A}`).hasAttribute('checked')).toBe(true);
     expect(byId('start').textContent).toContain('Download 2 resumes');
     await byId('start').click();
     expect(controller.startRun.mock.calls[0][0].jobs[0].limit).toBe(2);

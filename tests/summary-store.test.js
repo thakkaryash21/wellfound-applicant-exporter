@@ -108,11 +108,7 @@ describe('Done', () => {
 
   it('never clears the dedup ledger: who has been downloaded is the Library\u2019s record', async () => {
     const ledger = createLedger(fake.chrome.storage.local);
-    await ledger.markDownloaded(
-      '9100001',
-      [{ userId: 'u1' }, { userId: 'u2' }, { userId: 'u3' }],
-      { jobTitle: 'Test Role' },
-    );
+    await ledger.markDownloaded('9100001', ['u1', 'u2', 'u3'], { jobTitle: 'Test Role' });
     await ledger.finishRun('9100001', { downloaded: 3, folder: 'wellfound-resumes' });
     await storeSummary({ headline: '3 downloaded', notes: [] });
     await markRunStarted();

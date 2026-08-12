@@ -1,4 +1,5 @@
 import { escapeHtml } from './escape-html.js';
+import { PREVIEW } from '../lib/csv.js';
 
 // The running screen: everything a twelve-minute run says about itself while it
 // is happening.
@@ -45,7 +46,7 @@ const EMPTY_COUNTS = {
   failed: 0,
   masked: 0,
   'no-id': 0,
-  'dry-run': 0,
+  [PREVIEW]: 0,
 };
 
 export function emptyCounts() {
@@ -65,7 +66,7 @@ export function breakdownText(counts) {
   const skipped = c.skipped + c['no-id'] + c.masked;
   if (skipped) parts.push(`${skipped} skipped`);
   if (c.failed) parts.push(`${c.failed} failed`);
-  if (c['dry-run']) parts.push(`${c['dry-run']} listed`);
+  if (c[PREVIEW]) parts.push(`${c[PREVIEW]} previewed`);
   return parts.join(DOT);
 }
 
@@ -195,7 +196,7 @@ export function candidateLine(outcome, name) {
   const who = name || 'this applicant';
   if (outcome === 'downloaded') return `saved ${who}`;
   if (outcome === 'failed') return `could not download ${who}`;
-  if (outcome === 'dry-run') return `listed ${who}`;
+  if (outcome === PREVIEW) return `previewed ${who}`;
   return `skipped ${who}`;
 }
 

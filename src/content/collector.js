@@ -44,11 +44,14 @@
   // Deep-copied first, because the object belongs to the live query and Apollo
   // is still reading it. Everything else - the recruiter's filters, sort and
   // whatever Wellfound adds next - is carried through untouched.
-  function mergeVariables(base, { jobId, first, after }) {
+  // `first` is the wire's name for the page size - Relay's convention, and
+  // Wellfound's variable. It is spelled `pageSize` everywhere inside this
+  // extension and translated here, at the one boundary that owns the wire.
+  function mergeVariables(base, { jobId, pageSize, after }) {
     return {
       ...JSON.parse(JSON.stringify(base ?? {})),
       jobId: String(jobId),
-      first,
+      first: pageSize,
       after: after ?? null,
     };
   }
@@ -68,9 +71,9 @@
     };
   }
 
-  async function fetchPage({ jobId, first, after }) {
+  async function fetchPage({ jobId, pageSize, after }) {
     const q = liveQuery();
-    const variables = mergeVariables(q.options.variables, { jobId, first, after });
+    const variables = mergeVariables(q.options.variables, { jobId, pageSize, after });
     const result = await client().query({
       query: q.options.query,
       variables,

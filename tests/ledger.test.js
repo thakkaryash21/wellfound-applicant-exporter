@@ -38,14 +38,7 @@ describe('ledger.get', () => {
 
 describe('ledger.markDownloaded', () => {
   it('records ids and the job title', async () => {
-    await ledger.markDownloaded(
-      '9100001',
-      [
-        { applicantId: 'JP1', userId: '1' },
-        { applicantId: 'JP2', userId: '2' },
-      ],
-      { jobTitle: 'Backend Engineer' },
-    );
+    await ledger.markDownloaded('9100001', ['1', '2'], { jobTitle: 'Backend Engineer' });
     const record = await ledger.get('9100001');
     expect(record.seenUserIds).toEqual(['1', '2']);
     expect(record.jobTitle).toBe('Backend Engineer');
@@ -53,26 +46,14 @@ describe('ledger.markDownloaded', () => {
   });
 
   it('does not duplicate ids across calls', async () => {
-    await ledger.markDownloaded('9100001', [{ applicantId: 'JP1', userId: '1' }], {
-      jobTitle: 'x',
-    });
-    await ledger.markDownloaded(
-      '9100001',
-      [
-        { applicantId: 'JP1', userId: '1' },
-        { applicantId: 'JP2', userId: '2' },
-      ],
-      { jobTitle: 'x' },
-    );
+    await ledger.markDownloaded('9100001', ['1'], { jobTitle: 'x' });
+    await ledger.markDownloaded('9100001', ['1', '2'], { jobTitle: 'x' });
     expect((await ledger.get('9100001')).seenUserIds).toEqual(['1', '2']);
     expect((await ledger.get('9100001')).totalDownloaded).toBe(2);
   });
 
   it(`evicts oldest ids beyond ${MAX_SEEN}`, async () => {
-    const many = Array.from({ length: MAX_SEEN + 10 }, (_, i) => ({
-      applicantId: 'JP' + i,
-      userId: String(i),
-    }));
+    const many = Array.from({ length: MAX_SEEN + 10 }, (_, i) => String(i));
     await ledger.markDownloaded('9100001', many, { jobTitle: 'x' });
     const { seenUserIds } = await ledger.get('9100001');
     expect(seenUserIds).toHaveLength(MAX_SEEN);
@@ -81,21 +62,12 @@ describe('ledger.markDownloaded', () => {
   });
 
   it('writes under a namespaced key so it never collides with settings', async () => {
-    await ledger.markDownloaded('9100001', [{ applicantId: 'JP1', userId: '1' }], {
-      jobTitle: 'x',
-    });
+    await ledger.markDownloaded('9100001', ['1'], { jobTitle: 'x' });
     expect(Object.keys(storage.data)).toEqual(['job:9100001']);
   });
 
   it('counts one person once even when they hold two applications', async () => {
-    await ledger.markDownloaded(
-      '9100001',
-      [
-        { applicantId: 'JP1', userId: '111' },
-        { applicantId: 'JP2', userId: '111' },
-      ],
-      { jobTitle: 'x' },
-    );
+    await ledger.markDownloaded('9100001', ['111', '111'], { jobTitle: 'x' });
     const record = await ledger.get('9100001');
     expect(record.seenUserIds).toEqual(['111']);
     expect(record.totalDownloaded).toBe(1);
@@ -103,13 +75,10 @@ describe('ledger.markDownloaded', () => {
 });
 
 describe('ledger.adopt', () => {
-  // Entries carry no applicantId, which is what a CSV import looks like: the CSV
-  // carries userIds and nothing else, and the ledger keys on userId alone.
+  // Adopt takes bare userIds, which is all a CSV import has: the CSV carries
+  // userIds and nothing else, and the ledger keys on userId alone.
   it('adds ids without changing totalDownloaded', async () => {
-    await ledger.adopt('9100001', [
-      { applicantId: null, userId: '1' },
-      { applicantId: null, userId: '2' },
-    ]);
+    await ledger.adopt('9100001', ['1', '2']);
     const record = await ledger.get('9100001');
     expect(record.seenUserIds).toEqual(['1', '2']);
     expect(record.totalDownloaded).toBe(0);
@@ -118,9 +87,7 @@ describe('ledger.adopt', () => {
 
 describe('ledger.finishRun', () => {
   it('stamps the run time and count', async () => {
-    await ledger.markDownloaded('9100001', [{ applicantId: 'JP1', userId: '1' }], {
-      jobTitle: 'x',
-    });
+    await ledger.markDownloaded('9100001', ['1'], { jobTitle: 'x' });
     await ledger.finishRun('9100001', { downloaded: 1 });
     const record = await ledger.get('9100001');
     expect(record.lastRunCount).toBe(1);
@@ -144,15 +111,15 @@ describe('ledger.finishRun', () => {
 // storage shape, which is exactly what describeAll exists to stop.
 describe('ledger.describeAll', () => {
   it('returns every job and ignores unrelated keys', async () => {
-    await ledger.markDownloaded('1', [{ applicantId: 'JP1', userId: '1' }], { jobTitle: 'a' });
-    await ledger.markDownloaded('2', [{ applicantId: 'JP2', userId: '2' }], { jobTitle: 'b' });
+    await ledger.markDownloaded('1', ['1'], { jobTitle: 'a' });
+    await ledger.markDownloaded('2', ['2'], { jobTitle: 'b' });
     await storage.set({ settings: { folder: 'x' } });
     const all = await ledger.describeAll();
     expect(all.map((r) => r.jobId).sort()).toEqual(['1', '2']);
   });
 
   it('describes each job in named fields, not in the stored shape', async () => {
-    await ledger.markDownloaded('1', [{ applicantId: 'JP1', userId: '1' }], { jobTitle: 'a' });
+    await ledger.markDownloaded('1', ['1'], { jobTitle: 'a' });
     const [job] = await ledger.describeAll();
     expect(job).toEqual({
       jobId: '1',
@@ -166,24 +133,24 @@ describe('ledger.describeAll', () => {
   });
 });
 
-describe('ledger.knownUserIds', () => {
+describe('ledger.seenUserIds', () => {
   it('is everyone the ledger will not fetch again', async () => {
-    await ledger.markDownloaded('1', [{ applicantId: 'JP1', userId: '1' }], { jobTitle: 'a' });
-    await ledger.adopt('1', [{ applicantId: null, userId: '2' }]);
-    expect((await ledger.knownUserIds('1')).sort()).toEqual(['1', '2']);
+    await ledger.markDownloaded('1', ['1'], { jobTitle: 'a' });
+    await ledger.adopt('1', ['2']);
+    expect((await ledger.seenUserIds('1')).sort()).toEqual(['1', '2']);
   });
 
   it('is empty for a job the ledger has never seen', async () => {
-    expect(await ledger.knownUserIds('nope')).toEqual([]);
+    expect(await ledger.seenUserIds('nope')).toEqual([]);
   });
 });
 
 describe('ledger.describe', () => {
   it('separates what was downloaded from everyone who is known', async () => {
-    await ledger.markDownloaded('1', [{ applicantId: 'JP1', userId: '1' }], { jobTitle: 'a' });
+    await ledger.markDownloaded('1', ['1'], { jobTitle: 'a' });
     // An import teaches the ledger about people without fetching a file, so
     // `known` moves and `downloaded` deliberately does not.
-    await ledger.adopt('1', [{ applicantId: null, userId: '2' }]);
+    await ledger.adopt('1', ['2']);
     const job = await ledger.describe('1');
     expect(job.downloaded).toBe(1);
     expect(job.known).toBe(2);
@@ -203,7 +170,7 @@ describe('ledger.describe', () => {
 
 describe('ledger.forget', () => {
   it('removes the job entirely', async () => {
-    await ledger.markDownloaded('1', [{ applicantId: 'JP1', userId: '1' }], { jobTitle: 'a' });
+    await ledger.markDownloaded('1', ['1'], { jobTitle: 'a' });
     await ledger.forget('1');
     expect(await ledger.describeAll()).toEqual([]);
     expect((await ledger.get('1')).seenUserIds).toEqual([]);

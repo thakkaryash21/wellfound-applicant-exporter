@@ -37,11 +37,11 @@ function fakePage({
       };
     }
     if (message.type === CX.FETCH_PAGE) {
-      const { first, after } = message.payload;
+      const { pageSize, after } = message.payload;
       calls.fetches.push(message.payload);
       const roster = peopleByJob?.[message.payload.jobId] ?? people;
       const start = after ? Number(after) : 0;
-      const slice = roster.slice(start, start + first);
+      const slice = roster.slice(start, start + pageSize);
       return {
         ok: true,
         data: {
@@ -908,7 +908,7 @@ describe('redownloadMissing', () => {
     const page = withMissing([person('7700001')], ['7700001']);
     const controller = await controllerFor();
     await controller.redownloadMissing({ jobId: JOB });
-    expect(page.calls.fetches.every((f) => f.first === 10)).toBe(true);
+    expect(page.calls.fetches.every((f) => f.pageSize === 10)).toBe(true);
   });
 
   // Written per file for the same reason a normal run does it: a file on disk
