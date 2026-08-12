@@ -7,6 +7,7 @@ import {
   resolveFirstName,
   sendOutcome,
   unresolvedReason,
+  guardReload,
   NOTHING_SENT,
   CX_CLOSE_REVIEWER,
 } from '../src/panel/accept-pass.js';
@@ -116,6 +117,14 @@ function harness({
   alreadyAccepted = [],
   now = null,
   onSend = null,
+  // The userId whose ledger write rejects, and what it says. The realistic
+  // trigger is Chrome reloading the extension mid-run, which severs
+  // chrome.storage.local while the panel's promise chain is still live.
+  ledgerFails = null,
+  ledgerError = 'Extension context invalidated.',
+  // Called with the userId as the ledger write BEGINS, so a test can read what
+  // the pass has and has not done at that exact moment.
+  onLedger = null,
   signal,
   template,
   rand,
@@ -151,6 +160,13 @@ function harness({
       // Written into the same log the reviewer writes to, so the ORDER of a
       // ledger write against the next reviewer message is assertable.
       reviewer.log.push({ type: 'LEDGER', userId });
+      // Read BEFORE the write is allowed to succeed or fail: the ordering rule
+      // is about what the pass has already done to its own state by the time it
+      // reaches here, and that is invisible in any message log.
+      if (onLedger) onLedger(String(userId));
+      if (ledgerFails !== null && String(ledgerFails) === String(userId)) {
+        throw new Error(ledgerError);
+      }
       ledger.push({ jobId, userId });
     },
     sleep: async (ms) => {
@@ -1195,15 +1211,51 @@ describe('the periodic reload', () => {
     );
   });
 
-  // The reviewer is positional and a reload returns it to the front, so a pass
-  // that has skipped anybody would walk those people again - re-reading them,
-  // re-skipping them, and counting the skips twice.
-  it('leaves a pass that has skipped somebody alone', async () => {
+  // The owner's primary workflow: an accept-only run over a whole role, where
+  // the review queue holds somebody whose resume was never captured. The pass
+  // skips them within the first few positions, and that used to switch the
+  // whole refresh cycle off for the remaining hundred accepts - the mechanism
+  // that keeps a long pass alive, disarmed by a counter. It reloads anyway.
+  it('still reloads after skipping somebody', async () => {
     const people = [nine[0], '99', ...nine.slice(1)];
     const h = harness({ people, records: rows(), reloadPage: true, rand: MIDDLE });
     const result = await h.run();
-    expect(result).toMatchObject({ accepted: 9, skipped: 1 });
-    expect(typesOf(h.reviewer.log)).not.toContain('RELOAD');
+    expect(result).toMatchObject({ accepted: 9, stoppedBecause: 'finished' });
+    expect(typesOf(h.reviewer.log)).toContain('RELOAD');
+  });
+
+  // A reload lands the reviewer at position 1, so the skipped person is walked
+  // past again on the way back to the front. That is the cost the old gate was
+  // avoiding, and it is paid by counting people rather than visits.
+  it('counts a skipped person once however often a reload walks past them', async () => {
+    const people = [nine[0], '99', ...nine.slice(1)];
+    const h = harness({ people, records: rows(), reloadPage: true, rand: MIDDLE });
+    const result = await h.run();
+    // Walked past more than once - so this is the re-walk, not a pass that
+    // happened to see them only the once.
+    const skips = h.reviewer.log.filter((e) => e.type === CX.SKIP_CANDIDATE);
+    expect(skips.length).toBeGreaterThan(1);
+    expect(result.skipped).toBe(1);
+    // And said once, for the same reason: a second sentence about the same
+    // skip reads as a second person.
+    const said = h.events.filter((e) => e.type === 'accept_candidate' && e.outcome === 'skipped');
+    expect(said).toHaveLength(1);
+    expect(said[0].userId).toBe('99');
+  });
+
+  // The whole point of allowing the reload: nobody is messaged twice and
+  // nobody is stepped over, even though the walk goes back over ground it has
+  // already covered.
+  it('messages everybody exactly once across a reload that re-walks a skip', async () => {
+    const people = [nine[0], '99', ...nine.slice(1)];
+    const h = harness({ people, records: rows(), reloadPage: true, rand: MIDDLE });
+    await h.run();
+    const sent = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sent).toEqual(nine);
+    expect(h.ledger.map((e) => e.userId)).toEqual(nine);
+    expect(h.reviewer.queue).toEqual(['99']);
   });
 
   it('falls back to closing and opening when the caller cannot reload', async () => {
@@ -1274,6 +1326,96 @@ describe('a reload can never land inside an accept', () => {
     expect(types.indexOf('RELOAD')).toBeGreaterThan(send + 1);
   });
 
+  // Rule 1, on its own, because no walk this pass can perform reaches it: the
+  // refresh is called from one place, the top of the loop, where nothing is
+  // ever outstanding. That is what makes it a backstop against a later edit
+  // rather than a live branch - and it is exactly why it survived deletion with
+  // the whole suite green. It is a function now, so breaking it breaks a test.
+  it('refuses a reload while an accept is unresolved, and names the person', () => {
+    expect(() => guardReload('70000001')).toThrow(/70000001/);
+    expect(() => guardReload('70000001')).toThrow(/unresolved/i);
+  });
+
+  it('lets a reload through when nothing is outstanding', () => {
+    expect(() => guardReload(null)).not.toThrow();
+    expect(() => guardReload(undefined)).not.toThrow();
+  });
+
+  // The call site, which no behaviour can exercise, asserted where it lives.
+  // Without this, deleting the one line that consults the interlock leaves
+  // every test above green while the interlock protects nothing.
+  it('is consulted by the refresh path, before anything touches the page', () => {
+    const source = readFileSync(new URL('../src/panel/accept-pass.js', import.meta.url), 'utf8');
+    expect(source).toMatch(/const refresh = async \(\) => \{\s*guardReload\(unresolvedSend\);/);
+  });
+
+  // Rule 2, asserted from INSIDE the ledger write, which is the only place it is
+  // visible. Reordering the write past the advance changes nothing in any
+  // message log: `mark`, `remaining.delete` and `totals.accepted` are all off
+  // the wire.
+  it('has advanced past nobody at the moment the ledger write begins', async () => {
+    const records = rows();
+    const seen = [];
+    const h = harness({
+      people: nine,
+      records,
+      reloadPage: true,
+      rand: MIDDLE,
+      onLedger: (userId) => {
+        const row = records.find((r) => String(r.userId) === userId);
+        seen.push({
+          userId,
+          status: row.acceptStatus,
+          acceptedAt: row.acceptedAt ?? null,
+          announced: h.events.filter(
+            (e) => e.type === 'accept_candidate' && e.userId === userId,
+          ).length,
+        });
+      },
+    });
+    await h.run();
+
+    expect(seen.map((s) => s.userId)).toEqual(nine);
+    for (const entry of seen) {
+      // Still "the run was accepting and has not reached this candidate": the
+      // cell must not read `accepted` before the ledger says it is.
+      expect(entry.status).toBe(ACCEPT_STATUS.NOT_REACHED);
+      expect(entry.acceptedAt).toBe(null);
+      // And nothing has been announced about them either, so no counter has
+      // moved ahead of the record.
+      expect(entry.announced).toBe(0);
+    }
+    // The far side: once the write is done, every one of them says accepted.
+    expect(records.map((r) => r.acceptStatus)).toEqual(
+      new Array(nine.length).fill(ACCEPT_STATUS.ACCEPTED),
+    );
+  });
+
+  it('and the same holds on the path where the queue settled the send', async () => {
+    const records = rows();
+    const seen = [];
+    const h = harness({
+      people: nine,
+      records,
+      reloadPage: true,
+      rand: MIDDLE,
+      failAccept: nine[0],
+      landed: true,
+      checkQueue: () => 'gone',
+      onLedger: (userId) => {
+        const row = records.find((r) => String(r.userId) === userId);
+        seen.push({ userId, status: row.acceptStatus, acceptedAt: row.acceptedAt ?? null });
+      },
+    });
+    await h.run();
+    expect(seen[0]).toMatchObject({
+      userId: nine[0],
+      status: ACCEPT_STATUS.NOT_REACHED,
+      acceptedAt: null,
+    });
+    for (const entry of seen) expect(entry.status).toBe(ACCEPT_STATUS.NOT_REACHED);
+  });
+
   it('every accepted person is in the ledger exactly once', async () => {
     const h = harness({ people: nine, records: rows(), reloadPage: true, rand: MIDDLE });
     const result = await h.run();
@@ -1292,6 +1434,99 @@ describe('a reload can never land inside an accept', () => {
       .map((e) => String(e.expectedUserId));
     expect(sent).toEqual(nine);
     expect(h.reviewer.queue).toEqual([]);
+  });
+});
+
+// A confirmed send is a fact, and nothing that happens afterwards may retract
+// it. The ledger write used to sit inside the walk's own try, whose catch says
+// `error` - this pass's word for "the pass stopped and nothing went out". So a
+// storage failure a moment after a real message left the panel asserting the
+// opposite of what happened, and the next run messaged that person again.
+describe('a ledger write that fails after a confirmed send', () => {
+  const three = ['70000001', '70000002', '70000003'];
+  const rows = () => three.map((id) => captured(id));
+
+  const brokenLedger = (extra = {}) => {
+    const records = rows();
+    const h = harness({
+      people: three,
+      records,
+      ledgerFails: three[1],
+      ...extra,
+    });
+    return { h, records };
+  };
+
+  it('is its own outcome, and never `error`', async () => {
+    const { h } = brokenLedger();
+    const result = await h.run();
+    expect(result.stoppedBecause).toBe('unrecorded');
+  });
+
+  it('says the message went out, and never that nothing was sent', async () => {
+    const { h } = brokenLedger();
+    const result = await h.run();
+    expect(result.error).toContain('was sent');
+    expect(result.error).toContain(three[1]);
+    expect(result.error.toLowerCase()).not.toContain(NOTHING_SENT);
+    // The one thing the operator can do about it: the ledger is what stops a
+    // second message, so the sentence has to send them to check.
+    expect(result.error).toContain('second time');
+  });
+
+  it('counts the person as accepted, because they were', async () => {
+    const { h, records } = brokenLedger();
+    const result = await h.run();
+    expect(result.accepted).toBe(2);
+    // The CSV row is now the only surviving record of that message.
+    const row = records.find((r) => r.userId === three[1]);
+    expect(row.acceptStatus).toBe(ACCEPT_STATUS.ACCEPTED);
+    expect(row.acceptedAt).toBeTruthy();
+  });
+
+  it('sends nothing more once the ledger has stopped working', async () => {
+    const { h, records } = brokenLedger();
+    await h.run();
+    const sent = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sent).toEqual(three.slice(0, 2));
+    // And the person never reached says so, rather than reading as a refusal.
+    expect(records[2].acceptStatus).toBe(ACCEPT_STATUS.NOT_REACHED);
+  });
+
+  it('leaves the reviewer closed, like every other way out', async () => {
+    const { h } = brokenLedger();
+    await h.run();
+    expect(h.reviewer.isOpen()).toBe(false);
+  });
+
+  it('says it out loud, so the running screen and the trace both have it', async () => {
+    const { h } = brokenLedger();
+    await h.run();
+    const said = h.events.find((e) => e.type === 'accept_unrecorded');
+    expect(said).toMatchObject({ userId: three[1] });
+    // The person is still announced as accepted, with the record's failure
+    // beside it rather than instead of it.
+    const announced = h.events.find(
+      (e) => e.type === 'accept_candidate' && e.userId === three[1],
+    );
+    expect(announced).toMatchObject({ outcome: 'accepted', recorded: false });
+  });
+
+  // The other half of C1: the same write on the path where the queue settled an
+  // unconfirmed send. That one books an accept on inferred evidence, so its
+  // ledger failure is if anything the worse of the two.
+  it('holds on the path where the queue settled the send', async () => {
+    const { h } = brokenLedger({
+      failAccept: three[1],
+      landed: true,
+      checkQueue: () => 'gone',
+    });
+    const result = await h.run();
+    expect(result.stoppedBecause).toBe('unrecorded');
+    expect(result.error).toContain(three[1]);
+    expect(result.accepted).toBe(2);
   });
 });
 

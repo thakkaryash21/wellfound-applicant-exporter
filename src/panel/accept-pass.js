@@ -104,6 +104,41 @@ export function unresolvedReason(reason, { verdict, looks = 0, waitedMs = 0 } = 
   return reason;
 }
 
+// THE INTERLOCK, as a function rather than as three lines buried in a closure,
+// for one reason: a rule that cannot be broken in a test is defended by nothing.
+// It is called on the one path that destroys the page context, and its whole
+// job is to refuse when this pass does not yet durably know what happened to a
+// real person.
+//
+// A reload inside that window destroys the only witness a send has, and the
+// queue cannot recover it - a send can land after we stop looking, which this
+// project has measured rather than supposed. So this throws, and the throw
+// leaves the walk through the handler a failed open or a failed read does: the
+// pass stops and says so.
+export function guardReload(unresolvedSend) {
+  if (unresolvedSend === null || unresolvedSend === undefined) return;
+  throw new Error(
+    `Refusing to reload the page with the accept for ${unresolvedSend} still unresolved`,
+  );
+}
+
+// What the operator is told when a message demonstrably went out and the ledger
+// refused to remember it. It is neither `error` - which promises nothing went
+// out - nor `unclear`, which is about the click. The send is a fact; the record
+// of it is what failed.
+//
+// The ledger is the single thing standing between this person and a second
+// message from the next run, so this sentence has to send the operator to the
+// one place that can prevent it.
+export function unrecordedReason(userId, reason) {
+  return (
+    `The message to ${userId} was sent, and writing it to the ledger failed: ${reason} ` +
+    'The send cannot be undone and nothing was retried. This run stopped there. ' +
+    'Before running this role again, check that person in Wellfound: nothing here ' +
+    'remembers they were messaged, so another run could message them a second time.'
+  );
+}
+
 // `[first_name]` is a greeting, not an identity: splitting `name` on
 // whitespace is a guess, wrong for a title, a mononym, or family-name-first
 // order. It exists only as a fallback for the rare record where Wellfound's
@@ -454,30 +489,27 @@ export async function runAcceptPass(deps, options) {
   let refreshPending = false;
   let queueChecksLeft = QUEUE_CHECKS_PER_PASS;
 
-  // THE INTERLOCK. Holds a userId from the moment before the send is clicked
-  // until the moment after that accept has been written to the ledger - the
-  // whole of the window in which this pass does not yet durably know what
-  // happened to a real person.
-  //
-  // A reload is a deliberate destruction of the page context. Landing one
-  // inside this window destroys the only thing that could say whether the
-  // message went out, and the queue cannot recover it: a send can land after we
-  // stop looking, which this project has now measured rather than supposed.
-  // Landing one between a confirmed accept and its ledger write leaves somebody
-  // messaged and unrecorded, which is the gap the operator has already had to
-  // close by hand.
-  //
-  // So it is an invariant with a throw behind it, not a comment and not a
-  // convention about where the call site sits. If a future edit moves the
-  // refresh, the pass stops rather than reloading over an unresolved send.
+  // The state guardReload above reads. Holds a userId from the moment before
+  // the send is clicked until the moment after that accept has been written to
+  // the ledger - the whole of the window in which this pass does not yet
+  // durably know what happened to a real person.
   let unresolvedSend = null;
 
-  // A refresh lands the reviewer back at position 1 and undoes every skip this
-  // pass has made, so a pass that has skipped anybody would walk those people
-  // again - re-reading them, re-skipping them, and counting the skips twice.
-  // The everyone case, which is the case the degradation was observed in and
-  // the case an accept-only run over a whole role always is, skips nobody.
-  const mayRefresh = () => totals.skipped === 0;
+  // Who this pass has already walked past, by identity rather than by visit.
+  //
+  // A reload lands the reviewer back at position 1, so every skipped person is
+  // read again on the way back to the front of the queue. That used to disable
+  // the whole refresh cycle: `skipped` was a count of visits, and re-walking
+  // them counted the same people twice. The count was defended and the
+  // mechanism that keeps a long pass alive was switched off - on the owner's
+  // primary workflow, where an accept-only run over a whole role refuses
+  // anybody whose resume was never captured and therefore skips somebody within
+  // the first few positions.
+  //
+  // Counting per person makes the re-walk harmless, so nothing has to be
+  // switched off. Re-encountering somebody this pass has already passed over is
+  // recognised, not prevented.
+  const skippedIds = new Set();
 
   // Let go of the page and take hold of it again.
   //
@@ -502,11 +534,7 @@ export async function runAcceptPass(deps, options) {
   // loop's next act is READ_CANDIDATE, which is the only thing that decides
   // that, so a refresh cannot step over anybody.
   const refresh = async () => {
-    if (unresolvedSend !== null) {
-      throw new Error(
-        `Refusing to reload the page with the accept for ${unresolvedSend} still unresolved`,
-      );
-    }
+    guardReload(unresolvedSend);
     emit({
       type: reloadPage ? 'accept_reload' : 'accept_reopen',
       jobId,
@@ -528,11 +556,62 @@ export async function runAcceptPass(deps, options) {
   // has even chosen who the next candidate is. That is what makes a refresh
   // mid-accept unrepresentable rather than merely avoided - and the interlock
   // above is what keeps it unrepresentable after somebody edits this file.
+  //
+  // A refresh cannot loop and cannot lose anybody. Every refresh is asked for
+  // by an accept - the counted cadence counts accepts, and both immediate
+  // triggers follow one - so the queue has strictly shrunk since the last one,
+  // and a skip never asks for anything. What a refresh costs is re-walking the
+  // people already skipped, which is a handful of reads and the pace between
+  // them; what it cannot do is accept anybody twice, because `remaining` no
+  // longer holds anyone this pass has messaged and the ledger holds them all.
   const refreshIfDue = async () => {
-    if (!mayRefresh()) return;
     if (!refreshPending && acceptsSinceRefresh < refreshAt) return;
     await refresh();
   };
+
+  // Booking a confirmed accept: the ledger first, then everything in memory.
+  //
+  // The order is the second interlock and it is not a convention: at the moment
+  // recordAccepted is called this person's row still reads NOT_REACHED and they
+  // are still in `remaining`, so nothing can advance past an accept that is not
+  // yet written down. A test asserts that state from inside the ledger write.
+  //
+  // A confirmed send is a fact, and nothing that happens afterwards may retract
+  // it. So the write has its own catch, and its failure is NOT the walk's
+  // failure: reporting it as `error` - this pass's word for "the pass stopped
+  // and nothing went out" - told the operator the opposite of what happened,
+  // left the CSV saying `not attempted`, and left the next run free to message
+  // that person a second time.
+  //
+  // Returns whether the pass may carry on, and on a failed write it may not.
+  // The ledger is the only thing standing between these people and a second
+  // message, so a ledger that has stopped working turns every further accept
+  // into another unrecorded message. One is a person to check by hand; a
+  // hundred is not recoverable. It stops on the first.
+  const bookAccept = async (userId, extra = {}) => {
+    let recorded = true;
+    let reason = null;
+    try {
+      await recordAccepted(jobId, userId);
+    } catch (ledgerError) {
+      recorded = false;
+      reason = String(ledgerError.message || ledgerError);
+    }
+    // Booked either way, because either way the message went out. When the
+    // ledger refused it, the CSV row is the only surviving record of the send,
+    // so it says accepted and says when.
+    unresolvedSend = null;
+    remaining.delete(userId);
+    mark(userId, ACCEPT_STATUS.ACCEPTED, localDateTimeText());
+    totals.accepted += 1;
+    emitCandidate(userId, 'accepted', { ...extra, ...(recorded ? {} : { recorded: false }) });
+    if (recorded) return true;
+    stoppedBecause = 'unrecorded';
+    error = unrecordedReason(userId, reason);
+    emit({ type: 'accept_unrecorded', jobId, userId, error });
+    return false;
+  };
+
   try {
     touchedReviewer = true;
     await review({ type: CX.OPEN_REVIEWER });
@@ -562,8 +641,17 @@ export async function runAcceptPass(deps, options) {
         // the bucket alone, which is why it is safe here and catastrophic
         // after an accept.
         await review({ type: CX.SKIP_CANDIDATE });
-        totals.skipped += 1;
-        emitCandidate(userId, 'skipped');
+        // Counted by person, not by visit: a reload returns the reviewer to
+        // position 1, so these same people are walked past again on the way
+        // back to the front, and a pass that skipped four must not report
+        // twelve because it reloaded twice.
+        const seenBefore = skippedIds.has(userId);
+        skippedIds.add(userId);
+        totals.skipped = skippedIds.size;
+        // Said once per person, for the same reason. The trace and the panel
+        // both read these, and a second sentence about the same skip is noise
+        // that reads as a second person.
+        if (!seenBefore) emitCandidate(userId, 'skipped');
         await pace();
         continue;
       }
@@ -676,12 +764,8 @@ export async function runAcceptPass(deps, options) {
             // The page could not vouch for this send, so the page is not
             // trusted for another one: the refresh below is asked for now
             // rather than at the next multiple of the cadence.
-            await recordAccepted(jobId, userId);
-            unresolvedSend = null;
-            remaining.delete(userId);
-            mark(userId, ACCEPT_STATUS.ACCEPTED, localDateTimeText());
-            totals.accepted += 1;
-            emitCandidate(userId, 'accepted', { confirmedBy: 'queue', looks });
+            const carryOn = await bookAccept(userId, { confirmedBy: 'queue', looks });
+            if (!carryOn) break;
             refreshPending = true;
             await pace();
             continue;
@@ -723,16 +807,11 @@ export async function runAcceptPass(deps, options) {
         emit({ type: 'accept_slow', jobId, userId, ms: tookMs });
       }
       // Recorded before anything else can interrupt, exactly as a download is:
-      // an accept the ledger does not know about gets sent a second time.
-      await recordAccepted(jobId, userId);
-      // The interlock opens only here, on the far side of the ledger write.
-      unresolvedSend = null;
-      const acceptedAt = localDateTimeText();
-      remaining.delete(userId);
-      mark(userId, ACCEPT_STATUS.ACCEPTED, acceptedAt);
-      totals.accepted += 1;
+      // an accept the ledger does not know about gets sent a second time. The
+      // interlock opens on the far side of that write, inside bookAccept.
+      const carryOn = await bookAccept(userId);
+      if (!carryOn) break;
       acceptsSinceRefresh += 1;
-      emitCandidate(userId, 'accepted');
 
       // No skip here, ever. A confirmed accept has already auto-advanced -
       // measured live as `1 of 116` becoming `1 of 115` with the next person
