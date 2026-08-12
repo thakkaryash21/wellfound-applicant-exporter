@@ -28,7 +28,12 @@ export const HOME_IDS = {
   modeLimit: (jobId) => `mode-limit-${jobId}`,
   limit: (jobId) => `limit-${jobId}`,
   reread: (jobId) => `reread-${jobId}`,
+  reconnect: 'reconnect',
 };
+
+// The one remedy this screen can offer for itself. panel.js decides when it is
+// warranted, from the marker on the error rather than from its words.
+export const RECONNECT_LABEL = 'Reload the Wellfound tab';
 
 // How many to get from one role, coerced once, where the number is captured.
 //
@@ -108,6 +113,10 @@ export function homeModel({
   settings,
   verbose = false,
   loadError = null,
+  // The load failed in a way the panel can fix on the user's behalf. Passed as
+  // a fact, not inferred from the message: a screen that read the sentence to
+  // decide would break the moment the sentence was reworded.
+  canReconnect = false,
   hydrating = false,
   hydrationNote = null,
 } = {}) {
@@ -120,6 +129,8 @@ export function homeModel({
       // The hint is about roles that have not appeared. It has nothing to say
       // while a load is in flight or after one has failed with its own reason.
       hint: !(loadError || hydrating),
+      // An error with a remedy shows the remedy instead of the generic hint.
+      reconnect: Boolean(loadError) && canReconnect,
     };
   }
 
@@ -220,9 +231,16 @@ function renderNoJobs(model) {
   const hint = model.hint
     ? '<p class="empty-hint">If your roles do not appear, open your jobs list on Wellfound.</p>'
     : '';
+  // Saying what went wrong is half the job. This is the half the user can press.
+  const remedy = model.reconnect
+    ? `<button class="secondary empty-remedy" id="${HOME_IDS.reconnect}" type="button">
+      ${RECONNECT_LABEL}
+    </button>`
+    : '';
   return `
     <p class="empty">${escapeHtml(model.message)}</p>
-    ${hint}`;
+    ${hint}
+    ${remedy}`;
 }
 
 export function renderHome(model) {

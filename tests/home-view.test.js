@@ -13,6 +13,7 @@ import {
   homeModel,
   renderHome,
   HOME_IDS,
+  RECONNECT_LABEL,
 } from '../src/panel/home-view.js';
 
 // The environment is node, with no DOM, which is the point of this module: the
@@ -284,6 +285,14 @@ describe('homeModel', () => {
     expect(model([]).hint).toBe(true);
   });
 
+  // The remedy is a fact passed in, never inferred from the message: a screen
+  // that read the sentence would break the day the sentence was reworded.
+  it('offers the reload only when the failure is one a reload fixes', () => {
+    expect(model([], {}, { loadError: 'lost the page', canReconnect: true }).reconnect).toBe(true);
+    expect(model([], {}, { loadError: 'lost the page' }).reconnect).toBe(false);
+    expect(model([], {}, { canReconnect: true }).reconnect).toBe(false);
+  });
+
   it('counts only the roles that are picked', () => {
     const m = model([job(), job({ jobId: '9100002', estimatedNew: 2 })], {
       '9100001': setting({ selected: true }),
@@ -316,6 +325,16 @@ describe('renderHome', () => {
     const html = renderHome(model([], {}, { loadError: 'nope' }));
     expect(html).toContain('nope');
     expect(html).not.toContain(`id="${HOME_IDS.start}"`);
+  });
+
+  it('puts the reload button on the empty screen when one is offered', () => {
+    const failed = { loadError: 'lost the page', canReconnect: true };
+    const html = renderHome(model([], {}, failed));
+    expect(html).toContain(`id="${HOME_IDS.reconnect}"`);
+    expect(html).toContain(RECONNECT_LABEL);
+    expect(renderHome(model([], {}, { loadError: 'lost the page' }))).not.toContain(
+      `id="${HOME_IDS.reconnect}"`,
+    );
   });
 
   it('disables Start until a role is picked', () => {

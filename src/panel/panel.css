@@ -456,6 +456,13 @@ body {
   color: var(--muted);
 }
 
+/* The one thing on the empty screen the user can press. It carries the secondary
+   button's own recipe; all this adds is the gap under it that the paragraph
+   above would otherwise have owned. */
+.empty-remedy {
+  margin-bottom: var(--space-6);
+}
+
 /* Reduce movement, not feedback. Colour and background transitions tell the user
    a control responded, so they stay; only motion is removed. The breath lane
    stops animating in JS and reports its state as text instead. */

@@ -15,6 +15,8 @@ import {
 } from './summary-store.js';
 import { setVerbose, isVerbose } from './verbose-console.js';
 import { HOME_IDS, DEFAULT_LIMIT, sanitizeLimit, homeModel, renderHome } from './home-view.js';
+import { PAGE_DISCONNECTED } from './tab-driver.js';
+import { sleep } from '../lib/jitter.js';
 import {
   RUN_IDS,
   runModel,
@@ -46,6 +48,10 @@ const state = {
   view: 'home',
   // A load failure is a note on Home, not a screen of its own.
   loadError: null,
+  // Set when that failure was the page losing its content script, which this
+  // panel can put right by reloading the tab. The tab comes off the error, so
+  // the remedy does not have to go looking for one.
+  disconnectedTabId: null,
   hydrating: false,
   // Said out loud when a hydration pass ran and some counts are still missing.
   // Silence there left roles blank with nothing to explain them.
@@ -201,9 +207,36 @@ function currentHomeModel() {
     settings,
     verbose: isVerbose(),
     loadError: state.loadError,
+    canReconnect: state.disconnectedTabId != null,
     hydrating: state.hydrating,
     hydrationNote: state.hydrationNote,
   });
+}
+
+// The remedy for a page whose content script was severed: reload it, wait for
+// the document to come back, then ask again. The extension already holds host
+// permission on wellfound.com, so this needs nothing new from the user.
+const RELOAD_SETTLE_MS = 400;
+const RELOAD_POLL_MS = 250;
+const RELOAD_TIMEOUT_MS = 10000;
+
+async function reloadTab(tabId) {
+  await chrome.tabs.reload(tabId);
+  // Chrome may still report the outgoing document as complete for an instant
+  // after the reload is asked for, so the poll below starts once it has begun.
+  await sleep(RELOAD_SETTLE_MS);
+  const deadline = Date.now() + RELOAD_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    try {
+      const tab = await chrome.tabs.get(tabId);
+      if (!tab.status || tab.status === 'complete') return;
+    } catch {
+      // The tab is gone. Asking again is what will say so, in the panel's own
+      // words, rather than anything invented here.
+      return;
+    }
+    await sleep(RELOAD_POLL_MS);
+  }
 }
 
 function renderRun() {
@@ -213,8 +246,22 @@ function renderRun() {
 
   const model = currentHomeModel();
   screen.innerHTML = renderHome(model);
-  // Nothing on the empty screen to listen to.
-  if (model.empty) return;
+  // Nothing on the empty screen to listen to, apart from the one thing that
+  // offers a way out of it.
+  if (model.empty) {
+    document.getElementById(HOME_IDS.reconnect)?.addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      const tabId = state.disconnectedTabId;
+      if (tabId == null) return;
+      button.disabled = true;
+      button.textContent = 'Reloading\u2026';
+      await reloadTab(tabId);
+      // The retry is the same load the button interrupted. A run is never
+      // resumed this way: only the job list is asked for again.
+      await load();
+    });
+    return;
+  }
 
   for (const box of screen.querySelectorAll('.job-pick')) {
     // Selecting a role must not open it. The card's own click handler is the
@@ -456,6 +503,7 @@ async function load() {
   // run still unread is what the Library's Back button returns to.
   if (state.summary && state.view !== 'post') showPostRun();
   state.loadError = null;
+  state.disconnectedTabId = null;
   state.hydrationNote = null;
   let hydrationRan = false;
   try {
@@ -483,6 +531,10 @@ async function load() {
     state.jobSettings.clear();
     state.expanded = null;
     state.loadError = error.message;
+    // The marker, not the sentence: which failure this was is a fact the error
+    // carries, and a screen that decided by reading the words would break the
+    // day the words were improved.
+    state.disconnectedTabId = error.code === PAGE_DISCONNECTED ? error.tabId : null;
   } finally {
     state.hydrating = false;
   }

@@ -4,6 +4,8 @@ import { installFakeDom } from './helpers/fake-dom.js';
 import { SUMMARY_KEY, RUNNING_KEY } from '../src/panel/summary-store.js';
 import { RUN_IDS } from '../src/panel/running-view.js';
 import { POST_RUN_IDS } from '../src/panel/post-run-view.js';
+import { HOME_IDS, RECONNECT_LABEL } from '../src/panel/home-view.js';
+import { pageDisconnectedError } from '../src/panel/tab-driver.js';
 
 // panel.js is the wiring: what the screen shows, which listener each control
 // gets, and what a run event does to the DOM. None of it had a test, because the
@@ -45,9 +47,9 @@ const job = (jobId, over = {}) => ({
 
 // Imports panel.js with the document already stubbed but not yet carrying the
 // panel's markup, so the bootstrap guard finds no mount point and stays quiet.
-async function importPanel({ storage = {}, stub = stubController() } = {}) {
+async function importPanel({ storage = {}, tabs = [], stub = stubController() } = {}) {
   vi.resetModules();
-  fake = installFakeChrome({ storage });
+  fake = installFakeChrome({ storage, tabs });
   dom = installFakeDom();
   controller = stub;
   vi.doMock('../src/panel/run-controller.js', () => ({
@@ -256,6 +258,54 @@ describe('Home', () => {
     });
     expect(screen.innerHTML).toContain('Open your Wellfound jobs list');
     expect(byId('start')).toBe(null);
+  });
+
+  // Reloading the extension severs the content script in every open tab, so the
+  // panel messages a page where nothing is listening. It is the likeliest
+  // disruption there is, and the user can do nothing about it without being
+  // told what it is and offered the fix.
+  describe('a page that lost its content script', () => {
+    function disconnectedOnce() {
+      const error = pageDisconnectedError(7);
+      let asked = 0;
+      return stubController({
+        listJobs: vi.fn(async () => {
+          asked += 1;
+          if (asked === 1) throw error;
+          return [job(JOB_A)];
+        }),
+      });
+    }
+
+    it('explains it in \u2019 and offers the reload', async () => {
+      const screen = await openPanel({ tabs: [{ id: 7, url: 'https://wellfound.com/recruit/' }], stub: disconnectedOnce() });
+      expect(screen.innerHTML).toContain('lost its connection to the extension');
+      expect(screen.innerHTML).not.toContain('Receiving end');
+      expect(byId(HOME_IDS.reconnect).textContent).toContain(RECONNECT_LABEL);
+    });
+
+    // The remedy, end to end: the tab is reloaded and the thing that failed is
+    // asked for again.
+    it('reloads the tab and re-runs the job list', async () => {
+      await openPanel({ tabs: [{ id: 7, url: 'https://wellfound.com/recruit/' }], stub: disconnectedOnce() });
+      await byId(HOME_IDS.reconnect).click();
+      expect(fake.calls.reloads).toEqual([7]);
+      expect(controller.listJobs).toHaveBeenCalledTimes(2);
+      expect(byId('screen').innerHTML).toContain('Platform Engineer');
+    });
+
+    // Every other failure keeps the plain note it had. A button that reloaded
+    // the page would be the wrong advice for a tab that was never the problem.
+    it('offers nothing to press for a failure a reload would not fix', async () => {
+      await openPanel({
+        stub: stubController({
+          listJobs: vi.fn(async () => {
+            throw new Error('Open Wellfound to get started');
+          }),
+        }),
+      });
+      expect(byId(HOME_IDS.reconnect)).toBe(null);
+    });
   });
 });
 

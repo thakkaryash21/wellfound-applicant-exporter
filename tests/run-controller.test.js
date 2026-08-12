@@ -5,7 +5,12 @@ import { traceText } from '../src/panel/trace-view.js';
 import { RESUME_STATUS } from '../src/lib/csv.js';
 import { summarize } from '../src/panel/summary.js';
 import { CX } from '../src/lib/messages.js';
-import { APPLICANTS_URL, NO_WELLFOUND_TAB } from '../src/panel/tab-driver.js';
+import {
+  APPLICANTS_URL,
+  NO_WELLFOUND_TAB,
+  PAGE_DISCONNECTED_MESSAGE,
+} from '../src/panel/tab-driver.js';
+import { renderPostRun } from '../src/panel/post-run-view.js';
 
 const JOB = '9100001';
 const TAB = 7;
@@ -374,6 +379,24 @@ describe('startRun', () => {
       pageSize: 10,
     });
     expect(events.find((e) => e.type === 'done').downloaded).toBe(0);
+  });
+
+  // Mid-run, the same disruption reaches the post-run screen as the run's stop
+  // reason. It gets the same explanation there, and the run still stops: a
+  // half-finished run is never resumed on the user's behalf.
+  it('stops with the explanation when the page stops listening mid-run', async () => {
+    setup({ people: [person('7700001', 'Jane Doe')] });
+    fake.chrome.tabs.sendMessage = async () => {
+      throw new Error('Could not establish connection. Receiving end does not exist.');
+    };
+    const controller = await controllerFor();
+    await expect(
+      controller.startRun({ jobs: [{ jobId: JOB, limit: 250 }], folder: 'resumes', pageSize: 10 }),
+    ).rejects.toThrow(PAGE_DISCONNECTED_MESSAGE);
+    const done = events.find((e) => e.type === 'done');
+    expect(done).toMatchObject({ stoppedBecause: 'error', error: PAGE_DISCONNECTED_MESSAGE });
+    expect(summarize(done).error).toBe(PAGE_DISCONNECTED_MESSAGE);
+    expect(renderPostRun(summarize(done))).toContain('lost its connection to the extension');
   });
 
   it('reports the failure on done rather than losing the counts', async () => {
