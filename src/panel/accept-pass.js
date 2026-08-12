@@ -384,6 +384,14 @@ export async function runAcceptPass(deps, options) {
   // It reads nothing back and assumes nothing about who is there. The loop's
   // next act is READ_CANDIDATE, which is the only thing that decides who is on
   // screen, so a reopen cannot step over anybody.
+  //
+  // The pessimistic guess, stated because it is a guess: nobody has seen what
+  // the applicant list looks like once it carries confirmation rows, so whether
+  // the first `View application` on it still opens the reviewer at position 1
+  // is unknown. If it does not, openReviewer refuses - it asserts the position
+  // it landed at and throws otherwise - and the pass stops with nothing sent,
+  // which is the failure to have. A reopen can cost this pass a run; it cannot
+  // cost anybody a message.
   const reopen = async () => {
     emit({ type: 'accept_reopen', jobId, accepted: totals.accepted, intended });
     await review({ type: CX_CLOSE_REVIEWER });
