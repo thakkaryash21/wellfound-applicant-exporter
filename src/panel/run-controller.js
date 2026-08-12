@@ -391,7 +391,29 @@ export function createController({
           // happened to them, and its Accept column has to say. The pass never
           // throws - an abort, a refusal or an unclear send all come back as a
           // result - so the CSV below is still written either way.
-          if (actions.accept) {
+          // ...unless pass 1 stopped because five downloads failed in a row.
+          // That stop exists because continuing would issue hundreds of failing
+          // requests at human pacing - the most suspicious pattern this
+          // extension can produce. Pass 2 does not merely continue: it drives
+          // Wellfound's own UI to send real, irreversible messages under the
+          // operator's name. A job whose downloads just collapsed is the worst
+          // possible moment to start sending, so the accepts are held back and
+          // the run says so rather than leaving a zero to be interpreted.
+          //
+          // An aborted pass 1 needs nothing here: the operator's signal is the
+          // same one the accept pass checks before it opens the reviewer, so an
+          // abort already stops pass 2 with nothing sent.
+          const heldBack = actions.accept && result.stoppedBecause === 'failing';
+          if (heldBack) {
+            stop.acceptHeldBack = true;
+            trace.record('accept_held_back', { jobId, outcome: 'failing' });
+            // The run was accepting, and stopped before it reached anybody.
+            // That is exactly NOT_REACHED, and a blank cell here would read as
+            // "we tried and nothing happened".
+            for (const record of result.records) {
+              record.acceptStatus = ACCEPT_STATUS.NOT_REACHED;
+            }
+          } else if (actions.accept) {
             const acceptResult = await runAcceptPass(
               {
                 review: (message) => tabs.ask(tab.id, message),

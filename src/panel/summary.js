@@ -165,6 +165,20 @@ export function summarize(event, trace = []) {
     if (event.acceptFailed) {
       both(`${event.acceptFailed} could not be accepted. Nothing was sent to them.`);
     }
+    // Held back, not merely absent. When a role's downloads failed five times
+    // in a row the run declines to start sending irreversible messages through
+    // Wellfound's UI, and that decision has to be said: an accepting run that
+    // reports nothing accepted, with no reason given, reads as a role where
+    // there was nobody to accept.
+    const heldBack = jobs.filter((j) => j.acceptHeldBack).map((j) => j.jobTitle);
+    if (heldBack.length) {
+      both(
+        `Nothing was accepted for ${listNames(heldBack)}: downloads kept failing, ` +
+          'so no messages were sent. Nobody was accepted and nothing is lost. ' +
+          'Run that role again once downloads are working.',
+      );
+    }
+
     for (const job of jobs.filter(
       (j) => j.acceptStoppedBecause === 'aborted' || j.acceptStoppedBecause === 'error',
     )) {

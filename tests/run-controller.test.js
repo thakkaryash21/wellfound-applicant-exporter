@@ -1367,6 +1367,94 @@ describe('the accept pass', () => {
     expect(csv).toContain('already accepted');
   });
 
+  // The five-failure stop exists because continuing would issue hundreds of
+  // failing requests at human pacing - the most suspicious pattern this
+  // extension can produce. Pass 2 does not merely continue: it drives
+  // Wellfound's own UI to send irreversible messages under the operator's name.
+  // It used to run anyway, immediately, on exactly the people whose rows read
+  // `already downloaded`.
+  describe('when pass 1 stopped because downloads kept failing', () => {
+    // The review's own shape: a role part downloaded and part new. The two
+    // people already on disk are exactly who pass 2 would have messaged - and
+    // the five whose downloads just collapsed are the reason it must not.
+    const ONDISK = ['7700001', '7700002'];
+    const FRESH = ['7700011', '7700012', '7700013', '7700014', '7700015'];
+
+    async function runWithFailingDownloads() {
+      const roster = [...FRESH, ...ONDISK];
+      setup({
+        people: roster.map((id) => person(id)),
+        bucketByJob: { [JOB]: roster },
+        storage: {
+          [`job:${JOB}`]: { jobId: JOB, seenUserIds: [...ONDISK], totalDownloaded: 2 },
+        },
+      });
+      for (const id of ONDISK) {
+        fake.addHistory({
+          filename: `resumes/Person ${id}-${id}-${JOB}.pdf`,
+          url: `https://wellfound.com/link/${id}/tok/resume_url`,
+          state: 'complete',
+          exists: true,
+        });
+      }
+      // Wellfound refusing every signed URL, which is the situation the
+      // five-failure stop exists for.
+      const download = fake.chrome.downloads.download;
+      fake.chrome.downloads.download = async (opts) => {
+        if (String(opts.url).includes('resume_url')) throw new Error('NETWORK_FAILED');
+        return download(opts);
+      };
+      const controller = await controllerFor();
+      // One page, so the whole role is in `result.records` and the two on disk
+      // really are candidates for pass 2. Without this the walk never reaches
+      // them and the guard would look effective for the wrong reason.
+      await acceptRun(controller, { pageSize: 10 });
+      return controller;
+    }
+
+    it('has people pass 2 would otherwise have messaged', async () => {
+      // The premise of the three tests below, asserted rather than assumed: the
+      // two on disk pass every check the accept pass makes, so nothing but the
+      // held-back guard is keeping them from being sent a message.
+      await runWithFailingDownloads();
+      const csv = await objectUrls[0].text();
+      for (const id of ONDISK) expect(csv).toContain(id);
+      expect(csv).toContain(RESUME_STATUS.ALREADY);
+      const done = events.find((e) => e.type === 'done');
+      expect(done.stoppedBecause).toBe('failing');
+    });
+
+    it('sends nothing at all, and never opens the reviewer', async () => {
+      await runWithFailingDownloads();
+      const order = fake.calls.sendMessage.map((c) => c.message.type);
+      expect(order).not.toContain(CX.OPEN_REVIEWER);
+      expect(order).not.toContain(CX.ACCEPT_CANDIDATE);
+      expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual([]);
+      const done = events.find((e) => e.type === 'done');
+      expect(done).toMatchObject({ accepted: 0, stoppedBecause: 'failing' });
+    });
+
+    it('says the accepts were held back, and why, rather than leaving a zero', async () => {
+      const controller = await runWithFailingDownloads();
+      const done = events.find((e) => e.type === 'done');
+      expect(done.jobs[0].acceptHeldBack).toBe(true);
+      // An accepting run that reports nothing accepted, with no reason given,
+      // reads as a role where there was nobody to accept.
+      const notes = summarize(done, controller.trace.entries()).notes.join(' ');
+      expect(notes).toContain('downloads kept failing');
+      expect(notes).toContain('no messages were sent');
+    });
+
+    it('still writes the CSV, and every Accept cell says it was never reached', async () => {
+      await runWithFailingDownloads();
+      const done = events.find((e) => e.type === 'done');
+      expect(done.jobs[0].wroteCsv).toBe(true);
+      const csv = await objectUrls[0].text();
+      expect(csv).toContain('not attempted: the run stopped first');
+      expect(csv).not.toContain(',accepted,');
+    });
+  });
+
   it('keeps the CSV when the accept pass stops on an unclear send', async () => {
     const roster = ['7700001', '7700002'];
     setup({
