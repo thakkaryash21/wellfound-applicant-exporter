@@ -1,5 +1,10 @@
 import { escapeHtml } from './escape-html.js';
 import { DEFAULT_MESSAGE, composeMessage } from '../lib/accept-message.js';
+import {
+  RECRUIT_URL,
+  NO_WELLFOUND_TAB_CODE,
+  NOT_IN_RECRUITER_AREA_CODE,
+} from './tab-driver.js';
 
 // The Home screen: the roles, what each one will fetch, the run-wide settings
 // and the Start button.
@@ -165,6 +170,11 @@ export function homeModel({
   // The load failed and the panel is listening for the tab to change so it can
   // try again on its own.
   waiting = false,
+  // The load failed for a reason the user fixes by opening Wellfound - passed
+  // as the error's own marker, never inferred from `loadError`'s words, for
+  // the same reason `canReconnect` is: a screen that read the sentence would
+  // break the day the sentence was reworded.
+  openWellfoundCode = null,
 } = {}) {
   // Nothing to run means nothing to configure. A settings form under a message
   // that says the run cannot happen is noise the user has to read past.
@@ -180,6 +190,7 @@ export function homeModel({
       // Said alongside the reason, not instead of it: the sentence names what
       // the user can do, this one says the panel is not stuck.
       waiting: Boolean(loadError) && waiting,
+      openWellfoundCode: loadError ? openWellfoundCode : null,
     };
   }
 
@@ -284,6 +295,32 @@ function renderJobRow(row) {
     </div>`;
 }
 
+// The remedy is opening Wellfound's recruiter area, so the sentence itself is
+// the control: a real link, not a button beside it that repeats what the
+// sentence already said. A new tab, not the panel document, is what opens -
+// this is an extension page, and navigating it away from its own document
+// would strand the panel on wellfound.com with no way back to itself. `rel`
+// keeps the opened tab from reaching back into this one.
+const LINK_ATTRS = `target="_blank" rel="noopener noreferrer" class="load-error-link"`;
+
+// Same two sentences NO_WELLFOUND_TAB and NOT_IN_RECRUITER_AREA say, with the
+// part that names the remedy turned into the link that performs it. Neither
+// sentence gained a word: the words that already named where to go now go
+// there.
+function loadErrorBody(code) {
+  if (code === NO_WELLFOUND_TAB_CODE) {
+    return `<a href="${RECRUIT_URL}" ${LINK_ATTRS}
+        aria-label="Open Wellfound's recruiter area, in a new tab">Open Wellfound</a> to get started`;
+  }
+  if (code === NOT_IN_RECRUITER_AREA_CODE) {
+    return `Open your hiring pages on
+      <a href="${RECRUIT_URL}" ${LINK_ATTRS}
+         aria-label="Open your Wellfound recruiter pages, in a new tab">Wellfound (wellfound.com/recruit)</a>
+      to see your jobs`;
+  }
+  return null;
+}
+
 function renderNoJobs(model) {
   const hint = model.hint
     ? '<p class="empty-hint">If your roles do not appear, open your jobs list on Wellfound.</p>'
@@ -295,8 +332,9 @@ function renderNoJobs(model) {
       ${RECONNECT_LABEL}
     </button>`
     : '';
+  const body = loadErrorBody(model.openWellfoundCode) ?? escapeHtml(model.message);
   return `
-    <p class="empty">${escapeHtml(model.message)}</p>
+    <p class="empty">${body}</p>
     ${hint}
     ${waiting}
     ${remedy}`;

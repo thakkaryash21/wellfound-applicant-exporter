@@ -5,7 +5,14 @@ import { SUMMARY_KEY, RUNNING_KEY } from '../src/panel/summary-store.js';
 import { RUN_IDS, DOT } from '../src/panel/running-view.js';
 import { POST_RUN_IDS } from '../src/panel/post-run-view.js';
 import { HOME_IDS, RECONNECT_LABEL, WAITING_LINE } from '../src/panel/home-view.js';
-import { pageDisconnectedError } from '../src/panel/tab-driver.js';
+import {
+  pageDisconnectedError,
+  RECRUIT_URL,
+  NO_WELLFOUND_TAB,
+  NOT_IN_RECRUITER_AREA,
+  NO_WELLFOUND_TAB_CODE,
+  NOT_IN_RECRUITER_AREA_CODE,
+} from '../src/panel/tab-driver.js';
 import { CONFIRM_IDS } from '../src/panel/accept-confirm.js';
 import { DEFAULT_MESSAGE } from '../src/lib/accept-message.js';
 
@@ -370,6 +377,44 @@ describe('Home', () => {
       fake.navigateTab(7, 'https://wellfound.com/recruit/applicants/jobs/9100001');
       await settle();
       expect(controller.listJobs).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // Both dead ends the owner used to resolve by hand are actionable now: the
+  // sentence itself carries a link to the recruiter area, not a mechanism the
+  // user has to work out on their own.
+  describe('the two Wellfound dead ends', () => {
+    function throwing(message, code) {
+      return stubController({
+        listJobs: vi.fn(async () => {
+          const error = new Error(message);
+          error.code = code;
+          throw error;
+        }),
+      });
+    }
+
+    it('links "Open Wellfound" to the recruiter area when there is no tab', async () => {
+      const screen = await openPanel({
+        tabs: [],
+        stub: throwing(NO_WELLFOUND_TAB, NO_WELLFOUND_TAB_CODE),
+      });
+      const link = screen.querySelector('.load-error-link');
+      expect(link).not.toBe(null);
+      expect(link.getAttribute('href')).toBe(RECRUIT_URL);
+      expect(link.getAttribute('target')).toBe('_blank');
+      expect(link.textContent).toBe('Open Wellfound');
+    });
+
+    it('links the recruiter mention when the tab is outside the recruiter area', async () => {
+      const screen = await openPanel({
+        tabs: [{ id: 7, url: 'https://wellfound.com/jobs' }],
+        stub: throwing(NOT_IN_RECRUITER_AREA, NOT_IN_RECRUITER_AREA_CODE),
+      });
+      const link = screen.querySelector('.load-error-link');
+      expect(link).not.toBe(null);
+      expect(link.getAttribute('href')).toBe(RECRUIT_URL);
+      expect(screen.innerHTML).toContain('to see your jobs');
     });
   });
 });

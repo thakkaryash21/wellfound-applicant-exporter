@@ -577,6 +577,19 @@ body {
   margin-bottom: var(--space-6);
 }
 
+/* The remedy inside the load-error sentence itself, rather than a button below
+   it: the sentence already names where to go, so the sentence is the control. */
+.load-error-link {
+  color: var(--sand);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.load-error-link:hover {
+  color: var(--paper);
+}
+
 /* Reduce movement, not feedback. Colour and background transitions tell the user
    a control responded, so they stay; only motion is removed. The breath lane
    stops animating in JS and reports its state as text instead. */

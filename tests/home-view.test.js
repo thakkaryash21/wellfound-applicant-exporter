@@ -1,7 +1,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { installFakeChrome } from './helpers/fake-chrome.js';
 import { CX } from '../src/lib/messages.js';
-import { APPLICANTS_URL } from '../src/panel/tab-driver.js';
+import {
+  APPLICANTS_URL,
+  RECRUIT_URL,
+  NO_WELLFOUND_TAB,
+  NOT_IN_RECRUITER_AREA,
+  NO_WELLFOUND_TAB_CODE,
+  NOT_IN_RECRUITER_AREA_CODE,
+} from '../src/panel/tab-driver.js';
 import {
   DEFAULT_LIMIT,
   sanitizeLimit,
@@ -338,6 +345,41 @@ describe('renderHome', () => {
     const html = renderHome(model([], {}, { loadError: 'nope' }));
     expect(html).toContain('nope');
     expect(html).not.toContain(`id="${HOME_IDS.start}"`);
+  });
+
+  // The two dead ends the owner used to resolve by hand: no Wellfound tab at
+  // all, and a Wellfound tab outside the recruiter area. Both land the click
+  // on the recruiter area, and both stay their own sentence.
+  it('links the remedy to the recruiter area when there is no Wellfound tab', () => {
+    const html = renderHome(
+      model([], {}, { loadError: NO_WELLFOUND_TAB, openWellfoundCode: NO_WELLFOUND_TAB_CODE }),
+    );
+    expect(html).toContain(`href="${RECRUIT_URL}"`);
+    expect(html).toContain('target="_blank"');
+    expect(html).toContain('>Open Wellfound<');
+    expect(html).toContain('to get started');
+  });
+
+  it('links the remedy to the recruiter area when the tab is outside it', () => {
+    const html = renderHome(
+      model(
+        [],
+        {},
+        { loadError: NOT_IN_RECRUITER_AREA, openWellfoundCode: NOT_IN_RECRUITER_AREA_CODE },
+      ),
+    );
+    expect(html).toContain(`href="${RECRUIT_URL}"`);
+    expect(html).toContain('Wellfound (wellfound.com/recruit)</a>');
+    expect(html).toContain('to see your jobs');
+  });
+
+  // A failure this panel has no marker for - PAGE_DISCONNECTED, or anything
+  // else - keeps the plain sentence. Only the two Wellfound dead ends earn a
+  // link.
+  it('renders a load error with no marker as plain text, not a link', () => {
+    const html = renderHome(model([], {}, { loadError: 'lost the page' }));
+    expect(html).not.toContain('<a ');
+    expect(html).toContain('lost the page');
   });
 
   it('puts the reload button on the empty screen when one is offered', () => {

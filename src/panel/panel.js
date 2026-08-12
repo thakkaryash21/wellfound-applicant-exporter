@@ -17,7 +17,12 @@ import { setVerbose, isVerbose } from './verbose-console.js';
 import { HOME_IDS, DEFAULT_LIMIT, sanitizeLimit, homeModel, renderHome } from './home-view.js';
 import { CONFIRM_IDS, confirmModel, renderConfirm } from './accept-confirm.js';
 import { DEFAULT_MESSAGE } from '../lib/accept-message.js';
-import { PAGE_DISCONNECTED, watchTabs } from './tab-driver.js';
+import {
+  PAGE_DISCONNECTED,
+  NO_WELLFOUND_TAB_CODE,
+  NOT_IN_RECRUITER_AREA_CODE,
+  watchTabs,
+} from './tab-driver.js';
 import { sleep } from '../lib/jitter.js';
 import {
   RUN_IDS,
@@ -64,6 +69,10 @@ const state = {
   // panel can put right by reloading the tab. The tab comes off the error, so
   // the remedy does not have to go looking for one.
   disconnectedTabId: null,
+  // Set when the failure is one Wellfound itself fixes: no tab, or a tab
+  // outside the recruiter area. Carried as the error's own marker so Home can
+  // offer the link without reading the sentence.
+  openWellfoundCode: null,
   // The load failed and the panel is listening for the tab to change so it can
   // try again. The user's own remedy - close it, open it again - is this, done
   // for them.
@@ -257,6 +266,7 @@ function currentHomeModel() {
     hydrating: state.hydrating,
     hydrationNote: state.hydrationNote,
     waiting: state.waiting,
+    openWellfoundCode: state.openWellfoundCode,
   });
 }
 
@@ -722,6 +732,7 @@ async function load() {
   stopWatching();
   state.loadError = null;
   state.disconnectedTabId = null;
+  state.openWellfoundCode = null;
   state.hydrationNote = null;
   state.waiting = false;
   let hydrationRan = false;
@@ -754,6 +765,10 @@ async function load() {
     // carries, and a screen that decided by reading the words would break the
     // day the words were improved.
     state.disconnectedTabId = error.code === PAGE_DISCONNECTED ? error.tabId : null;
+    state.openWellfoundCode =
+      error.code === NO_WELLFOUND_TAB_CODE || error.code === NOT_IN_RECRUITER_AREA_CODE
+        ? error.code
+        : null;
     // Every one of these failures is about the page, and every one of them is
     // undone by the tab moving: opening Wellfound, navigating into the
     // recruiter area, finishing a load, being reloaded. So the panel waits for
