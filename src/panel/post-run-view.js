@@ -39,6 +39,7 @@ export function reportText(summary) {
   if (summary.at) lines.push(`Run at: ${localDateTimeText(summary.at)}`);
   lines.push('');
   if (summary.error) lines.push(`Error: ${summary.error}`);
+  if (summary.alert) lines.push(`Check this: ${summary.alert}`);
   if (summary.headline) lines.push(summary.headline);
   for (const note of summary.notes ?? []) lines.push(note);
   const trace = traceText(summary.trace);
@@ -65,6 +66,7 @@ export function renderPostRun(summary) {
       <h2 class="post-run-title" id="${POST_RUN_IDS.title}">What the run did</h2>
       <div class="run-summary" role="status">
         ${s.error ? `<p class="job-meta warn">${escapeHtml(s.error)}</p>` : ''}
+        ${s.alert ? `<p class="run-alert warn">${escapeHtml(s.alert)}</p>` : ''}
         <p class="run-headline">${escapeHtml(stamp)}${escapeHtml(s.headline ?? '')}</p>
         ${(s.notes ?? []).map((n) => `<p class="job-meta">${escapeHtml(n)}</p>`).join('')}
       </div>

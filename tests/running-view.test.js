@@ -9,6 +9,10 @@ import {
   pauseLine,
   candidateLine,
   pageLine,
+  acceptCounts,
+  acceptText,
+  acceptConsideringLine,
+  acceptCandidateLine,
   ETA_MIN_SAMPLE,
   RUN_IDS,
 } from '../src/panel/running-view.js';
@@ -274,5 +278,66 @@ describe('the activity line', () => {
 
   it('falls back to a plain noun when the list is not named', () => {
     expect(pageLine({ page: 1, fetched: 10, fresh: 10 })).toContain('applicants');
+  });
+});
+
+// The accept pass, live. The one rule this screen must not break: progress is
+// `accepted` out of `intended`. The reviewer's own total SHRINKS as the run
+// proceeds - accepting drains the queue it counts - so anything measured
+// against it would run backwards.
+describe('the accept pass while it happens', () => {
+  const accept = (over = {}) => ({ ...acceptCounts(), intended: 12, ...over });
+
+  it('counts accepted out of intended, and nothing else', () => {
+    expect(acceptText(accept({ accepted: 3 }))).toBe('3 of 12 accepted');
+  });
+
+  // The proof it is not the reviewer's number: the queue drains from 116 to 104
+  // over these twelve accepts and the line never mentions either figure.
+  it('does not move with the reviewer\u2019s draining total', () => {
+    const first = acceptText(accept({ accepted: 1 }));
+    const later = acceptText(accept({ accepted: 11 }));
+    expect(first).toBe('1 of 12 accepted');
+    expect(later).toBe('11 of 12 accepted');
+    expect(later).not.toContain('116');
+    expect(later).not.toContain('104');
+  });
+
+  it('keeps every other outcome apart from the accepted count', () => {
+    const text = acceptText(
+      accept({ accepted: 3, skipped: 2, failed: 1, refused: 4, already: 5 }),
+    );
+    expect(text).toContain('3 of 12 accepted');
+    expect(text).toContain('2 passed over');
+    expect(text).toContain('1 could not be accepted');
+    expect(text).toContain('4 refused');
+    expect(text).toContain('5 accepted before');
+  });
+
+  it('says nothing at all about accepting on a run that does not accept', () => {
+    expect(runModel({ counts: counts() }).acceptText).toBe('');
+    expect(renderRunBody(runModel({ counts: counts() }))).not.toContain('run-accept');
+    expect(renderRunBody(runModel({ counts: counts(), accept: accept() }))).toContain('run-accept');
+  });
+
+  // What is on screen in the reviewer right now, and deliberately not phrased as
+  // progress: this denominator is the one that drains.
+  it('reports the reviewer position as a position, not as progress', () => {
+    expect(acceptConsideringLine({ index: 1, total: 115 })).toBe(
+      'reading 1 of 115 in the review queue',
+    );
+    expect(acceptConsideringLine({})).toBe('reading the applicant on screen');
+  });
+
+  it('says what was decided about each person', () => {
+    expect(acceptCandidateLine('accepted', { accepted: 4, intended: 12 })).toBe(
+      'accepted and messaged \u00b7 4 of 12',
+    );
+    expect(acceptCandidateLine('skipped', {})).toBe(
+      'passed over: not someone this run is accepting',
+    );
+    expect(acceptCandidateLine('failed', { error: 'the modal never opened' })).toContain(
+      'could not accept',
+    );
   });
 });

@@ -73,6 +73,40 @@ export function breakdownText(counts) {
   return parts.join(DOT);
 }
 
+// The accept pass, counted separately from every download number above it. They
+// answer different questions and a single total would say the run touched more
+// people than it did.
+export function acceptCounts() {
+  return { intended: 0, accepted: 0, skipped: 0, failed: 0, refused: 0, already: 0 };
+}
+
+// Progress here is `accepted` out of `intended`, and never a share of the
+// reviewer's own total. That total SHRINKS with every accept - accepting drains
+// the queue it counts - so anything measured against it would run backwards.
+// `intended` is fixed before the first keystroke, so this only ever goes up.
+export function acceptText(accept) {
+  if (!accept) return '';
+  const parts = [`${accept.accepted} of ${accept.intended} accepted`];
+  if (accept.skipped) parts.push(`${accept.skipped} passed over`);
+  if (accept.failed) parts.push(`${accept.failed} could not be accepted`);
+  if (accept.refused) parts.push(`${accept.refused} refused`);
+  if (accept.already) parts.push(`${accept.already} accepted before`);
+  return parts.join(DOT);
+}
+
+// What is on screen in the reviewer right now. Deliberately not phrased as
+// progress: the denominator is the queue, and the queue is draining.
+export function acceptConsideringLine({ index = null, total = null } = {}) {
+  if (index == null || total == null) return 'reading the applicant on screen';
+  return `reading ${index} of ${total} in the review queue`;
+}
+
+export function acceptCandidateLine(outcome, { accepted = 0, intended = 0, error } = {}) {
+  if (outcome === 'accepted') return `accepted and messaged${DOT}${accepted} of ${intended}`;
+  if (outcome === 'failed') return `could not accept${DOT}${error ?? 'no reason given'}`;
+  return 'passed over: not someone this run is accepting';
+}
+
 // Coarse on purpose. The pace of this run swings by whole seconds per candidate
 // depending on where the next reading break lands, so "about 9 min left" is the
 // most precision the number can honestly carry.
@@ -93,6 +127,9 @@ export function runModel({
   jobIndex = null,
   jobTotal = null,
   elapsedMs = 0,
+  // Null until a job's accept pass starts, so a run that accepts nobody says
+  // nothing about accepting.
+  accept = null,
 } = {}) {
   const processed = total(counts);
   // A zero or absent estimate is not a denominator. It means the panel was never
@@ -136,6 +173,7 @@ export function runModel({
     note,
     roleText,
     breakdownText: breakdownText(counts),
+    acceptText: acceptText(accept),
   };
 }
 
@@ -169,7 +207,8 @@ export function renderRunBody(model) {
     </div>
     ${renderBar(model)}
     <p class="run-role">${escapeHtml(model.roleText)}</p>
-    <p class="run-breakdown">${escapeHtml(model.breakdownText)}</p>`;
+    <p class="run-breakdown">${escapeHtml(model.breakdownText)}</p>
+    ${model.acceptText ? `<p class="run-accept">${escapeHtml(model.acceptText)}</p>` : ''}`;
 }
 
 export function renderRunning(model) {

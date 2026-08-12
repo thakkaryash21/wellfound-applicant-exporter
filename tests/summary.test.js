@@ -207,3 +207,90 @@ describe('a fatal error carrying a URL', () => {
     expect(summarize({ type: 'done', downloaded: 1 }).error).toBe(null);
   });
 });
+
+// What the run says about accepting once it is over. Every cause is kept apart
+// from every other because they have different remedies, and one of them has
+// none at all.
+describe('the accept pass, afterwards', () => {
+  const accepting = (over = {}) =>
+    done({ actions: { download: true, accept: true }, accepted: 0, ...over });
+
+  it('counts the accepted on the headline, beside the downloads', () => {
+    const s = summarize(accepting({ downloaded: 12, accepted: 12 }));
+    expect(s.headline).toBe('12 downloaded \u00b7 12 accepted');
+  });
+
+  it('says the accepts cannot be undone', () => {
+    expect(summarize(accepting({ accepted: 12 })).notes.join('\n')).toContain('cannot be undone');
+  });
+
+  // The home screen's counts drop, possibly to zero, because the queue drained.
+  // Unsaid, that reads as the extension having lost the applicants.
+  it('explains why the roles screen will show fewer applicants now', () => {
+    const notes = summarize(accepting({ accepted: 12 })).notes.join('\n');
+    expect(notes).toContain('lower now, perhaps zero');
+    expect(notes).toContain('not lost');
+  });
+
+  it('keeps refused, already-accepted and failed apart', () => {
+    const notes = summarize(
+      accepting({ accepted: 3, acceptRefused: 4, acceptAlready: 5, acceptFailed: 2 }),
+    ).notes.join('\n');
+    expect(notes).toContain('4 refused: no resume was captured');
+    expect(notes).toContain('5 were accepted on an earlier run');
+    expect(notes).toContain('2 could not be accepted');
+  });
+
+  it('names the role whose accepting stopped short, and by how much', () => {
+    const notes = summarize(
+      accepting({
+        accepted: 3,
+        jobs: [
+          {
+            jobId: '1',
+            jobTitle: 'Platform Engineer',
+            accepted: 3,
+            acceptIntended: 40,
+            acceptStoppedBecause: 'aborted',
+          },
+        ],
+      }),
+    ).notes.join('\n');
+    expect(notes).toContain('Platform Engineer: accepting stopped after 3 of 40');
+  });
+
+  // The one outcome that needs the operator's hands. A message may or may not
+  // have gone out, nothing was retried, and nothing here can tell which - so it
+  // is lifted above the headline rather than left among the notes.
+  it('puts an unclear send above the headline, and names the remedy', () => {
+    const s = summarize(
+      accepting({
+        accepted: 3,
+        jobs: [
+          { jobId: '1', jobTitle: 'Platform Engineer', acceptStoppedBecause: 'unclear' },
+        ],
+      }),
+    );
+    expect(s.alert).toContain('may or may not have gone out');
+    expect(s.alert).toContain('Nothing was retried');
+    expect(s.alert).toContain('Check that role in Wellfound');
+  });
+
+  it('has no alert when every accept confirmed', () => {
+    expect(summarize(accepting({ accepted: 3 })).alert).toBe(null);
+  });
+
+  // A run that never accepted says nothing about accepting at all.
+  it('is silent on a run that was not accepting', () => {
+    const s = summarize(done({ downloaded: 4, actions: { download: true, accept: false } }));
+    expect(s.headline).toBe('4 downloaded');
+    expect(s.notes.join('\n')).not.toContain('accepted');
+  });
+
+  // Counts and job titles only, so all of it is safe to write to storage.
+  it('stores every accept note as it stands', () => {
+    const s = summarize(accepting({ accepted: 3, acceptRefused: 1 }));
+    expect(storableSummary(s).notes).toEqual(s.safeNotes);
+    expect(s.safeNotes.join('\n')).toContain('1 refused');
+  });
+});

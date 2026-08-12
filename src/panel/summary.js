@@ -1,4 +1,4 @@
-import { breakdownText } from './running-view.js';
+import { breakdownText, DOT } from './running-view.js';
 import { scrubUrls } from '../lib/trace.js';
 import { PREVIEW } from '../lib/csv.js';
 
@@ -46,6 +46,22 @@ function skippedNote(counts) {
   const total = counts.skipped + counts['no-id'] + counts.masked;
   if (total === 0) return null;
   return `The ${total} skipped: ${parts.join(', ')}.`;
+}
+
+// The one accept outcome that needs the reader's hands. An unclear send is a
+// message that may or may not have gone out: the pass stops rather than retry,
+// because a retry is a second message to a real person, and nothing here can
+// tell which happened. It is the only state in this whole panel that asks the
+// operator to go and look at Wellfound before running again, so it is lifted
+// out of the notes and rendered above the headline.
+export function acceptAlert(jobs = []) {
+  const unclear = jobs.filter((job) => job.acceptStoppedBecause === 'unclear');
+  if (unclear.length === 0) return null;
+  const names = listNames(unclear.map((job) => job.jobTitle));
+  return (
+    `${names}: an accept did not confirm, so that message may or may not have gone out. ` +
+    'Nothing was retried. Check that role in Wellfound before running it again.'
+  );
 }
 
 // Everything the run knows, said out loud. Nothing here may read better than
@@ -120,6 +136,45 @@ export function summarize(event, trace = []) {
     );
   }
 
+  // The accept dimension, and every cause kept apart from every other: they
+  // have different remedies, and one of them has none at all. Job titles and
+  // counts only, so all of it is safe to store.
+  if (event.actions?.accept) {
+    const accepted = event.accepted ?? 0;
+    headline = `${headline}${DOT}${accepted} accepted`;
+    both(
+      `${accepted} ${accepted === 1 ? 'person was' : 'people were'} accepted and messaged. ` +
+        'That cannot be undone.',
+    );
+    if (accepted) {
+      both(
+        'They have left the review queue, so the applicant counts on the roles screen ' +
+          'will be lower now, perhaps zero. They are not lost, and this extension can ' +
+          'no longer fetch or re-download them.',
+      );
+    }
+    if (event.acceptRefused) {
+      both(
+        `${event.acceptRefused} refused: no resume was captured for them, and accepting ` +
+          'would have lost it for good. Download them first, then accept.',
+      );
+    }
+    if (event.acceptAlready) {
+      both(`${event.acceptAlready} were accepted on an earlier run, so nothing was sent again.`);
+    }
+    if (event.acceptFailed) {
+      both(`${event.acceptFailed} could not be accepted. Nothing was sent to them.`);
+    }
+    for (const job of jobs.filter(
+      (j) => j.acceptStoppedBecause === 'aborted' || j.acceptStoppedBecause === 'error',
+    )) {
+      both(
+        `${job.jobTitle}: accepting stopped after ${job.accepted ?? 0} of ` +
+          `${job.acceptIntended ?? 0}. The rest were not attempted.`,
+      );
+    }
+  }
+
   const causes = skippedNote(counts);
   if (causes) both(causes);
 
@@ -150,6 +205,9 @@ export function summarize(event, trace = []) {
   return {
     at: new Date().toISOString(),
     headline,
+    // Above the headline, not among the notes: it is the one outcome that needs
+    // the operator to go and check Wellfound before doing anything else.
+    alert: acceptAlert(jobs),
     notes,
     safeNotes,
     // A URL is the one shape that reliably smuggles identity into a message

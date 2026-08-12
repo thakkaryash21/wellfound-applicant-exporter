@@ -132,3 +132,30 @@ describe('the downloadable report', () => {
     expect(reportFilename(new Date('not a date'))).toMatch(/^run-\d{4}-\d{2}-\d{2}-\d{6}\.txt$/);
   });
 });
+
+// The one outcome that needs the reader to go and look at Wellfound before
+// doing anything else, so it sits above the headline rather than among the
+// notes - and it goes into the report the same way.
+describe('an accept that did not confirm', () => {
+  const summary = {
+    at: '2026-08-12T10:00:00.000Z',
+    headline: '3 downloaded \u00b7 3 accepted',
+    alert: 'Platform Engineer: an accept did not confirm.',
+    notes: ['3 people were accepted and messaged.'],
+  };
+
+  it('is rendered above the headline, marked as a warning', () => {
+    const html = renderPostRun(summary);
+    expect(html).toContain('run-alert');
+    expect(html).toContain('an accept did not confirm');
+    expect(html.indexOf('run-alert')).toBeLessThan(html.indexOf('run-headline'));
+  });
+
+  it('is in the downloadable report too', () => {
+    expect(reportText(summary)).toContain('Check this: Platform Engineer');
+  });
+
+  it('leaves no empty warning behind on a run that had none', () => {
+    expect(renderPostRun({ ...summary, alert: null })).not.toContain('run-alert');
+  });
+});

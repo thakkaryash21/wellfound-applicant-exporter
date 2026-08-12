@@ -247,6 +247,109 @@ body {
   border-color: var(--muted);
 }
 
+/* Accepting, on the main screen and never under Advanced. It is the only
+   control in this panel that changes what other people receive rather than what
+   this computer stores, so it carries its own surface and, once it is on, the
+   rust edge every warning in this panel uses. */
+.accept {
+  margin: 0 var(--space-4) var(--space-4);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-lg);
+  transition: border-color var(--dur) var(--ease);
+}
+
+.accept.is-on {
+  border-color: var(--rust);
+}
+
+.accept-cost {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* A caption and its control, in one column. A two-column grid here would fold
+   the caption alongside the box; this is the shape .advanced-item settled on
+   after that exact bug. */
+.accept-field {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.accept-field textarea {
+  width: 100%;
+  min-height: 160px;
+  background: var(--ground);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  color: var(--paper);
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  line-height: 1.5;
+  resize: vertical;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.accept-field textarea:hover {
+  border-color: var(--muted);
+}
+
+/* The composed result, and the message on the confirm screen. Preformatted
+   because the paragraph breaks are part of what will be sent, and wrapped
+   because a 320px panel must not scroll sideways to read a sentence. */
+.accept-preview {
+  margin: 0;
+  padding: var(--space-2) var(--space-3);
+  background: var(--ground);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* The screen between Start and the first message. Go back is the filled button
+   and comes first; the send is outlined and carries the rust the Library's
+   destructive action already uses. */
+.confirm {
+  display: grid;
+  gap: var(--space-3);
+  padding-bottom: var(--space-4);
+}
+
+.confirm-body {
+  display: grid;
+  gap: var(--space-3);
+  padding: 0 var(--space-4);
+}
+
+.confirm-body p {
+  margin: 0;
+}
+
+.confirm-roles {
+  margin: 0;
+  padding-left: var(--space-4);
+  display: grid;
+  gap: var(--space-1);
+  font-weight: 600;
+}
+
+.danger-action {
+  color: var(--rust);
+  border-color: var(--rust);
+}
+
+.danger-action:hover {
+  background: var(--surface-hi);
+  border-color: var(--rust);
+}
+
 /* Closed by default. Nothing in here is needed for an ordinary run. */
 .advanced {
   border-top: 1px solid var(--hairline);
@@ -549,6 +652,28 @@ body {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
+}
+
+/* The accept pass, under the download breakdown and in the paper colour rather
+   than the muted one: it counts messages that have gone out, which is the
+   heavier of the two numbers on this screen. */
+.run-accept {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Above the headline on the post-run screen, and the only thing there that asks
+   the reader to go and do something before running again. */
+.run-alert {
+  margin: 0;
+  font-weight: 600;
+}
+
+/* An accept is terminal for that candidate and it is the outcome that cost
+   something, so it takes the sage the landed download already uses. */
+.tick-accepted {
+  background: var(--sage);
 }
 
 /* The lane and the line that explains it, together, under the bar. */
