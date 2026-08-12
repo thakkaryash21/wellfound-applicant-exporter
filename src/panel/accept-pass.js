@@ -258,6 +258,34 @@ const QUEUE_CHECKS_PER_PASS = 1;
 // A minute is cheap against that, and it is spent at most once in a pass.
 const QUEUE_SETTLE_WAITS_MS = [5000, 15000, 30000];
 
+// One accept taking this long is the page asking to be reloaded.
+//
+// The counted cadence in PACING is a backstop and cannot be the whole trigger,
+// because how fast the page degrades scales with how much of the list it is
+// holding. Both measured:
+//
+//   20 applicants:   5-9 s an accept, steady, reloads at 7, 13, 18, finished
+//   111 applicants:  8.3 s, 7.1 s, 35.9 s, then 47 s and the relay gave up
+//
+// The second run died on its fourth accept, so a cadence of five to seven never
+// fired once - the mechanism that makes long passes work was never reached. No
+// count protects both roles: small enough for 111 is wasteful on 20. But the
+// pass already holds the one number that means the same thing on any size of
+// role, which is how long the last accept took.
+//
+// 20 s, and every part of that is a measurement. The healthy band is 5-9 s and
+// the two pauses this pass hands the driver account for up to 8 s of it, so an
+// accept reaching 20 s spent at least 12 s inside the page against a healthy
+// two or three - it is not ordinary variation, and there is more than a
+// doubling of the healthy ceiling between the two. The relay's budget is 45 s,
+// so 20 s leaves 25 s of headroom: the reload happens a whole accept before an
+// accept could fail. The 35.9 s accept that preceded the failure trips it
+// comfortably; nothing in either healthy run comes close.
+//
+// Wrong in the cheap direction if it is wrong at all: the cost of firing early
+// is a page load, and the cost of firing late is a stalled run.
+const SLOW_ACCEPT_MS = 20000;
+
 // `review` is one call into the reviewer driver, `recordAccepted` is the
 // ledger write, and both are injected for the same reason the download walk
 // injects its own: this loop is the part worth testing, and neither a real tab
@@ -276,6 +304,9 @@ const QUEUE_SETTLE_WAITS_MS = [5000, 15000, 30000];
 export async function runAcceptPass(deps, options) {
   const { review, recordAccepted, sleep, emit, checkQueue, reloadPage } = deps;
   const rand = deps.rand ?? Math.random;
+  // The clock, injected for the same reason  is: a test that has to make
+  // an accept take thirty-six seconds must not take thirty-six seconds.
+  const now = deps.now ?? (() => Date.now());
   const {
     jobId,
     jobTitle,
@@ -564,6 +595,7 @@ export async function runAcceptPass(deps, options) {
       // a real message may exist that nothing durable knows about, and no
       // reload may happen inside it.
       unresolvedSend = userId;
+      const sendStartedAt = now();
       try {
         await review({
           type: CX.ACCEPT_CANDIDATE,
@@ -675,6 +707,21 @@ export async function runAcceptPass(deps, options) {
         break;
       }
 
+      // How long the page took over that accept, and what it says about the
+      // page. This is the trigger that works on a role of any size: the counted
+      // cadence below cannot know that a 111-applicant list degrades five times
+      // faster than a 20-applicant one, and a single slow accept says it
+      // outright, one whole accept before the relay would give up.
+      //
+      // Read AFTER the send resolved and BEFORE the ledger write, so it is a
+      // measurement of what already happened and never a reason to touch the
+      // page while this accept is outstanding. It only ever asks for a refresh
+      // at the top of the next turn, exactly as the counter does.
+      const tookMs = now() - sendStartedAt;
+      if (tookMs >= SLOW_ACCEPT_MS) {
+        refreshPending = true;
+        emit({ type: 'accept_slow', jobId, userId, ms: tookMs });
+      }
       // Recorded before anything else can interrupt, exactly as a download is:
       // an accept the ledger does not know about gets sent a second time.
       await recordAccepted(jobId, userId);

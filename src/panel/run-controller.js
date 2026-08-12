@@ -131,6 +131,11 @@ export function createController({
     // answer it.
     else if (event.type === 'accept_reload')
       trace.record('accept_reload', { jobId, count: event.accepted });
+    // The other reason a reload happens: one accept that took long enough to say
+    // the page is degrading. Recorded with its duration, because the threshold
+    // was chosen from durations and the next question asked of it will be too.
+    else if (event.type === 'accept_slow')
+      trace.record('accept_slow', { jobId, userId: event.userId, ms: event.ms });
     else if (event.type === 'accept_done')
       trace.record('accept_done', {
         jobId,
@@ -214,24 +219,94 @@ export function createController({
   //
   // Anything short of a complete walk of the collection is 'unknown', including
   // a page that came back from some other bucket than the one this reads.
+  // Where a queue check last found somebody, keyed by job and user. The whole
+  // of the state this check keeps, and the reason 44 fetches become 14.
+  //
+  // The settle window asks the same question about the same person four times
+  // over about a minute, and on the run that made this necessary the answer was
+  // `queued` every time, from page eleven of twelve. Eleven fetches, four
+  // times. The pages before that one are re-read only to arrive back at the
+  // page that already answered.
+  //
+  // So a look that finds somebody remembers the cursor of the page it found
+  // them on, and the next look tries that page first: one fetch for a `queued`
+  // that used to cost eleven. It is a hint and never an authority - if they are
+  // not there, or the page cannot be read, the hint is dropped and the full
+  // walk happens exactly as before, which is what `gone` still requires.
+  const lastSeenAt = new Map();
+
+  // One page of the review queue, and whether the person we are asking about is
+  // on it. Split out because the hint above and the walk below need the same
+  // read and must agree about what a foreign bucket means.
+  async function pageHolds(tabId, jobId, after, wanted) {
+    const result = await tracedFetch(tabId, { jobId, pageSize: QUEUE_CHECK_PAGE_SIZE, after });
+    // The walk copies whatever bucket the recruiter has open rather than
+    // forcing one, so it can legitimately be looking at REJECTED. Absence from
+    // a bucket this function did not mean to read says nothing at all.
+    if (result.bucket !== REVIEW_BUCKET) return { verdict: 'unknown' };
+    for (const node of result.edges ?? []) {
+      if (normalizeNode(node, { jobId }).userId === wanted) return { verdict: 'queued' };
+    }
+    return { verdict: null, hasNextPage: result.hasNextPage, endCursor: result.endCursor };
+  }
+
+  // Is this person still in the review queue?
+  //
+  // Asked by the accept pass, and only when a send was clicked and the page
+  // never confirmed it. The extension is not out of options at that moment: it
+  // already reads an authoritative list, and an accepted candidate leaves it. So
+  // rather than reporting a shrug it establishes the fact.
+  //
+  // 'gone' is the whole of the evidence available and it is one-directional: no
+  // query can positively confirm an accept, because there is no ACCEPTED status
+  // to ask for. Absence is not infinite evidence either - a candidate could
+  // leave NEEDS_REVIEW for another reason - but over the seconds between the
+  // click and this walk the only other ways out are a human acting on the same
+  // queue by hand at that moment, or the application expiring in that window.
+  // And the direction of the remaining error is the safe one: a wrong 'gone'
+  // books somebody as accepted who was not, costing them a message, where the
+  // failure this replaces cost a run and mislabelled somebody who WAS messaged.
+  // Nothing here can ever cause a second message; only the ledger grows.
+  //
+  // The two answers cost different amounts, and that asymmetry is the same one
+  // the verdicts themselves have. FINDING somebody proves `queued` on the spot,
+  // so the walk stops on the page that holds them and never reads another.
+  // Only absence needs exhaustiveness, so only `gone` is concluded from a
+  // complete walk whose every page came back from the review bucket. Anything
+  // short of that - the cap with pages still to come, a foreign bucket - is
+  // 'unknown'.
   async function queueCheck(tabId, jobId, userId) {
     const wanted = String(userId);
+    const key = `${jobId}:${wanted}`;
+
+    // The hint first, when there is one. At most one extra fetch, and it
+    // answers the common case of the settle window outright.
+    const hint = lastSeenAt.get(key);
+    if (hint !== undefined) {
+      const seen = await pageHolds(tabId, jobId, hint, wanted);
+      if (seen.verdict === 'queued') {
+        trace.record('queue_hint', { jobId, userId: wanted, outcome: 'queued' });
+        return 'queued';
+      }
+      // Either they have moved or the page could not be read. Neither is an
+      // answer, and neither leaves a hint worth keeping.
+      lastSeenAt.delete(key);
+      trace.record('queue_hint', { jobId, userId: wanted, outcome: 'stale' });
+      if (seen.verdict === 'unknown') return 'unknown';
+    }
+
     let after = null;
     for (let page = 0; page < QUEUE_CHECK_PAGE_CAP; page += 1) {
-      const result = await tracedFetch(tabId, {
-        jobId,
-        pageSize: QUEUE_CHECK_PAGE_SIZE,
-        after,
-      });
-      // The walk copies whatever bucket the recruiter has open rather than
-      // forcing one, so it can legitimately be looking at REJECTED. Absence
-      // from a bucket this function did not mean to read says nothing at all.
-      if (result.bucket !== REVIEW_BUCKET) return 'unknown';
-      for (const node of result.edges ?? []) {
-        if (normalizeNode(node, { jobId }).userId === wanted) return 'queued';
+      const seen = await pageHolds(tabId, jobId, after, wanted);
+      if (seen.verdict === 'unknown') return 'unknown';
+      if (seen.verdict === 'queued') {
+        // `after` is the cursor this page was fetched WITH, which is what it
+        // takes to fetch it again - not the cursor it handed back.
+        lastSeenAt.set(key, after);
+        return 'queued';
       }
-      if (!result.hasNextPage) return 'gone';
-      after = result.endCursor;
+      if (!seen.hasNextPage) return 'gone';
+      after = seen.endCursor;
       const ms = sample(PACING.downloadMs[0], PACING.downloadMs[1]);
       emit({ type: 'resting', jobId, ms });
       await sleep(ms);
@@ -347,6 +422,43 @@ export function createController({
         pageSize,
       });
 
+      // What the operator ASKED FOR, built here, before a single request, and
+      // carried to the end untouched. Every diagnosis this session began with
+      // the operator being asked which boxes they had ticked, because a trace
+      // records effects and the report opened with results.
+      //
+      // It is a record of intent, so it is captured rather than reconstructed:
+      // a run that dies at role three of four still says what it was trying to
+      // do, because this object was complete before role one started. Titles
+      // are filled in below from the job list, which is the only place they
+      // exist - still intent, since it happens before any work.
+      const config = {
+        mode: runKind(actions),
+        actions,
+        pageSize,
+        folder,
+        // The wording in force for THIS run. It is editable per run, so a
+        // report of an accept run without it cannot be read afterwards: the one
+        // thing a reader would want to know about an irreversible message is
+        // what it said. Carried only when the run would actually send.
+        ...(actions.accept ? { acceptMessage } : {}),
+        roles: requested.map((r) => ({
+          jobId: r.jobId,
+          jobTitle: null,
+          // Infinity survives neither storage nor rendering, and the operator
+          // does not read it either. Null is the unlimited case and the report
+          // says so in words.
+          limit: Number.isFinite(r.limit) ? r.limit : null,
+          forceFullWalk: Boolean(r.forceFullWalk),
+        })),
+      };
+      // The scope in the trace as well, minus the message text: the trace is
+      // public-safe by design and the wording is the operator own words. Ids
+      // and numbers only, exactly like every other entry here.
+      for (const role of config.roles) {
+        trace.record('run_scope', { jobId: role.jobId, count: role.limit });
+      }
+
       const totals = {
         downloaded: 0,
         failed: 0,
@@ -385,6 +497,10 @@ export function createController({
       try {
         const tab = await tabs.workingTab();
         jobs = await tabs.ask(tab.id, { type: CX.LIST_JOBS });
+        // The one part of the configuration that cannot be known before the page
+        // is asked. Still intent: it happens before the first role is walked,
+        // and it renames nothing - the id it belongs to was recorded already.
+        for (const role of config.roles) role.jobTitle = titleOf(role.jobId);
 
         for (const [index, request] of requested.entries()) {
           if (signal.aborted) break;
@@ -581,6 +697,7 @@ export function createController({
           type: 'done',
           ...totals,
           actions,
+          config,
           stoppedBecause,
           jobs: jobStops,
           failedNames,
@@ -594,6 +711,9 @@ export function createController({
           type: 'done',
           ...totals,
           actions,
+          // Carried on the failing path too, and that is the whole point: a run
+          // that died at role three of four must still say what it set out to do.
+          config,
           stoppedBecause: 'error',
           error: String(error.message || error),
           jobs: jobStops,

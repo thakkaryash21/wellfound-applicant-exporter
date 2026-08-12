@@ -1724,3 +1724,180 @@ describe('the accept pass', () => {
 function trace_hasAcceptStop(controller) {
   return controller.trace.entries().some((e) => e.step === 'accept_done' && e.outcome === 'unclear');
 }
+
+// 44 list fetches across 275 seconds to answer one question four times. The
+// asymmetry that decides the verdicts decides the cost too: FINDING somebody
+// proves `queued` on the spot, and only absence needs a complete walk.
+describe('what the queue check costs', () => {
+  // Sixty applicants is six pages, which is what makes the difference between
+  // stopping and walking measurable. The reviewer's order and the API's order
+  // are independent - measured on the real run, where the candidate the pass
+  // reached first sat on page eleven of the API's twelve - so the bucket is
+  // given its own order here rather than borrowing the roster's.
+  const ROSTER = Array.from({ length: 60 }, (_, i) => String(70000001 + i));
+  const PAGES = 6;
+
+  async function settleRun({ target, landed }) {
+    const page = setup({
+      people: ROSTER.map((id) => person(id)),
+      // The unconfirmed candidate is the first one the reviewer offers, so the
+      // pass reaches them immediately whatever the API's ordering says.
+      bucketByJob: { [JOB]: [target, ...ROSTER.filter((id) => id !== target)] },
+      unconfirmed: { userId: target, landed },
+      storage: {
+        [`job:${JOB}`]: { jobId: JOB, seenUserIds: [...ROSTER], totalDownloaded: ROSTER.length },
+      },
+    });
+    for (const id of ROSTER) {
+      fake.addHistory({
+        filename: `resumes/Person ${id}-${id}-${JOB}.pdf`,
+        url: `https://wellfound.com/link/${id}/tok/resume_url`,
+        state: 'complete',
+        exists: true,
+      });
+    }
+    const controller = await controllerFor();
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: Infinity }],
+      folder: 'resumes',
+      pageSize: 10,
+      actions: { download: false, accept: true },
+    });
+    return page;
+  }
+
+  // Every fetch the settle window spent, which is every fetch after the walk
+  // that pass 1 made.
+  const settleFetches = (page) => page.calls.fetches.length - PAGES;
+
+  // Finding somebody proves `queued` on the spot. A target on page one costs
+  // one fetch, not the six a complete walk would spend.
+  it('stops at the page where the target is found', async () => {
+    const page = await settleRun({ target: ROSTER[0], landed: false });
+    // Four looks, one page each: the target is on page one every time.
+    expect(settleFetches(page)).toBe(4);
+  });
+
+  // And when they are NOT on page one, the first look walks to them - but the
+  // three looks after it go straight back to the page that answered.
+  it('goes back to the page that answered rather than walking again', async () => {
+    const page = await settleRun({ target: ROSTER[ROSTER.length - 1], landed: false });
+    // 6 to find them, then 1 each for the remaining three looks. Four complete
+    // walks would be 24, which is the shape that cost 44 fetches on the real
+    // run over a longer role.
+    expect(settleFetches(page)).toBe(PAGES + 3);
+  });
+
+  // The hint is a hint and never an authority. `gone` still comes only from a
+  // complete walk whose every page came back from the review bucket, so a
+  // candidate who really has left is still found to have left.
+  it('still concludes gone from a complete walk, and books the accept', async () => {
+    const target = ROSTER[ROSTER.length - 1];
+    await settleRun({ target, landed: true });
+    const done = events.find((e) => e.type === 'done');
+    expect(done).toMatchObject({ acceptFailed: 0 });
+    expect(Object.keys(ledgerRecord().accepted ?? {})).toContain(target);
+  });
+});
+
+// "As a part of the logs, I hope you are storing the configuration and the
+// scope of the run so that in future I don't have to tell you the config I had
+// set when starting it." Every diagnosis this session began with exactly that
+// question.
+describe('what the run was asked to do', () => {
+  const ROSTER = ['70000001', '70000002'];
+  const MESSAGE = 'Hey [first_name], thanks for applying to [role_name].';
+
+  const configOf = () => events.find((e) => e.type === 'done')?.config;
+
+  it('records the roles, the mode, the limits and the message', async () => {
+    setup({ people: ROSTER.map((id) => person(id)), bucketByJob: { [JOB]: ROSTER } });
+    const controller = await controllerFor();
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: 5 }],
+      folder: 'resumes',
+      pageSize: 10,
+      actions: { download: true, accept: true },
+      acceptMessage: MESSAGE,
+    });
+
+    const config = configOf();
+    expect(config).toMatchObject({ mode: 'live+accept', pageSize: 10, folder: 'resumes' });
+    expect(config.roles).toEqual([
+      { jobId: JOB, jobTitle: 'Platform Engineer', limit: 5, forceFullWalk: false },
+    ]);
+    expect(config.acceptMessage).toBe(MESSAGE);
+
+    // And as the lines a report opens with, in the panel's own vocabulary.
+    const lines = summarize(events.find((e) => e.type === 'done'), []).configLines;
+    expect(lines[0]).toBe('What this run was asked to do');
+    expect(lines).toContain('Mode: live+accept');
+    expect(lines).toContain(`Role: Platform Engineer (${JOB}) - first 5`);
+    expect(lines).toContain(MESSAGE);
+  });
+
+  it('says unlimited in words rather than leaving a blank', async () => {
+    setup({ people: ROSTER.map((id) => person(id)), bucketByJob: { [JOB]: ROSTER } });
+    const controller = await controllerFor();
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: Infinity }],
+      folder: 'resumes',
+      pageSize: 10,
+      actions: { download: false, accept: false },
+    });
+    expect(configOf().roles[0].limit).toBe(null);
+    const lines = summarize(events.find((e) => e.type === 'done'), []).configLines;
+    expect(lines).toContain(`Role: Platform Engineer (${JOB}) - everyone new`);
+    expect(lines).toContain('Mode: preview');
+    // A run that sends nothing has no message in force, and a report that
+    // showed one would be describing a message nobody was sent.
+    expect(lines.join('\n')).not.toContain('Message sent to each');
+  });
+
+  // The point of capturing intent at the start rather than reconstructing it
+  // from results: a run that dies partway still says what it set out to do.
+  it('is recorded even when the run dies partway', async () => {
+    setup({ people: ROSTER.map((id) => person(id)), bucketByJob: { [JOB]: ROSTER } });
+    fake.chrome.tabs.query = async () => [];
+    const controller = await controllerFor();
+    await expect(
+      controller.startRun({
+        jobs: [{ jobId: JOB, limit: 3 }],
+        folder: 'resumes',
+        pageSize: 10,
+        actions: { download: true, accept: true },
+        acceptMessage: MESSAGE,
+      }),
+    ).rejects.toThrow();
+
+    const done = events.find((e) => e.type === 'done');
+    expect(done.stoppedBecause).toBe('error');
+    // The job list was never fetched, so there is no title to give - and the id
+    // and the number the operator typed are still there, which is the half that
+    // could not be reconstructed afterwards.
+    expect(done.config.roles).toEqual([
+      { jobId: JOB, jobTitle: null, limit: 3, forceFullWalk: false },
+    ]);
+    expect(done.config.acceptMessage).toBe(MESSAGE);
+    const lines = summarize(done, []).configLines;
+    expect(lines).toContain(`Role: ${JOB} (${JOB}) - first 3`);
+  });
+
+  // The trace is public-safe by design and is pasted into chat windows. The
+  // scope belongs in it; the operator's own wording does not.
+  it('puts the scope in the trace and keeps the message text out of it', async () => {
+    setup({ people: ROSTER.map((id) => person(id)), bucketByJob: { [JOB]: ROSTER } });
+    const controller = await controllerFor();
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: 5 }],
+      folder: 'resumes',
+      pageSize: 10,
+      actions: { download: true, accept: true },
+      acceptMessage: MESSAGE,
+    });
+    const text = traceText(controller.trace.entries());
+    expect(text).toContain('run_scope');
+    expect(text).toContain(JOB);
+    expect(text).not.toContain('thanks for applying');
+  });
+});

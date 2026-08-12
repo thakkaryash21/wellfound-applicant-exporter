@@ -19,6 +19,43 @@ import { PREVIEW } from '../lib/csv.js';
 // user to work out these were the same four people. One taxonomy now - the
 // running screen's - and the causes appear as a note under it, where the remedy
 // is anyway.
+// What the run was ASKED to do, as the lines a report opens with.
+//
+// The operator asked for this directly, and it had already cost them: every
+// diagnosis of a run began with them being asked which boxes they had ticked,
+// because the report opened with results and a trace records effects. This is
+// the record of intent, built from the configuration the run captured before
+// its first request rather than inferred from what came out - so a run that
+// died halfway still says what it was trying to do.
+//
+// The vocabulary is the panel's own. `mode` carries whatever runKind called the
+// run - preview, live, accept, live+accept - and is not translated into
+// report-only words here.
+export function configLines(config) {
+  if (!config) return [];
+  const lines = ['What this run was asked to do', `Mode: ${config.mode}`];
+  const roles = config.roles ?? [];
+  for (const role of roles) {
+    const name = role.jobTitle ?? role.jobId;
+    // Unlimited in words. Infinity survives neither storage nor rendering, and
+    // a blank reads as a number somebody forgot to write down.
+    const limit = role.limit == null ? 'everyone new' : `first ${role.limit}`;
+    const extra = role.forceFullWalk ? ', re-reading pages already downloaded' : '';
+    lines.push(`Role: ${name} (${role.jobId}) - ${limit}${extra}`);
+  }
+  if (roles.length === 0) lines.push('Role: none selected');
+  if (config.pageSize != null) lines.push(`Page size: ${config.pageSize}`);
+  if (config.folder) lines.push(`Folder: ${config.folder}`);
+  // Only when the run would actually send. The wording is editable per run, so
+  // an accept run reported without it cannot be interpreted afterwards - the
+  // one thing a reader wants to know about an irreversible message is what it
+  // said.
+  if (config.acceptMessage) {
+    lines.push('Message sent to each accepted applicant:', config.acceptMessage);
+  }
+  return lines;
+}
+
 export function countsFromEvent(event) {
   return {
     downloaded: event.downloaded ?? 0,
@@ -218,6 +255,11 @@ export function summarize(event, trace = []) {
 
   return {
     at: new Date().toISOString(),
+    // Before the outcome, because it is what the outcome is an outcome OF.
+    // Carried both as the lines a report prints and as the object they were
+    // built from, so a reader gets prose and a later question gets the fields.
+    config: event.config ?? null,
+    configLines: configLines(event.config),
     headline,
     // Above the headline, not among the notes: it is the one outcome that needs
     // the operator to go and check Wellfound before doing anything else.

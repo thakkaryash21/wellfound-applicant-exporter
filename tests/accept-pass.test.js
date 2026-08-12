@@ -27,6 +27,9 @@ const JOB = '9100001';
 // never observed, so this fake reproduces only the outside view.
 function fakeReviewer({
   people,
+  // Called as each send lands, so a test can advance its own clock by exactly
+  // the duration it wants that accept to have taken.
+  onSend = null,
   failAccept = null,
   landed = false,
   // Whether the driver refused BEFORE the click. That is the certain half of
@@ -74,6 +77,7 @@ function fakeReviewer({
       if (here.userId !== String(message.payload.expectedUserId)) {
         throw new Error(`The reviewer is showing ${here.userId}`);
       }
+      if (onSend) onSend();
       if (failing.has(here.userId)) {
         if (certain) throw new Error(`The reviewer is showing somebody else; ${NOTHING_SENT}`);
         if (landed) queue.splice(index - 1, 1);
@@ -110,12 +114,14 @@ function harness({
   // page that never became ready - and this is that, in the panel's words.
   reloadFails = false,
   alreadyAccepted = [],
+  now = null,
+  onSend = null,
   signal,
   template,
   rand,
   limit,
 } = {}) {
-  const reviewer = fakeReviewer({ people, failAccept, landed, certain });
+  const reviewer = fakeReviewer({ people, failAccept, landed, certain, onSend });
   const events = [];
   const ledger = [];
   const sleeps = [];
@@ -152,6 +158,7 @@ function harness({
     },
     emit: (event) => events.push(event),
     ...(rand ? { rand } : {}),
+    ...(now ? { now } : {}),
   };
   const run = () =>
     runAcceptPass(deps, {
@@ -1398,5 +1405,124 @@ describe('picking a broken pass up again', () => {
       .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
       .map((e) => String(e.expectedUserId));
     expect(sent).toEqual(nine.slice(3));
+  });
+});
+
+// The 111-applicant role. How fast the page degrades scales with how much of
+// the list it is holding, so a cadence counted in accepts cannot protect every
+// size of role: five to seven never fired once on a run that died on its
+// fourth accept. The pass already holds the one number that means the same
+// thing whatever the role's size - how long the last accept took.
+describe('a page that is slowing down', () => {
+  const ten = Array.from({ length: 10 }, (_, i) => String(70000001 + i));
+
+  // The measured shape, in the order it was measured: healthy, healthy, then
+  // the accept that took thirty-six seconds. The clock only moves when this
+  // says so, so the test is instant.
+  function slowingClock(durations) {
+    let at = 0;
+    let sends = 0;
+    return {
+      now: () => at,
+      // Called by the fake reviewer as each send lands, so the elapsed time the
+      // pass measures is exactly the duration handed in for that accept.
+      onSend: () => {
+        at += durations[Math.min(sends, durations.length - 1)] ?? 1000;
+        sends += 1;
+      },
+    };
+  }
+
+  function slowingRun(durations, { people = ten, ...extra } = {}) {
+    const clock = slowingClock(durations);
+    const h = harness({
+      people,
+      records: people.map((id) => captured(id)),
+      reloadPage: true,
+      now: clock.now,
+      onSend: clock.onSend,
+      // Well above the counted cadence, so nothing here can be the counter
+      // firing: a reload in these tests is the slowness trigger or nothing.
+      rand: () => 0.99,
+      ...extra,
+    });
+    return h;
+  }
+
+  it('reloads after one slow accept rather than waiting for the counter', async () => {
+    const h = slowingRun([8300, 7100, 35900, 6000, 6000, 6000]);
+    const result = await h.run();
+    expect(result).toMatchObject({ accepted: 10, stoppedBecause: 'finished' });
+
+    const slow = h.events.filter((e) => e.type === 'accept_slow');
+    expect(slow).toHaveLength(1);
+    expect(slow[0].ms).toBe(35900);
+    // Immediately after that accept, and before the fourth was attempted. On
+    // the real run the fourth accept is where the relay's budget expired.
+    const order = h.events
+      .filter((e) => ['accept_candidate', 'accept_reload'].includes(e.type))
+      .map((e) => e.type);
+    expect(order.slice(0, 4)).toEqual([
+      'accept_candidate',
+      'accept_candidate',
+      'accept_candidate',
+      'accept_reload',
+    ]);
+  });
+
+  // The threshold has to sit clear of both bounds it was chosen between: far
+  // enough above the healthy band not to fire on ordinary variation, and far
+  // enough below the relay's 45s budget to act a whole accept early.
+  it('ignores the healthy band, and fires well inside the relay budget', async () => {
+    // Six accepts, under a counted cadence of seven, so nothing but slowness
+    // could produce a reload here.
+    const healthy = slowingRun([9000, 9000, 9000, 9000, 9000, 9000], { people: ten.slice(0, 6) });
+    await healthy.run();
+    expect(healthy.events.filter((e) => e.type === 'accept_slow')).toHaveLength(0);
+    expect(healthy.events.filter((e) => e.type === 'accept_reload')).toHaveLength(0);
+
+    // 20s trips it; the relay gives up at 45s, so the reload happens with more
+    // than half the budget still unspent.
+    const slowing = slowingRun([9000, 20000, 6000, 6000, 6000, 6000, 6000, 6000, 6000, 6000]);
+    await slowing.run();
+    const slow = slowing.events.filter((e) => e.type === 'accept_slow');
+    expect(slow).toHaveLength(1);
+    expect(slow[0].ms).toBeLessThan(45000);
+  });
+
+  // Everything the reload already promised still holds when slowness is what
+  // asked for it.
+  it('still reloads only between candidates, with the ledger already written', async () => {
+    const h = slowingRun([8300, 7100, 35900, 6000, 6000, 6000]);
+    await h.run();
+    const types = typesOf(h.reviewer.log);
+    types.forEach((type, i) => {
+      if (type === CX.ACCEPT_CANDIDATE) expect(types[i + 1]).toBe('LEDGER');
+    });
+    const at = types.indexOf('RELOAD');
+    expect(types[at - 1]).toBe(CX_CLOSE_REVIEWER);
+    expect(types[at + 1]).toBe(CX.OPEN_REVIEWER);
+    expect(types[at + 2]).toBe(CX.READ_CANDIDATE);
+  });
+
+  it('messages everybody exactly once, and skips nobody, across a slow patch', async () => {
+    const h = slowingRun([8300, 7100, 35900, 40000, 6000, 6000]);
+    await h.run();
+    const sent = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sent).toEqual(ten);
+    expect(h.ledger.map((e) => e.userId)).toEqual(ten);
+  });
+
+  // A page can rot without getting slower, so the operator's counted cadence
+  // stays as the backstop it was.
+  it('keeps the counted cadence for a page that degrades without slowing', async () => {
+    const h = slowingRun([6000, 6000, 6000, 6000, 6000, 6000, 6000, 6000, 6000, 6000], {
+      rand: () => 0.5,
+    });
+    await h.run();
+    expect(h.events.filter((e) => e.type === 'accept_slow')).toHaveLength(0);
+    expect(h.events.filter((e) => e.type === 'accept_reload')).toHaveLength(1);
   });
 });
