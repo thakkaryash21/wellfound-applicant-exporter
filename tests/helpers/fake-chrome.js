@@ -45,7 +45,7 @@ export function createFakeChrome(options = {}) {
   const items = [];
   const onChanged = listeners();
   const onDeterminingFilename = listeners();
-  const calls = { downloads: [], updates: [], sendMessage: [] };
+  const calls = { downloads: [], updates: [], sendMessage: [], reloads: [] };
   let nextId = 1;
 
   function complete(id, { state = 'complete', error = null } = {}) {
@@ -80,10 +80,21 @@ export function createFakeChrome(options = {}) {
         if (tab) Object.assign(tab, props);
         return { ...tab };
       },
+      // Chrome's own wording for a tab with no listener, which is what the panel
+      // has to recognise. A page can be added back after a reload, which is the
+      // remedy the panel offers for exactly this.
+      async reload(tabId) {
+        calls.reloads.push(tabId);
+        const tab = tabs.find((t) => t.id === tabId);
+        if (!tab) throw new Error(`No tab with id ${tabId}`);
+      },
       async sendMessage(tabId, message) {
         calls.sendMessage.push({ tabId, message });
         const page = pages[tabId];
-        if (!page) throw new Error('Could not establish connection');
+        // Chrome's sentence in full. The half of it that names the cause is the
+        // half the panel matches on, so a shortened stand-in here would let a
+        // test pass against a string the browser never actually sends.
+        if (!page) throw new Error('Could not establish connection. Receiving end does not exist.');
         const tab = tabs.find((t) => t.id === tabId);
         return page(message, { tab: tab ? { ...tab } : null });
       },

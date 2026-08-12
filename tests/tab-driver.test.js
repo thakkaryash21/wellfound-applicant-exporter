@@ -7,6 +7,8 @@ import {
   READY_TIMEOUT_MS,
   NO_WELLFOUND_TAB,
   NOT_IN_RECRUITER_AREA,
+  PAGE_DISCONNECTED,
+  PAGE_DISCONNECTED_MESSAGE,
 } from '../src/panel/tab-driver.js';
 import { CX } from '../src/lib/messages.js';
 
@@ -80,6 +82,50 @@ describe('ask', () => {
   it('raises a plain message when the page does not answer at all', async () => {
     const { driver } = driverFor({ pages: { 7: async () => undefined } });
     await expect(driver.ask(7, {})).rejects.toThrow('No response from the page');
+  });
+
+  // The one the owner hit: reloading the extension severs the content scripts in
+  // tabs that are already open. sendMessage rejects rather than answering, so
+  // this never reached the `ok` check above and Chrome's own words went to the
+  // screen.
+  it('explains a page that is no longer listening', async () => {
+    const { driver } = driverFor({ tabs: [{ id: 7, url: RECRUIT_URL }] });
+    await expect(driver.ask(7, { type: CX.LIST_JOBS })).rejects.toThrow(PAGE_DISCONNECTED_MESSAGE);
+  });
+
+  // The panel has to offer the reload without reading the sentence it shows, and
+  // it must not have to go and find the tab again to do it.
+  it('marks that failure and names the tab it happened on', async () => {
+    const { driver } = driverFor({ tabs: [{ id: 7, url: RECRUIT_URL }] });
+    const error = await driver.ask(7, { type: CX.LIST_JOBS }).catch((e) => e);
+    expect(error.code).toBe(PAGE_DISCONNECTED);
+    expect(error.tabId).toBe(7);
+  });
+
+  // Chrome has worded this two ways across versions, and both are seen in the
+  // wild.
+  it('recognises the port-closed wording as the same failure', async () => {
+    fake = installFakeChrome({ tabs: [{ id: 7, url: RECRUIT_URL }] });
+    fake.chrome.tabs.sendMessage = async () => {
+      throw new Error('The message port closed before a response was received.');
+    };
+    const driver = createTabDriver({ ...fakeClock(), trace: recordingTrace() });
+    const error = await driver.ask(7, {}).catch((e) => e);
+    expect(error.code).toBe(PAGE_DISCONNECTED);
+  });
+
+  // Anything else is somebody else's failure. Relabelling it would send the user
+  // to reload a page that was never the problem.
+  it('passes an unrecognised rejection through unchanged', async () => {
+    fake = installFakeChrome({ tabs: [{ id: 7, url: RECRUIT_URL }] });
+    const thrown = new Error('Tabs cannot be edited right now (user may be dragging a tab)');
+    fake.chrome.tabs.sendMessage = async () => {
+      throw thrown;
+    };
+    const driver = createTabDriver({ ...fakeClock(), trace: recordingTrace() });
+    const error = await driver.ask(7, {}).catch((e) => e);
+    expect(error).toBe(thrown);
+    expect(error.code).toBeUndefined();
   });
 });
 

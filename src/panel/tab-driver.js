@@ -18,6 +18,38 @@ export const NO_WELLFOUND_TAB = 'Open Wellfound to get started';
 export const NOT_IN_RECRUITER_AREA =
   'Open your hiring pages on Wellfound (wellfound.com/recruit) to see your jobs';
 
+// Reloading the extension severs the content scripts already running in open
+// tabs, and no new ones are injected until the page navigates. The panel then
+// messages a tab where nothing is listening, and Chrome's own words for that
+// name a mechanism the user has never heard of. Translated here, where the
+// failure is understood, rather than in the panel, which only ever sees a
+// string.
+export const PAGE_DISCONNECTED = 'page-disconnected';
+export const PAGE_DISCONNECTED_MESSAGE =
+  'The Wellfound page lost its connection to the extension, which happens after ' +
+  'the extension reloads. Reload the page to connect it again.';
+
+// Chrome has worded this two ways across versions, so the recognisable part of
+// each is matched rather than the whole sentence. Anything else is somebody
+// else's failure and is left as it is: a rejection mislabelled as a lost
+// connection would send the user to reload a page that was never the problem.
+const DISCONNECTED_SIGNS = ['receiving end does not exist', 'message port closed'];
+
+function looksDisconnected(error) {
+  const text = String(error?.message ?? error ?? '').toLowerCase();
+  return DISCONNECTED_SIGNS.some((sign) => text.includes(sign));
+}
+
+// A marker as well as a sentence, so the panel can offer the remedy without
+// reading the words shown to the user. The tab is carried too: whoever offers
+// the reload should not have to go and find the tab again.
+export function pageDisconnectedError(tabId) {
+  const error = new Error(PAGE_DISCONNECTED_MESSAGE);
+  error.code = PAGE_DISCONNECTED;
+  error.tabId = tabId;
+  return error;
+}
+
 export const READY_SETTLE_MS = 1500;
 export const READY_POLL_MS = 500;
 export const READY_TIMEOUT_MS = 15000;
@@ -43,7 +75,16 @@ export function createTabDriver({ sleep = realSleep, now = () => Date.now(), tra
   }
 
   async function ask(tabId, message) {
-    const response = await chrome.tabs.sendMessage(tabId, message);
+    // sendMessage rejects when nothing is listening; it does not resolve with an
+    // `ok: false`. So the no-receiver case never reached the check below, and
+    // Chrome's raw sentence went all the way to the screen.
+    let response;
+    try {
+      response = await chrome.tabs.sendMessage(tabId, message);
+    } catch (error) {
+      if (looksDisconnected(error)) throw pageDisconnectedError(tabId);
+      throw error;
+    }
     if (!response?.ok) throw new Error(response?.error ?? 'No response from the page');
     return response.data;
   }
