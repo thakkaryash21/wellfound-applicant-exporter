@@ -1564,6 +1564,37 @@ describe('the accept pass', () => {
       expect(sentTo()).toEqual(ROSTER.slice(0, 3));
     });
 
+    // The page degrades across a long session, so the pass reloads it
+    // periodically. End to end, that has to be a real tab reload followed by
+    // the readiness probe this extension already navigates through - not a
+    // sleep, and not a second readiness mechanism.
+    describe('the periodic reload', () => {
+      it('reloads the working tab and waits for it to answer for this job again', async () => {
+        const controller = await retroactiveRun(Infinity);
+        expect(fake.calls.reloads.length).toBeGreaterThan(0);
+        expect(fake.calls.reloads.every((id) => id === TAB)).toBe(true);
+
+        const text = traceText(controller.trace.entries());
+        expect(text).toContain('accept_reload');
+        // The probe that answers WHICH job is live. A bare "are you there?" is
+        // answerable by a document on its way out.
+        const entries = controller.trace.entries().map((e) => e.step);
+        const reloaded = entries.indexOf('accept_reload_start');
+        expect(reloaded).toBeGreaterThan(-1);
+        expect(entries.slice(reloaded).includes('focus_ready')).toBe(true);
+      });
+
+      // The durable record, against the run that deliberately destroys its own
+      // page several times while making it.
+      it('messages everybody exactly once across the reloads, and records each one', async () => {
+        await retroactiveRun(Infinity);
+        expect(sentTo()).toEqual(ROSTER);
+        expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(ROSTER);
+        const csv = await objectUrls[0].text();
+        expect(csv.match(/,accepted,/g)).toHaveLength(ROSTER.length);
+      });
+    });
+
     // The premise of the two above, asserted rather than assumed: unbounded,
     // this same role messages all twelve. If it did not, a cap could look
     // effective for the wrong reason.

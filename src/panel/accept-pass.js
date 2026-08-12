@@ -73,6 +73,37 @@ export function sendOutcome(reason) {
   return String(reason).includes(NOTHING_SENT) ? 'error' : 'unclear';
 }
 
+// What the operator is told about a send the queue could not settle.
+//
+// The two outcomes are not the same and used to read the same. A queue that
+// still showed the candidate after a minute of looking is EVIDENCE, and the
+// operator can act on it; a queue that could not be read is the absence of
+// evidence and leaves them exactly where they were. Saying so is not
+// overclaiming as long as the sentence also says what is not known - which it
+// does, in the same breath, because the queue cannot prove a message was never
+// composed and sent.
+//
+// The driver's own sentence is kept in front, verbatim: it is the account of
+// what happened at the click, and this only adds what was learnt afterwards.
+// Nothing appended may ever read as the driver's certainty phrase - `unclear`
+// is decided from the ORIGINAL reason, and a test asserts these sentences do
+// not disturb that.
+export function unresolvedReason(reason, { verdict, looks = 0, waitedMs = 0 } = {}) {
+  if (verdict === 'queued') {
+    const seconds = Math.round(waitedMs / 1000);
+    return (
+      `${reason} Checked the review queue ${looks} times over the following ` +
+      `${seconds}s and they were still in it every time, which leans towards the message ` +
+      'never leaving - but a queue cannot prove that, so they are recorded as neither ' +
+      'accepted nor safe to try again.'
+    );
+  }
+  if (verdict === 'unknown') {
+    return `${reason} The review queue could not be read afterwards, so nothing was learnt.`;
+  }
+  return reason;
+}
+
 // `[first_name]` is a greeting, not an identity: splitting `name` on
 // whitespace is a guess, wrong for a title, a mononym, or family-name-first
 // order. It exists only as a fallback for the rare record where Wellfound's
@@ -187,25 +218,6 @@ export function planAccepts({ records = [], alreadyAccepted = [], limit = Infini
   return { targets: capped, rowsById, refusedNoResume, alreadyAccepted: alreadyCount };
 }
 
-// How many accepts this pass will make before it closes the reviewer and opens
-// it again.
-//
-// Measured, once, on a real run: the first two accepts confirmed and the third
-// did not. An accepted candidate is not removed from the applicant list right
-// away - their card is replaced in place by a row reading "<Name>'s application
-// was accepted", and the operator confirmed a reload clears those rows. So they
-// are transient page state that accumulates one per accept within a session,
-// and the completion signal (the shown id changes AND the total decrements)
-// reads a structure that is drifting underneath it.
-//
-// That is a hypothesis, not a fact: producing the post-accept reviewer DOM to
-// look at costs a real, irreversible message to a real person, so nobody has
-// seen it. The number below is therefore set from the only evidence there is -
-// two accepts worked, the third did not - rather than from a model of why. Two
-// is deliberately pessimistic. Reopening costs a close, a pause and a click; a
-// false negative costs the run.
-const REOPEN_EVERY = 2;
-
 // How many times one pass will fall back to the API to settle an unconfirmed
 // send. The check pages the whole NEEDS_REVIEW collection for the job, so it is
 // far and away the most expensive thing this pass can do, and it must never
@@ -215,6 +227,36 @@ const REOPEN_EVERY = 2;
 // beyond what this module can reason about, which is exactly what `unclear` is
 // for.
 const QUEUE_CHECKS_PER_PASS = 1;
+
+// How long the queue is given to settle before "still there" is believed, as
+// the waits BETWEEN successive looks. The first look happens immediately.
+//
+// Measured, on a real run: a send whose confirmation never arrived was checked
+// once, found the candidate still queued, and stopped - and the message had in
+// fact gone out. The check began 2.4 s after the failure and finished 11.7 s
+// after it, and the send still had not landed by then.
+//
+// So the polarity of the evidence is not symmetric, and that is the whole
+// lesson. ABSENT means it landed; there is nothing else that removes somebody
+// from this collection in the seconds concerned. PRESENT means it has not
+// landed YET, which is a statement about the moment of the look and not about
+// the send. Only presence held across a settled interval is evidence about the
+// send itself.
+//
+// 5 s, then 15 s, then 30 s: four looks in all, the last beginning at least
+// 50 s of deliberate waiting after the failure, plus the walks themselves.
+// Chosen against the one hard bound available rather than against a feeling:
+// the failure being settled is the relay giving up at 45 s, so by the time it
+// is raised nothing further can be in flight from this extension's side, and
+// what remains is Wellfound finishing a request it already has. 50 s past that
+// is more than four times the 11.7 s that concluded too early. The growth is
+// geometric so that the common case - it landed a moment later - costs the
+// operator five seconds, and only the genuinely stuck case spends the minute.
+//
+// The alternative to waiting is not "the operator gets on with their day": it
+// is a halted run and a trip to Wellfound to check a stranger's inbox by hand.
+// A minute is cheap against that, and it is spent at most once in a pass.
+const QUEUE_SETTLE_WAITS_MS = [5000, 15000, 30000];
 
 // `review` is one call into the reviewer driver, `recordAccepted` is the
 // ledger write, and both are injected for the same reason the download walk
@@ -226,8 +268,13 @@ const QUEUE_CHECKS_PER_PASS = 1;
 // existed. It answers 'gone', 'queued' or 'unknown' for one userId, and it is
 // never given the chance to answer anything about a send that was refused
 // before the click.
+//
+// `reloadPage` is the fourth and is optional for the same reason: it reloads
+// the working tab and does not return until the page can answer for this job
+// again. The pass owns WHEN a reload happens; it owns nothing about how, which
+// is the run controller's business because the tab is.
 export async function runAcceptPass(deps, options) {
-  const { review, recordAccepted, sleep, emit, checkQueue } = deps;
+  const { review, recordAccepted, sleep, emit, checkQueue, reloadPage } = deps;
   const rand = deps.rand ?? Math.random;
   const {
     jobId,
@@ -357,50 +404,104 @@ export async function runAcceptPass(deps, options) {
     return finish();
   }
 
-  // The two counters the reopen runs on. `acceptsSinceOpen` is the ordinary
-  // rhythm; `reopenPending` is the recovery, set when a send had to be settled
-  // by the API - at that point the page has DEMONSTRATED that its confirmation
-  // signal no longer reads, and carrying on against it would be trusting a
-  // structure that has already been wrong once.
-  let acceptsSinceOpen = 0;
-  let reopenPending = false;
+  // The refresh cycle. One mechanism, one counter, one call site.
+  //
+  // There were briefly two - a cheap reopen of the modal every couple of
+  // accepts, and a reload of the page underneath it less often. The reload does
+  // everything the reopen did and more: it discards the modal as a side effect
+  // of discarding the document, and the pass reopens and re-reads position
+  // afterwards either way. Two cycles at different scales, both claiming to be
+  // why the page is fresh, is a thing no reader could reason about later - so
+  // the cheap one is gone rather than nested underneath.
+  //
+  // `refreshAt` is redrawn every cycle from PACING.reloadEvery, exactly as the
+  // reading break redraws `breakEvery`: a refresh that arrived on every sixth
+  // accept without fail would be a rhythm nothing human produces, and the
+  // bounds live in PACING with the rest of the timing rather than here.
+  let acceptsSinceRefresh = 0;
+  let refreshAt = sampleInt(PACING.reloadEvery, rand);
+  let refreshPending = false;
   let queueChecksLeft = QUEUE_CHECKS_PER_PASS;
 
-  // A reopen lands the reviewer back at position 1 and undoes every skip this
+  // THE INTERLOCK. Holds a userId from the moment before the send is clicked
+  // until the moment after that accept has been written to the ledger - the
+  // whole of the window in which this pass does not yet durably know what
+  // happened to a real person.
+  //
+  // A reload is a deliberate destruction of the page context. Landing one
+  // inside this window destroys the only thing that could say whether the
+  // message went out, and the queue cannot recover it: a send can land after we
+  // stop looking, which this project has now measured rather than supposed.
+  // Landing one between a confirmed accept and its ledger write leaves somebody
+  // messaged and unrecorded, which is the gap the operator has already had to
+  // close by hand.
+  //
+  // So it is an invariant with a throw behind it, not a comment and not a
+  // convention about where the call site sits. If a future edit moves the
+  // refresh, the pass stops rather than reloading over an unresolved send.
+  let unresolvedSend = null;
+
+  // A refresh lands the reviewer back at position 1 and undoes every skip this
   // pass has made, so a pass that has skipped anybody would walk those people
   // again - re-reading them, re-skipping them, and counting the skips twice.
-  // The everyone case, which is the case the drift was observed in and the case
-  // an accept-only run over a whole role always is, skips nobody and reopening
-  // there costs nothing but the pause. A subset run keeps the behaviour it had.
-  const mayReopen = () => totals.skipped === 0;
+  // The everyone case, which is the case the degradation was observed in and
+  // the case an accept-only run over a whole role always is, skips nobody.
+  const mayRefresh = () => totals.skipped === 0;
 
-  // Close and open again, which is the state the confirmation signal was
-  // measured working in: a fresh reviewer over a freshly rendered list. It is
-  // paced like everything else - a close, a pause of the same length the pass
-  // takes between candidates, then the click - because a person navigating away
-  // and back does not do it instantly, and the pass must not read differently
-  // from one.
+  // Let go of the page and take hold of it again.
   //
-  // It reads nothing back and assumes nothing about who is there. The loop's
-  // next act is READ_CANDIDATE, which is the only thing that decides who is on
-  // screen, so a reopen cannot step over anybody.
+  // The composer is closed first even though the load discards it anyway: the
+  // promise that this pass never leaves the operator's message sitting in a box
+  // holds at every instant, not only at the convenient ones.
   //
-  // The pessimistic guess, stated because it is a guess: nobody has seen what
-  // the applicant list looks like once it carries confirmation rows, so whether
-  // the first `View application` on it still opens the reviewer at position 1
-  // is unknown. If it does not, openReviewer refuses - it asserts the position
-  // it landed at and throws otherwise - and the pass stops with nothing sent,
-  // which is the failure to have. A reopen can cost this pass a run; it cannot
-  // cost anybody a message.
-  const reopen = async () => {
-    emit({ type: 'accept_reopen', jobId, accepted: totals.accepted, intended });
+  // `reloadPage` does not return until the page can answer for THIS job again.
+  // That is the run controller's business and it reuses the readiness probe
+  // every navigation in this extension already goes through - the one that
+  // answers which jobId is live, because a stale document mid-navigation
+  // answers a bare "are you there?" perfectly well and takes the run down with
+  // it. A caller that cannot reload still gets the close and the open, which is
+  // strictly less but costs nothing and keeps the cadence honest.
+  //
+  // A reload that does not come back throws, and the throw leaves this loop
+  // through the same handler a failed open or a failed read does: the pass
+  // stops, says so in the panel's own words, and the ledger is already correct
+  // because nothing gets here with an accept outstanding.
+  //
+  // It reads nothing back and assumes nothing about who is on screen. The
+  // loop's next act is READ_CANDIDATE, which is the only thing that decides
+  // that, so a refresh cannot step over anybody.
+  const refresh = async () => {
+    if (unresolvedSend !== null) {
+      throw new Error(
+        `Refusing to reload the page with the accept for ${unresolvedSend} still unresolved`,
+      );
+    }
+    emit({
+      type: reloadPage ? 'accept_reload' : 'accept_reopen',
+      jobId,
+      accepted: totals.accepted,
+      intended,
+    });
     await review({ type: CX_CLOSE_REVIEWER });
+    if (reloadPage) await reloadPage();
+    // A beat before the click, because a person who reloads a slow page looks
+    // at it before doing anything else.
     await pace();
     await review({ type: CX.OPEN_REVIEWER });
-    acceptsSinceOpen = 0;
-    reopenPending = false;
+    acceptsSinceRefresh = 0;
+    refreshAt = sampleInt(PACING.reloadEvery, rand);
+    refreshPending = false;
   };
 
+  // Called from exactly one place: the top of the loop, before READ_CANDIDATE
+  // has even chosen who the next candidate is. That is what makes a refresh
+  // mid-accept unrepresentable rather than merely avoided - and the interlock
+  // above is what keeps it unrepresentable after somebody edits this file.
+  const refreshIfDue = async () => {
+    if (!mayRefresh()) return;
+    if (!refreshPending && acceptsSinceRefresh < refreshAt) return;
+    await refresh();
+  };
   try {
     touchedReviewer = true;
     await review({ type: CX.OPEN_REVIEWER });
@@ -411,9 +512,7 @@ export async function runAcceptPass(deps, options) {
         break;
       }
 
-      if (mayReopen() && (reopenPending || acceptsSinceOpen >= REOPEN_EVERY)) {
-        await reopen();
-      }
+      await refreshIfDue();
 
       const at = await review({ type: CX.READ_CANDIDATE });
       const userId = at?.userId == null ? '' : String(at.userId);
@@ -460,6 +559,11 @@ export async function runAcceptPass(deps, options) {
         continue;
       }
 
+      // The interlock closes HERE, before the click, and opens again only once
+      // this person is in the ledger. Everything in between is the window where
+      // a real message may exist that nothing durable knows about, and no
+      // reload may happen inside it.
+      unresolvedSend = userId;
       try {
         await review({
           type: CX.ACCEPT_CANDIDATE,
@@ -492,60 +596,95 @@ export async function runAcceptPass(deps, options) {
         // about it could only produce a wrong answer. `unclear` means the click
         // happened and the DOM never confirmed it, which is the case the API
         // can settle.
+        let verdict = null;
+        let looks = 0;
+        let waitedMs = 0;
         if (sendOutcome(reason) === 'unclear' && checkQueue && queueChecksLeft > 0) {
           queueChecksLeft -= 1;
           emit({ type: 'accept_unconfirmed', jobId, userId, error: reason });
+          // Looked at more than once, with the waits growing between looks.
+          // One look establishes only where the candidate was at that instant,
+          // and a send still in flight puts them in the queue exactly as a send
+          // that never happened does. `gone` is the only answer that settles
+          // anything, so it is the only one that ends the loop early; both of
+          // the others are worth asking again after a wait.
+          //
           // Its failure is an answer, not an exception: a check that cannot
           // reach the API has learnt nothing, which is the same position the
           // pass was in before it asked.
-          let verdict = 'unknown';
-          try {
-            verdict = String((await checkQueue(userId)) ?? 'unknown');
-          } catch {
-            verdict = 'unknown';
+          const look = async () => {
+            looks += 1;
+            let seen = 'unknown';
+            try {
+              seen = String((await checkQueue(userId)) ?? 'unknown');
+            } catch {
+              seen = 'unknown';
+            }
+            emit({ type: 'accept_checked', jobId, userId, verdict: seen, look: looks });
+            return seen;
+          };
+          verdict = await look();
+          for (const waitMs of QUEUE_SETTLE_WAITS_MS) {
+            if (verdict === 'gone') break;
+            // A stop ends the settling where it stands. Nothing is sent either
+            // way, and an operator who has pressed Stop is not waiting another
+            // minute to be told something the run will report as unclear.
+            if (signal?.aborted) break;
+            emit({ type: 'resting', jobId, ms: waitMs });
+            await sleep(waitMs, signal);
+            waitedMs += waitMs;
+            verdict = await look();
           }
-          emit({ type: 'accept_checked', jobId, userId, verdict });
           if (verdict === 'gone') {
             // They are not in NEEDS_REVIEW any more, and the click that would
             // remove them from it is the one this pass just made. The send
             // landed. Booked exactly as a confirmed one - ledger first, so a
             // later run cannot message them again - and the pass carries on.
             //
-            // The page's confirmation signal has just been wrong, so the
-            // reviewer is reopened before the next candidate rather than
-            // trusted for a second one.
+            // The page could not vouch for this send, so the page is not
+            // trusted for another one: the refresh below is asked for now
+            // rather than at the next multiple of the cadence.
             await recordAccepted(jobId, userId);
+            unresolvedSend = null;
             remaining.delete(userId);
             mark(userId, ACCEPT_STATUS.ACCEPTED, localDateTimeText());
             totals.accepted += 1;
-            emitCandidate(userId, 'accepted', { confirmedBy: 'queue' });
-            reopenPending = true;
+            emitCandidate(userId, 'accepted', { confirmedBy: 'queue', looks });
+            refreshPending = true;
             await pace();
             continue;
           }
         }
 
-        // Still queued, never asked, or asked and unanswerable. The pass stops
-        // here and is never followed by a skip either: if the message may have
-        // gone out, advancing past them loses the fact; and if the driver
-        // refused before clicking, whatever made it refuse is likely to refuse
-        // for the next person too.
-        mark(userId, acceptFailure(reason));
+        // Still queued after settling, never asked, or asked and unanswerable.
+        // The pass stops here and is never followed by a skip either: if the
+        // message may have gone out, advancing past them loses the fact; and if
+        // the driver refused before clicking, whatever made it refuse is likely
+        // to refuse for the next person too.
+        //
+        // `stoppedBecause` is decided from the driver's ORIGINAL sentence and
+        // not from the enriched one below. What was learnt afterwards changes
+        // what the operator reads; it does not change which of the two things
+        // the driver said happened at the click.
+        const told = unresolvedReason(reason, { verdict, looks, waitedMs });
+        mark(userId, acceptFailure(told));
         totals.failed += 1;
-        emitCandidate(userId, 'failed', { error: reason });
+        emitCandidate(userId, 'failed', { error: told });
         stoppedBecause = sendOutcome(reason);
-        error = reason;
+        error = told;
         break;
       }
 
       // Recorded before anything else can interrupt, exactly as a download is:
       // an accept the ledger does not know about gets sent a second time.
       await recordAccepted(jobId, userId);
+      // The interlock opens only here, on the far side of the ledger write.
+      unresolvedSend = null;
       const acceptedAt = localDateTimeText();
       remaining.delete(userId);
       mark(userId, ACCEPT_STATUS.ACCEPTED, acceptedAt);
       totals.accepted += 1;
-      acceptsSinceOpen += 1;
+      acceptsSinceRefresh += 1;
       emitCandidate(userId, 'accepted');
 
       // No skip here, ever. A confirmed accept has already auto-advanced -

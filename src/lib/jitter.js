@@ -3,6 +3,13 @@ export const PACING = {
   downloadMs: [1500, 4000],
   breakMs: [15000, 40000],
   breakEvery: [8, 12],
+  // How many accepts the accept pass makes before it reloads the page and
+  // starts the reviewer again. Drawn per cycle with `sampleInt`, exactly as
+  // `breakEvery` is: a refresh that arrived on every sixth accept without fail
+  // would be a rhythm nothing human produces, and the bounds live here with the
+  // rest of the pacing rather than in the pass, so there is one place to read
+  // what this extension's timing looks like.
+  reloadEvery: [5, 7],
   // The two pauses either side of putting the message into the composer. Not a
   // typing simulation: nobody types the same 400 characters six hundred times,
   // so streaming it a character at a time would be a different tell rather than

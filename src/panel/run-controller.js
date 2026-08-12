@@ -125,6 +125,12 @@ export function createController({
       trace.record('accept_checked', { jobId, userId: event.userId, outcome: event.verdict });
     else if (event.type === 'accept_reopen')
       trace.record('accept_reopen', { jobId, count: event.accepted });
+    // The coarser cycle, recorded separately from the reopen it replaces on
+    // that turn. Which of the two ran is the thing a later timing question
+    // would be asked of, and a trace that called them both 'refresh' could not
+    // answer it.
+    else if (event.type === 'accept_reload')
+      trace.record('accept_reload', { jobId, count: event.accepted });
     else if (event.type === 'accept_done')
       trace.record('accept_done', {
         jobId,
@@ -493,6 +499,20 @@ export function createController({
                 // the same query pass 1 walked - there is no second Apollo
                 // caller - and the pass calls it only on the ambiguous path.
                 checkQueue: (userId) => queueCheck(tab.id, jobId, userId),
+                // The coarse refresh. The accept pass decides WHEN; this is
+                // the whole of HOW, and it is deliberately two lines of
+                // existing machinery rather than a mechanism of its own.
+                // `chrome.tabs.reload` needs no permission this extension does
+                // not already hold, and focusJob is the readiness poll every
+                // navigation in this extension goes through - after a reload
+                // the URL has not changed, so it skips the navigation and does
+                // exactly the part that matters: wait until the page can
+                // answer for this job again.
+                reloadPage: async () => {
+                  trace.record('accept_reload_start', { jobId });
+                  await chrome.tabs.reload(tab.id);
+                  await tabs.focusJob(tab.id, jobId);
+                },
                 sleep,
                 emit,
               },

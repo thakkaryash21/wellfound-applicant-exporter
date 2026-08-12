@@ -6,6 +6,7 @@ import {
   firstNameOf,
   resolveFirstName,
   sendOutcome,
+  unresolvedReason,
   NOTHING_SENT,
   CX_CLOSE_REVIEWER,
 } from '../src/panel/accept-pass.js';
@@ -101,6 +102,14 @@ function harness({
   landed = false,
   certain = false,
   checkQueue = null,
+  // Absent means a caller that cannot reload, which is a supported shape: the
+  // pass falls back to closing and opening the reviewer.
+  reloadPage = false,
+  // A reload that never comes back. The run controller's own reload does not
+  // return until the page can answer for this job again, so its failure is a
+  // page that never became ready - and this is that, in the panel's words.
+  reloadFails = false,
+  alreadyAccepted = [],
   signal,
   template,
   rand,
@@ -117,6 +126,17 @@ function harness({
           checkQueue: async (userId) => {
             asked.push(userId);
             return checkQueue(userId);
+          },
+        }
+      : {}),
+    ...(reloadPage
+      ? {
+          // Logged beside the reviewer's own messages, because WHERE a reload
+          // falls among them is the whole of what these tests assert: never
+          // between a send and its outcome, always before a fresh read.
+          reloadPage: async () => {
+            reviewer.log.push({ type: 'RELOAD' });
+            if (reloadFails) throw new Error('The Wellfound applicant list did not finish loading');
           },
         }
       : {}),
@@ -138,7 +158,7 @@ function harness({
       jobId: JOB,
       jobTitle: 'Platform Engineer',
       records,
-      alreadyAccepted: [],
+      alreadyAccepted,
       template,
       signal,
       ...(limit === undefined ? {} : { limit }),
@@ -891,7 +911,7 @@ describe('an unconfirmed send', () => {
 
   // The page's confirmation signal has just been demonstrably wrong. Carrying
   // on against it would be trusting a structure that has already failed once.
-  it('reopens the reviewer before it reads the next candidate', async () => {
+  it('refreshes the page before it reads the next candidate', async () => {
     const h = harness({
       people: three,
       records: rowsFor(three),
@@ -970,47 +990,413 @@ describe('an unconfirmed send', () => {
   });
 });
 
-// The other half of the fix. If transient confirmation rows are what breaks the
-// signal, a pass that accepts many people in one sitting walks into it
-// repeatedly; a reviewer closed and opened again is the state the signal was
-// measured working in.
-describe('the periodic reopen', () => {
-  const four = ['1', '2', '3', '4'];
 
-  it('closes and opens the reviewer as the pass goes, and still accepts everybody', async () => {
-    const h = harness({ people: four, records: four.map((id) => captured(id)) });
-    const result = await h.run();
-    expect(result).toMatchObject({ accepted: 4, skipped: 0, stoppedBecause: 'finished' });
-    const types = typesOf(h.reviewer.log);
-    // More than the one open every pass begins with.
-    expect(types.filter((t) => t === CX.OPEN_REVIEWER).length).toBeGreaterThan(1);
-    // Nobody was stepped over: a reopen lands at position 1 and the loop reads
-    // who is actually there.
-    expect(h.ledger.map((e) => e.userId)).toEqual(four);
-    expect(types).not.toContain(CX.SKIP_CANDIDATE);
-  });
+// The second real run. The queue check refused to claim the send had landed,
+// which was the right answer to the question it asked - and the wrong answer
+// about the send, because the message went out while the check was still
+// walking. One look establishes only where somebody was at that instant, and a
+// send in flight puts them in the queue exactly as a send that never happened
+// does.
+describe('settling an unconfirmed send', () => {
+  const three = ['1', '2', '3'];
+  const rowsFor = (ids) => ids.map((id) => captured(id));
 
-  // It is paced like everything else. A close, a click and no pause between
-  // them is not how a person navigates away and back.
-  it('pauses between closing and opening', async () => {
-    const h = harness({ people: four, records: four.map((id) => captured(id)) });
-    await h.run();
-    const rests = h.events.filter((e) => e.type === 'resting' || e.type === 'break');
-    expect(rests.length).toBeGreaterThan(4);
-  });
+  // Answers in order, then the last one forever.
+  const answers = (...seq) => {
+    let i = 0;
+    return () => seq[Math.min(i++, seq.length - 1)];
+  };
 
-  // A reopen undoes every skip the pass has made, so a subset run would walk
-  // the same people again and count them twice. It keeps the behaviour it had.
-  it('leaves a pass that has skipped somebody alone', async () => {
-    const people = ['1', '99', '2', '3'];
+  it('books the accept when a later look shows them gone', async () => {
     const h = harness({
-      people,
-      records: ['1', '2', '3'].map((id) => captured(id)),
+      people: three,
+      records: rowsFor(three),
+      failAccept: '1',
+      landed: true,
+      checkQueue: answers('queued', 'queued', 'gone'),
     });
     const result = await h.run();
-    expect(result).toMatchObject({ accepted: 3, skipped: 1 });
+
+    expect(h.asked).toEqual(['1', '1', '1']);
+    expect(result).toMatchObject({ accepted: 3, failed: 0, stoppedBecause: 'finished' });
+    expect(h.ledger.map((e) => e.userId)).toEqual(three);
+    // The rule nothing may ever break, across three looks and a minute of
+    // waiting: one click each.
+    const sends = h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE);
+    expect(sends.map((e) => e.expectedUserId)).toEqual(three);
+  });
+
+  it('writes accepted in the cell for a send the queue settled late', async () => {
+    const records = rowsFor(three);
+    await harness({
+      people: three,
+      records,
+      failAccept: '1',
+      landed: true,
+      checkQueue: answers('queued', 'gone'),
+    }).run();
+    expect(records.map((r) => r.acceptStatus)).toEqual(new Array(3).fill(ACCEPT_STATUS.ACCEPTED));
+  });
+
+  // Geometric, so the common case - it landed a moment later - costs the
+  // operator five seconds, and only the genuinely stuck case spends the minute.
+  it('waits longer before each look than before the last', async () => {
+    const h = harness({
+      people: three,
+      records: rowsFor(three),
+      failAccept: '1',
+      checkQueue: () => 'queued',
+    });
+    await h.run();
+    expect(h.sleeps.filter((ms) => ms >= 5000)).toEqual([5000, 15000, 30000]);
+  });
+
+  it('gives up only after the whole settle window, and stays unclear', async () => {
+    const h = harness({
+      people: three,
+      records: rowsFor(three),
+      failAccept: '1',
+      checkQueue: () => 'queued',
+    });
+    const result = await h.run();
+    expect(h.asked).toHaveLength(4);
+    expect(result).toMatchObject({ accepted: 0, failed: 1, stoppedBecause: 'unclear' });
+    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
+  });
+
+  // An operator who has pressed Stop is not waiting another minute to be told
+  // something the run will report as unclear either way.
+  it('stops looking when the operator presses stop', async () => {
+    const controller = new AbortController();
+    const h = harness({
+      people: three,
+      records: rowsFor(three),
+      failAccept: '1',
+      signal: controller.signal,
+      checkQueue: () => {
+        controller.abort();
+        return 'queued';
+      },
+    });
+    const result = await h.run();
+    expect(h.asked).toHaveLength(1);
+    expect(result.stoppedBecause).toBe('unclear');
+  });
+
+  // The wording. "Still queued after settling" is evidence and the operator can
+  // act on it; "could not be read" is the absence of evidence and leaves them
+  // where they were. The two used to read the same.
+  describe('what the operator is told', () => {
+    const original = 'Could not confirm the accept for 70000001.';
+
+    it('says what the queue showed, and what it cannot prove', () => {
+      const told = unresolvedReason(original, { verdict: 'queued', looks: 4, waitedMs: 50000 });
+      expect(told).toContain(original);
+      expect(told).toContain('4 times over the following 50s');
+      expect(told).toContain('leans towards');
+      expect(told).toContain('cannot prove');
+    });
+
+    it('says plainly when nothing was learnt at all', () => {
+      const told = unresolvedReason(original, { verdict: 'unknown', looks: 4 });
+      expect(told).toContain('nothing was learnt');
+      expect(told).not.toContain('leans towards');
+    });
+
+    // The one word that sends the operator to Wellfound is decided from the
+    // driver's own sentence. Nothing added afterwards may disturb it - an
+    // appended phrase that happened to read as the driver's certainty mark
+    // would turn an alarm into a shrug.
+    it('never changes which of the two the driver said happened', () => {
+      for (const verdict of ['queued', 'unknown', null]) {
+        expect(sendOutcome(unresolvedReason(original, { verdict, looks: 4 }))).toBe('unclear');
+      }
+    });
+
+    it('reaches the CSV cell and the run report', async () => {
+      const records = rowsFor(three);
+      const result = await harness({
+        people: three,
+        records,
+        failAccept: '1',
+        checkQueue: () => 'queued',
+      }).run();
+      expect(records[0].acceptStatus).toContain('leans towards');
+      expect(result.error).toContain('leans towards');
+    });
+  });
+});
+
+// The page degrades underneath the modal across a long session, so the pass
+// reloads it periodically. That is a deliberate destruction of the page context
+// several times per pass, in the middle of an operation whose failure mode is
+// messaging a real person twice or losing the record that they were messaged
+// once - so it is treated as a fault to survive by construction.
+describe('the periodic reload', () => {
+  const nine = Array.from({ length: 9 }, (_, i) => String(70000001 + i));
+  const rows = () => nine.map((id) => captured(id));
+  // A fixed source, so the jittered cadence is a known number in a test rather
+  // than a range. 0.5 draws the middle of every PACING band, which for
+  // reloadEvery is six.
+  const MIDDLE = () => 0.5;
+
+  const reloadRun = (extra = {}) =>
+    harness({ people: nine, records: rows(), reloadPage: true, rand: MIDDLE, ...extra });
+
+  it('reloads the page on the cadence PACING draws, and only then', async () => {
+    const h = reloadRun();
+    const result = await h.run();
+    expect(result).toMatchObject({ accepted: 9, stoppedBecause: 'finished' });
+    const reloads = h.events.filter((e) => e.type === 'accept_reload');
+    expect(reloads.map((e) => e.accepted)).toEqual([6]);
+  });
+
+  // Not a fixed number. The bounds live in PACING beside every other pace this
+  // extension keeps, and the draw is redrawn each cycle through the same helper
+  // the reading break uses.
+  it('draws the cadence from PACING, within its stated bounds', async () => {
+    const [min, max] = PACING.reloadEvery;
+    expect(min).toBeLessThan(max);
+    for (const rand of [() => 0.01, () => 0.99]) {
+      const h = harness({ people: nine, records: rows(), reloadPage: true, rand });
+      await h.run();
+      const first = h.events.find((e) => e.type === 'accept_reload');
+      expect(first.accepted).toBeGreaterThanOrEqual(min);
+      expect(first.accepted).toBeLessThanOrEqual(max);
+    }
+  });
+
+  // A reload throws the reviewer away, so nothing afterwards may assume
+  // anything about who is on screen.
+  it('closes, reloads, opens again and re-reads the position', async () => {
+    const h = reloadRun();
+    await h.run();
     const types = typesOf(h.reviewer.log);
-    expect(types.filter((t) => t === CX.OPEN_REVIEWER)).toHaveLength(1);
-    expect(types.filter((t) => t === CX_CLOSE_REVIEWER)).toHaveLength(1);
+    const at = types.indexOf('RELOAD');
+    expect(types[at - 1]).toBe(CX_CLOSE_REVIEWER);
+    expect(types[at + 1]).toBe(CX.OPEN_REVIEWER);
+    expect(types[at + 2]).toBe(CX.READ_CANDIDATE);
+  });
+
+  it('is paced, not snapped', async () => {
+    const h = reloadRun();
+    await h.run();
+    // The pause between letting go of the page and taking hold of it again is
+    // drawn from the same PACING as the rest of the run.
+    expect(h.events.filter((e) => e.type === 'resting' || e.type === 'break').length).toBeGreaterThan(
+      9,
+    );
+  });
+
+  // The reviewer is positional and a reload returns it to the front, so a pass
+  // that has skipped anybody would walk those people again - re-reading them,
+  // re-skipping them, and counting the skips twice.
+  it('leaves a pass that has skipped somebody alone', async () => {
+    const people = [nine[0], '99', ...nine.slice(1)];
+    const h = harness({ people, records: rows(), reloadPage: true, rand: MIDDLE });
+    const result = await h.run();
+    expect(result).toMatchObject({ accepted: 9, skipped: 1 });
+    expect(typesOf(h.reviewer.log)).not.toContain('RELOAD');
+  });
+
+  it('falls back to closing and opening when the caller cannot reload', async () => {
+    const h = harness({ people: nine, records: rows(), rand: MIDDLE });
+    const result = await h.run();
+    expect(result).toMatchObject({ accepted: 9, stoppedBecause: 'finished' });
+    expect(typesOf(h.reviewer.log)).not.toContain('RELOAD');
+    expect(h.events.filter((e) => e.type === 'accept_reopen')).toHaveLength(1);
+  });
+
+  // The page could not vouch for that send, so the page is not trusted for
+  // another one: the refresh is asked for now rather than at the next multiple
+  // of the cadence.
+  it('refreshes immediately after a send the queue had to settle', async () => {
+    const h = harness({
+      people: nine,
+      records: rows(),
+      reloadPage: true,
+      rand: MIDDLE,
+      failAccept: nine[0],
+      landed: true,
+      checkQueue: () => 'gone',
+    });
+    await h.run();
+    expect(h.events.find((e) => e.type === 'accept_reload')).toMatchObject({ accepted: 1 });
+  });
+});
+
+// The two rules whose failure costs a real person a duplicate message or an
+// unrecorded one. Both are structural: an interlock that throws, not a
+// convention about where a call site sits.
+describe('a reload can never land inside an accept', () => {
+  const nine = Array.from({ length: 9 }, (_, i) => String(70000001 + i));
+  const rows = () => nine.map((id) => captured(id));
+  const MIDDLE = () => 0.5;
+
+  // Rule 1 and rule 2 in one assertion, because they are one window: from the
+  // click to the ledger write there must be nothing else at all. A reload in
+  // there destroys the only context that could say whether the message went
+  // out, or leaves somebody messaged and unrecorded.
+  it('nothing at all comes between a send and its ledger write', async () => {
+    const h = harness({ people: nine, records: rows(), reloadPage: true, rand: MIDDLE });
+    await h.run();
+    const types = typesOf(h.reviewer.log);
+    expect(types).toContain('RELOAD');
+    types.forEach((type, i) => {
+      if (type === CX.ACCEPT_CANDIDATE) expect(types[i + 1]).toBe('LEDGER');
+    });
+  });
+
+  it('and the same holds for a send the queue settled afterwards', async () => {
+    const h = harness({
+      people: nine,
+      records: rows(),
+      reloadPage: true,
+      rand: MIDDLE,
+      failAccept: nine[0],
+      landed: true,
+      checkQueue: () => 'gone',
+    });
+    await h.run();
+    const types = typesOf(h.reviewer.log);
+    const send = types.indexOf(CX.ACCEPT_CANDIDATE);
+    // The settling happens off this log - it is API traffic, not the page - so
+    // the next thing the PAGE sees after the click is the ledger write, and the
+    // reload only after that.
+    expect(types[send + 1]).toBe('LEDGER');
+    expect(types.indexOf('RELOAD')).toBeGreaterThan(send + 1);
+  });
+
+  it('every accepted person is in the ledger exactly once', async () => {
+    const h = harness({ people: nine, records: rows(), reloadPage: true, rand: MIDDLE });
+    const result = await h.run();
+    expect(h.ledger.map((e) => e.userId)).toEqual(nine);
+    expect(new Set(h.ledger.map((e) => e.userId)).size).toBe(result.accepted);
+  });
+
+  // Nobody is stepped over by a reload landing them back at position 1: the
+  // loop re-reads who is actually there, so the walk is driven by the page
+  // rather than by an index the pass remembers.
+  it('messages everybody exactly once across a reload, and skips nobody', async () => {
+    const h = harness({ people: nine, records: rows(), reloadPage: true, rand: MIDDLE });
+    await h.run();
+    const sent = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sent).toEqual(nine);
+    expect(h.reviewer.queue).toEqual([]);
+  });
+});
+
+// A reload that does not come back. The run controller's reload does not
+// return until the page can answer for this job again, so this is a page that
+// never became ready.
+describe('a reload that never comes back', () => {
+  const nine = Array.from({ length: 9 }, (_, i) => String(70000001 + i));
+  const rows = () => nine.map((id) => captured(id));
+  const MIDDLE = () => 0.5;
+
+  const brokenRun = () => {
+    const records = rows();
+    const h = harness({
+      people: nine,
+      records,
+      reloadPage: true,
+      reloadFails: true,
+      rand: MIDDLE,
+    });
+    return { h, records };
+  };
+
+  it('stops the run rather than carrying on against a dead page', async () => {
+    const { h } = brokenRun();
+    const result = await h.run();
+    expect(result.stoppedBecause).toBe('error');
+    expect(result.error).toContain('did not finish loading');
+    // It stopped where the reload was due. Nothing was attempted afterwards.
+    const types = typesOf(h.reviewer.log);
+    expect(types.lastIndexOf(CX.ACCEPT_CANDIDATE)).toBeLessThan(types.indexOf('RELOAD'));
+  });
+
+  it('leaves the ledger holding exactly who was messaged, and nobody else', async () => {
+    const { h } = brokenRun();
+    const result = await h.run();
+    const sent = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(h.ledger.map((e) => e.userId)).toEqual(sent);
+    expect(result.accepted).toBe(sent.length);
+  });
+
+  it('says in the CSV what happened to everybody it never reached', async () => {
+    const { h, records } = brokenRun();
+    await h.run();
+    const reached = new Set(h.ledger.map((e) => e.userId));
+    for (const row of records) {
+      expect(row.acceptStatus).toBe(
+        reached.has(row.userId) ? ACCEPT_STATUS.ACCEPTED : ACCEPT_STATUS.NOT_REACHED,
+      );
+    }
+  });
+});
+
+// Whatever interrupted the pass - a failed reload, a stop, a closed panel - the
+// next attempt starts from the ledger, which was written per person as the pass
+// went. Nobody already messaged may be messaged again.
+describe('picking a broken pass up again', () => {
+  const nine = Array.from({ length: 9 }, (_, i) => String(70000001 + i));
+  const MIDDLE = () => 0.5;
+
+  it('never messages anybody the first attempt already recorded', async () => {
+    const first = harness({
+      people: nine,
+      records: nine.map((id) => captured(id)),
+      reloadPage: true,
+      reloadFails: true,
+      rand: MIDDLE,
+    });
+    await first.run();
+    const done = first.ledger.map((e) => e.userId);
+    expect(done.length).toBeGreaterThan(0);
+    expect(done.length).toBeLessThan(nine.length);
+
+    // The second attempt sees the ledger and the drained queue, which are two
+    // independent defences against a second message. The queue here has already
+    // lost the accepted people, exactly as Wellfound's has.
+    const second = harness({
+      people: nine.filter((id) => !done.includes(id)),
+      records: nine.map((id) => captured(id)),
+      alreadyAccepted: done,
+      reloadPage: true,
+      rand: MIDDLE,
+    });
+    const result = await second.run();
+
+    const sent = second.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    for (const id of done) expect(sent).not.toContain(id);
+    // And it made progress: everybody left is messaged, so the two attempts
+    // together cover the role exactly once.
+    expect([...done, ...sent].sort()).toEqual([...nine].sort());
+    expect(result).toMatchObject({ stoppedBecause: 'finished' });
+  });
+
+  // The ledger is not the only defence, and neither is trusted alone. A ledger
+  // that lost its memory still cannot produce a second message for somebody
+  // Wellfound has already removed from the queue, because the pass acts on who
+  // the page says is there.
+  it('does not message somebody the queue has already lost, ledger or no ledger', async () => {
+    const h = harness({
+      people: nine.slice(3),
+      records: nine.map((id) => captured(id)),
+      reloadPage: true,
+      rand: MIDDLE,
+    });
+    await h.run();
+    const sent = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sent).toEqual(nine.slice(3));
   });
 });
