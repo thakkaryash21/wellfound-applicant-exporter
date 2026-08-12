@@ -40,15 +40,29 @@
   //   composer wait  5000  (COMPOSER_TIMEOUT_MS)
   //   before paste   5000  (clamped, PACING.beforePasteMs upper bound)
   //   after paste    3000  (clamped, PACING.afterPasteMs upper bound)
-  //   confirm wait  15000  (CONFIRM_TIMEOUT_MS)
+  //   confirm wait  40000  (CONFIRM_TIMEOUT_MS)
   //   slack          2000  (poll granularity, click dispatch, re-render)
   //                 -----
-  //                 30000
-  const DRIVER_WORST_CASE_MS = 30000;
-  // Half as much again. Large because expiring early costs a person a second
-  // message, and waiting too long costs the operator a few seconds in front of
-  // a panel that is already telling them the run has stopped.
-  const MARGIN_MS = 15000;
+  //                 55000
+  const DRIVER_WORST_CASE_MS = 55000;
+  // The margin, and what it is actually an allowance FOR. This used to be
+  // described as "half as much again", which is a size and not a reason.
+  //
+  // The figure above is SCHEDULED time: it is what the driver's own timers and
+  // deadlines add up to on a page that lets them run. The driver lives in the
+  // MAIN world, on Wellfound's own main thread, and on a large role that thread
+  // is not free. Measured: a 111-applicant role took 35.9 s and then 47 s over
+  // accepts whose scheduled worst case was 30 s. So wall clock ran past the
+  // driver's own arithmetic by more than half again, and it did so because the
+  // page starved the driver, not because the driver waited longer.
+  //
+  // That overrun has no bound this file can state honestly, so this number is
+  // not a claim that one exists. It is the point past which waiting stops being
+  // the best instrument available: the panel now books an unconfirmed send
+  // durably and settles it against the API, so a relay expiry no longer loses a
+  // person or ends a role. 35000 is the measured starvation on top of a 30 s
+  // budget, rounded up, applied to the larger one.
+  const MARGIN_MS = 35000;
   const TIMEOUT_MS = DRIVER_WORST_CASE_MS + MARGIN_MS;
   const pending = new Map();
   let counter = 0;

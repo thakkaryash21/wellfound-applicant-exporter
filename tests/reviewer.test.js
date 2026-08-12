@@ -504,7 +504,7 @@ describe('saying whether anything was sent', () => {
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     const settled = pending.catch((error) => error);
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(41000);
     const error = await settled;
     expect(error.message).toMatch(/may or may not have been sent/);
     expect(error.message).not.toContain(driver.NOTHING_SENT);
@@ -898,7 +898,7 @@ describe('the never-retry guard', () => {
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     const settled = expect(pending).rejects.toThrow(/Could not confirm the accept for 70000001/);
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(41000);
     await settled;
     await expect(
       driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
@@ -922,7 +922,7 @@ describe('confirming the send', () => {
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     const settled = expect(pending).rejects.toThrow(/may or may not have been sent/);
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(41000);
     await settled;
   });
 
@@ -936,7 +936,7 @@ describe('confirming the send', () => {
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
     const settled = expect(pending).rejects.toThrow(/Nothing was retried/);
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(41000);
     await settled;
   });
 
@@ -987,7 +987,7 @@ describe('skipping', () => {
     await driver.openReviewer();
     const pending = driver.skipCurrent();
     const settled = expect(pending).rejects.toThrow(/did not move on to the next candidate/);
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(41000);
     await settled;
   });
 
@@ -996,7 +996,7 @@ describe('skipping', () => {
     await driver.openReviewer();
     const pending = driver.skipCurrent();
     const settled = expect(pending).rejects.toThrow(/did not move on to the next candidate/);
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(41000);
     await settled;
   });
 });
@@ -1087,7 +1087,7 @@ describe('leaving the page as it was found', () => {
     expect(report.notes).toEqual(['an accept is still in flight; left the reviewer alone']);
     expect(page.state.clicks.length).toBe(before);
 
-    await vi.advanceTimersByTimeAsync(15000);
+    await vi.advanceTimersByTimeAsync(41000);
     await settled;
   });
 
@@ -1271,11 +1271,33 @@ describe('the accept round trip fitting inside the relay budget', () => {
 
   it('states a worst case that its own constants add up to', async () => {
     start();
-    // composer 5000 + before 5000 + after 3000 + confirm 15000 + slack 2000.
+    // composer 5000 + before 5000 + after 3000 + confirm 40000 + slack 2000.
     // Named here rather than derived, so a change to any of them has to be a
     // change to this number too - which is what the relay's budget is checked
     // against in tests/bridge.test.js.
-    expect(driver.ACCEPT_WORST_CASE_MS).toBe(30000);
+    expect(driver.ACCEPT_WORST_CASE_MS).toBe(55000);
+  });
+
+  // The measurement the confirm window is sized against, asserted as behaviour
+  // rather than as a constant: the slowest accept ever seen on a healthy-enough
+  // page took 35.9 s, and a window that ends before it turns an ordinary commit
+  // on a large role into a send nobody can vouch for.
+  it('still confirms a send that lands 36s after the click', async () => {
+    let rerender;
+    start({
+      onSendClick: (state) => {
+        state.composer = false;
+        setTimeout(() => {
+          state.queue.shift();
+          rerender();
+        }, 35900);
+      },
+    });
+    rerender = page.render;
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
+    await vi.advanceTimersByTimeAsync(36500);
+    await expect(pending).resolves.toMatchObject({ accepted: true });
   });
 });
 

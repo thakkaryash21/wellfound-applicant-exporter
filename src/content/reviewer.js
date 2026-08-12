@@ -95,7 +95,23 @@
 
   // A pause is served in slices so a stop lands inside it rather than after it.
   const PAUSE_SLICE_MS = 100;
-  const CONFIRM_TIMEOUT_MS = 15000;
+  // How long the page is given to show that a send landed.
+  //
+  // It was 15000, and 15000 was a figure taken from a 20-applicant role where an
+  // accept resolved in 5-9 s. On a 111-applicant role the same operation was
+  // measured at 35.9 s, and on a 102-applicant one the commit arrived more than
+  // 111 s after the click. A window that ends at 15 s therefore turns an
+  // ordinary-for-a-large-role commit into a send nobody can vouch for, which is
+  // the most expensive outcome this extension has.
+  //
+  // 40000 covers the whole of the degraded band that has actually been measured
+  // (35.9 s) with a few seconds to spare, and it is deliberately NOT sized
+  // against the 111 s case. Waiting is the cheap instrument and it has a
+  // ceiling; past this point the panel has a strictly better one - it asks the
+  // API whether the candidate has left the review queue, and it may keep asking
+  // for the rest of the pass. So this number buys the cases waiting can win and
+  // hands the rest to something that does not depend on the page at all.
+  const CONFIRM_TIMEOUT_MS = 40000;
   const CONFIRM_POLL_MS = 250;
   const COMPOSER_TIMEOUT_MS = 5000;
   const COMPOSER_POLL_MS = 100;
@@ -128,7 +144,7 @@
   // click dispatch, and the page's own re-render. Not measured, deliberately
   // generous, and inside the figure below rather than outside it.
   const ACCEPT_SLACK_MS = 2000;
-  // 5000 + 5000 + 3000 + 15000 + 2000 = 30000. Read by bridge.js's budget, and
+  // 5000 + 5000 + 3000 + 40000 + 2000 = 55000. Read by bridge.js's budget, and
   // by a test that fails if the two ever stop agreeing.
   const ACCEPT_WORST_CASE_MS =
     COMPOSER_TIMEOUT_MS +

@@ -103,7 +103,7 @@ describe('the bridge', () => {
   it('answers not-ok when the page goes quiet, rather than hanging the run forever', async () => {
     const bridge = load();
     const sent = bridge.send({ type: 'CX_LIST_JOBS' });
-    await vi.advanceTimersByTimeAsync(44999);
+    await vi.advanceTimersByTimeAsync(89999);
     expect(sent.read()).toBe(undefined);
     await vi.advanceTimersByTimeAsync(1);
     await flush();
@@ -186,10 +186,13 @@ describe('the budget against the driver it has to cover', () => {
   it('leaves margin on top of it rather than sitting flush against it', () => {
     const { budget } = load();
     expect(budget.TIMEOUT_MS).toBe(budget.DRIVER_WORST_CASE_MS + budget.MARGIN_MS);
-    // Half as much again. A driver operation that runs long is a page behaving
-    // unusually, and the answer to that is to let the driver's own confirmation
-    // contract reach its own conclusion - not to have the relay give up first
-    // and hand the panel an unclear outcome the driver could have named.
+    // The driver's figure is SCHEDULED time; the margin is the allowance for the
+    // page starving the thread it is scheduled on. That was measured at more
+    // than half again over a 30 s budget (a 47 s accept), so the margin has to
+    // be at least half the driver's worst case - not because halves are
+    // meaningful, but because that is what the page has actually been seen to
+    // add. Below that the relay gives up first and hands the panel an outcome
+    // the driver could have named.
     expect(budget.MARGIN_MS).toBeGreaterThanOrEqual(budget.DRIVER_WORST_CASE_MS / 2);
   });
 });
