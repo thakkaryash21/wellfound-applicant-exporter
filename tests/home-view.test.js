@@ -3,7 +3,6 @@ import { installFakeChrome } from './helpers/fake-chrome.js';
 import { CX } from '../src/lib/messages.js';
 import {
   APPLICANTS_URL,
-  RECRUIT_URL,
   NO_WELLFOUND_TAB,
   NOT_IN_RECRUITER_AREA,
   NO_WELLFOUND_TAB_CODE,
@@ -354,7 +353,7 @@ describe('renderHome', () => {
     const html = renderHome(
       model([], {}, { loadError: NO_WELLFOUND_TAB, openWellfoundCode: NO_WELLFOUND_TAB_CODE }),
     );
-    expect(html).toContain(`href="${RECRUIT_URL}"`);
+    expect(html).toContain(`href="${APPLICANTS_URL}"`);
     expect(html).toContain('target="_blank"');
     expect(html).toContain('>Open Wellfound<');
     expect(html).toContain('to get started');
@@ -368,7 +367,7 @@ describe('renderHome', () => {
         { loadError: NOT_IN_RECRUITER_AREA, openWellfoundCode: NOT_IN_RECRUITER_AREA_CODE },
       ),
     );
-    expect(html).toContain(`href="${RECRUIT_URL}"`);
+    expect(html).toContain(`href="${APPLICANTS_URL}"`);
     expect(html).toContain('Wellfound (wellfound.com/recruit)</a>');
     expect(html).toContain('to see your jobs');
   });

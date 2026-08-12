@@ -1,7 +1,7 @@
 import { escapeHtml } from './escape-html.js';
 import { DEFAULT_MESSAGE, composeMessage } from '../lib/accept-message.js';
 import {
-  RECRUIT_URL,
+  APPLICANTS_URL,
   NO_WELLFOUND_TAB_CODE,
   NOT_IN_RECRUITER_AREA_CODE,
 } from './tab-driver.js';
@@ -309,12 +309,12 @@ const LINK_ATTRS = `target="_blank" rel="noopener noreferrer" class="load-error-
 // there.
 function loadErrorBody(code) {
   if (code === NO_WELLFOUND_TAB_CODE) {
-    return `<a href="${RECRUIT_URL}" ${LINK_ATTRS}
+    return `<a href="${APPLICANTS_URL}" ${LINK_ATTRS}
         aria-label="Open Wellfound's recruiter area, in a new tab">Open Wellfound</a> to get started`;
   }
   if (code === NOT_IN_RECRUITER_AREA_CODE) {
     return `Open your hiring pages on
-      <a href="${RECRUIT_URL}" ${LINK_ATTRS}
+      <a href="${APPLICANTS_URL}" ${LINK_ATTRS}
          aria-label="Open your Wellfound recruiter pages, in a new tab">Wellfound (wellfound.com/recruit)</a>
       to see your jobs`;
   }

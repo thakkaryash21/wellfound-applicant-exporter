@@ -7,7 +7,7 @@ import { POST_RUN_IDS } from '../src/panel/post-run-view.js';
 import { HOME_IDS, RECONNECT_LABEL, WAITING_LINE } from '../src/panel/home-view.js';
 import {
   pageDisconnectedError,
-  RECRUIT_URL,
+  APPLICANTS_URL,
   NO_WELLFOUND_TAB,
   NOT_IN_RECRUITER_AREA,
   NO_WELLFOUND_TAB_CODE,
@@ -401,7 +401,7 @@ describe('Home', () => {
       });
       const link = screen.querySelector('.load-error-link');
       expect(link).not.toBe(null);
-      expect(link.getAttribute('href')).toBe(RECRUIT_URL);
+      expect(link.getAttribute('href')).toBe(APPLICANTS_URL);
       expect(link.getAttribute('target')).toBe('_blank');
       expect(link.textContent).toBe('Open Wellfound');
     });
@@ -413,7 +413,7 @@ describe('Home', () => {
       });
       const link = screen.querySelector('.load-error-link');
       expect(link).not.toBe(null);
-      expect(link.getAttribute('href')).toBe(RECRUIT_URL);
+      expect(link.getAttribute('href')).toBe(APPLICANTS_URL);
       expect(screen.innerHTML).toContain('to see your jobs');
     });
   });
