@@ -74,9 +74,13 @@ export function summarize(event, trace = []) {
     safeNotes.push(text);
   };
 
-  // A preview counts nobody into `downloaded` by design, so without this a dry
-  // run over 400 applicants ended with "0 downloaded" and nothing else.
-  if (event.dryRun) {
+  // A preview counts nobody into `downloaded` by design, so without this a run
+  // with downloads off over 400 applicants ended with "0 downloaded" and
+  // nothing else.
+  // Presence-checked, not just falsy-checked: an event carrying no actions at
+  // all is one this run did not produce, and it must not be described as a
+  // preview on the strength of a missing field.
+  if (event.actions && !event.actions.download) {
     const previewed = counts[PREVIEW];
     both(
       `Preview only: nothing was downloaded. ` +

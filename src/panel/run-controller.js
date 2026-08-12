@@ -1,4 +1,4 @@
-import { runJob } from '../lib/runner.js';
+import { runJob, runActions } from '../lib/runner.js';
 import { toCsv, PREVIEW } from '../lib/csv.js';
 import { sleep as realSleep } from '../lib/jitter.js';
 import { CX } from '../lib/messages.js';
@@ -8,6 +8,16 @@ import { consoleSink } from './verbose-console.js';
 import { createTabDriver } from './tab-driver.js';
 import { createLedgerService } from './ledger-service.js';
 import { registerFilenameHandler, downloadResume, downloadBlobText } from './downloader.js';
+
+// The trace's one word for which of the four modes a run is. 'live' is what the
+// download-only run has always been called in the trace, and stays.
+export function runKind(actions) {
+  const { download, accept } = runActions(actions);
+  if (download && accept) return 'live+accept';
+  if (download) return 'live';
+  if (accept) return 'accept';
+  return PREVIEW;
+}
 
 // A re-download walks pages looking for userIds that may have left the review
 // bucket entirely, so it needs a stop that does not depend on hasNextPage.
@@ -210,26 +220,27 @@ export function createController({
     },
 
     // Per job, not per run: the owner wants all of one role and the first 25 of
-    // another in a single go. `pageSize` and `dryRun` stay global because they
+    // another in a single go. `pageSize` and `actions` stay global because they
     // genuinely are. `limit` is Infinity for "all new".
     // The trace of the run that just happened, exposed so the panel can show it
     // under the summary and store it beside one.
     trace,
 
-    async startRun({ jobs: requested, folder, pageSize, dryRun }) {
+    async startRun({ jobs: requested, folder, pageSize, actions: asked }) {
+      const actions = runActions(asked);
       const signal = takeLock();
       trace.reset();
       trace.record('run_start', {
         count: requested.length,
-        kind: dryRun ? PREVIEW : 'live',
+        kind: runKind(actions),
         pageSize,
       });
 
       const totals = {
         downloaded: 0,
         failed: 0,
-        // What a dry run has to report instead of `downloaded`, which is 0 by
-        // definition for a preview.
+        // What a run with downloads off has to report instead of `downloaded`,
+        // which is 0 by definition for a preview.
         previewed: 0,
         skippedNoResume: 0,
         skippedNoId: 0,
@@ -288,7 +299,7 @@ export function createController({
               folder,
               limit,
               forceFullWalk,
-              dryRun,
+              actions,
               signal,
               jobIndex: index + 1,
               jobTotal: requested.length,
@@ -320,7 +331,7 @@ export function createController({
           };
           jobStops.push(stop);
 
-          if (!dryRun) {
+          if (actions.download) {
             // The folder is stored with the run so a later re-download lands
             // beside the originals rather than in the default directory.
             await ledgerService.finishRun(jobId, { folder });
@@ -335,6 +346,12 @@ export function createController({
           // event, and the post-run screen replaces the screen entirely. The
           // durable account is `wroteCsv` above, which summary.js reads.
           if (!wrote) emit({ type: 'job_note', jobId, jobTitle, note: 'no applicants to export' });
+
+          // Where the accept pass slots in, when `actions.accept` is set: it
+          // drives the applicant reviewer rather than this API walk, so it is a
+          // second pass over the same job rather than a branch inside runJob.
+          // The driver that performs it is owned elsewhere and is not wired up
+          // here yet, so ticking accept currently changes nothing but the trace.
 
           // The five-failure stop is per job, but the cause almost never is: if
           // Wellfound starts refusing signed URLs, every remaining job would
@@ -357,7 +374,7 @@ export function createController({
         emit({
           type: 'done',
           ...totals,
-          dryRun: Boolean(dryRun),
+          actions,
           stoppedBecause,
           jobs: jobStops,
           failedNames,
@@ -370,7 +387,7 @@ export function createController({
         emit({
           type: 'done',
           ...totals,
-          dryRun: Boolean(dryRun),
+          actions,
           stoppedBecause: 'error',
           error: String(error.message || error),
           jobs: jobStops,
@@ -422,6 +439,10 @@ export function createController({
             pageSize: REDOWNLOAD_PAGE_SIZE,
             pageCap: REDOWNLOAD_PAGE_CAP,
             folder: dest,
+            // Downloading is the whole point of this walk, and it never
+            // accepts anybody: repairing a missing file is not a decision
+            // about a candidate.
+            actions: runActions({ download: true }),
             limit: status.missing.length,
             signal,
             jobIndex: 1,

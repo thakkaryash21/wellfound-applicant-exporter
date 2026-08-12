@@ -38,25 +38,25 @@ describe('the headline', () => {
 });
 
 // A2: a preview counts nobody into `downloaded` by design, so the summary of a
-// dry run over 400 people used to read "0 downloaded" and stop there.
-describe('a dry run', () => {
+// preview over 400 people used to read "0 downloaded" and stop there.
+describe('a run with downloads off', () => {
   it('says how many it listed', () => {
-    const s = summarize(done({ dryRun: true, previewed: 400 }));
+    const s = summarize(done({ actions: { download: false }, previewed: 400 }));
     expect(s.headline).toBe('0 downloaded \u00b7 400 previewed');
   });
 
   it('says that nothing was downloaded on purpose, and how to fetch them', () => {
-    const s = summarize(done({ dryRun: true, previewed: 400 }));
+    const s = summarize(done({ actions: { download: false }, previewed: 400 }));
     expect(s.notes[0]).toContain('Preview only');
     expect(s.notes[0]).toContain('these 400 resumes');
   });
 
   it('says it in the singular for one applicant', () => {
-    expect(summarize(done({ dryRun: true, previewed: 1 })).notes[0]).toContain('this resume');
+    expect(summarize(done({ actions: { download: false }, previewed: 1 })).notes[0]).toContain('this resume');
   });
 
   it('says nothing about previewing on a live run', () => {
-    const s = summarize(done({ downloaded: 3 }));
+    const s = summarize(done({ actions: { download: true }, downloaded: 3 }));
     expect(s.notes.join(' ')).not.toContain('Preview only');
   });
 });

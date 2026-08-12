@@ -239,17 +239,17 @@ describe('startRun', () => {
 
   // A2: a preview counts nobody into `downloaded`, so without its own number the
   // summary of a 400-applicant preview had nothing at all to report.
-  it('reports what a dry run previewed on the done event', async () => {
+  it('reports what a preview listed on the done event', async () => {
     setup({ people: [person('7700001'), person('7700002')] });
     const controller = await controllerFor();
     await controller.startRun({
       jobs: [{ jobId: JOB, limit: 250 }],
       folder: 'resumes',
       pageSize: 10,
-      dryRun: true,
+      actions: { download: false, accept: false },
     });
     const done = events.find((e) => e.type === 'done');
-    expect(done).toMatchObject({ dryRun: true, previewed: 2, downloaded: 0 });
+    expect(done).toMatchObject({ actions: { download: false }, previewed: 2, downloaded: 0 });
   });
 
   // C2: the preview used to ignore the per-role limit entirely, so the button
@@ -263,10 +263,10 @@ describe('startRun', () => {
       jobs: [{ jobId: JOB, limit: 3 }],
       folder: 'resumes',
       pageSize: 10,
-      dryRun: true,
+      actions: { download: false, accept: false },
     });
     const done = events.find((e) => e.type === 'done');
-    expect(done).toMatchObject({ dryRun: true, previewed: 3, downloaded: 0 });
+    expect(done).toMatchObject({ actions: { download: false }, previewed: 3, downloaded: 0 });
     expect(done.jobs[0]).toMatchObject({ jobId: JOB, limit: 3, stoppedBecause: 'limit' });
     // The number the post-run screen offers to fetch is the number the live run
     // would actually fetch, not the size of the queue.
