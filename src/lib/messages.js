@@ -9,4 +9,15 @@ export const CX = {
   // document mid-navigation can answer yes correctly and take the run down with
   // it. It touches no network, so polling it costs Wellfound nothing.
   QUERY_READY: 'CX_QUERY_READY',
+
+  // The applicant reviewer, driven by src/content/reviewer.js. One candidate
+  // per call: the panel owns the loop and the ledger, the driver owns the DOM.
+  OPEN_REVIEWER: 'CX_OPEN_REVIEWER',
+  // Who is at the current position: `{ userId, index, total }`. Never a name.
+  READ_CANDIDATE: 'CX_READ_CANDIDATE',
+  // `{ expectedUserId, message }`. Sends a real, irreversible message. Confirms
+  // auto-advance, so nothing may follow this with a skip.
+  ACCEPT_CANDIDATE: 'CX_ACCEPT_CANDIDATE',
+  // Advance past the current candidate without acting on them.
+  SKIP_CANDIDATE: 'CX_SKIP_CANDIDATE',
 };

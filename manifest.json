@@ -40,6 +40,12 @@
       "js": ["src/content/collector.js"],
       "world": "MAIN",
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://wellfound.com/recruit/*"],
+      "js": ["src/content/reviewer.js"],
+      "world": "MAIN",
+      "run_at": "document_idle"
     }
   ]
 }
