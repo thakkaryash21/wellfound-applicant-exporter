@@ -940,10 +940,43 @@ describe('redownloadMissing', () => {
   it('says there is nothing to do when every file is present', async () => {
     withMissing([person('7700001')], []);
     const controller = await controllerFor();
-    expect(await controller.redownloadMissing({ jobId: JOB })).toEqual({
+    expect(await controller.redownloadMissing({ jobId: JOB })).toMatchObject({
       refetched: 0,
       stillMissing: 0,
+      acceptedGone: 0,
     });
+  });
+
+  // The guard this walk needs most. An accepted candidate has left NEEDS_REVIEW
+  // for good, so the walk below can never find them: without this it pages to
+  // its cap and then reports them missing, which is forty pages of requests
+  // spent arriving at a wrong answer.
+  describe('someone who was accepted', () => {
+    const acceptedLedger = { accepted: { 7700001: '2026-08-12 10:00' } };
+
+    it('is never walked for, and is reported as unfetchable rather than missing', async () => {
+      const page = withMissing([person('7700001')], ['7700001'], acceptedLedger);
+      const controller = await controllerFor();
+      const result = await controller.redownloadMissing({ jobId: JOB });
+
+      // The whole point: not one request went out.
+      expect(page.calls.fetches).toEqual([]);
+      expect(result).toMatchObject({ refetched: 0, stillMissing: 0, acceptedGone: 1 });
+    });
+
+    it('does not stop the walk for the people who can still be fetched', async () => {
+      const people = [person('7700001'), person('7700002')];
+      const page = withMissing(people, ['7700001', '7700002'], acceptedLedger);
+      const controller = await controllerFor();
+      const result = await controller.redownloadMissing({ jobId: JOB });
+
+      expect(page.calls.fetches.length).toBeGreaterThan(0);
+      // One of the two was refetched and the other was not looked for at all,
+      // so nobody is left over: `stillMissing` counting the accepted person
+      // would be the walk claiming a failure it never had.
+      expect(result).toMatchObject({ refetched: 1, stillMissing: 0, acceptedGone: 1 });
+    });
+
   });
 
   it('fetches only the missing person, not the whole page', async () => {

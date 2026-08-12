@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { installFakeDom } from './helpers/fake-dom.js';
-import { renderLibrary } from '../src/panel/library.js';
+import { renderLibrary, describeRefetch } from '../src/panel/library.js';
 
 // What the Library screen says back after an action. Three sites used to write
 // their own message by hand and only one of them replaced the previous one, so
@@ -118,5 +118,26 @@ describe('an action that worked', () => {
     expect(controller.importCsv).toHaveBeenCalledWith(JOB, 'User ID,Resume\r\n1,downloaded\r\n');
     expect(screen.innerHTML).toContain('Imported 5 people.');
     expect(messages('lib-note')).toHaveLength(1);
+  });
+});
+
+// The one outcome a re-download has no remedy for. An accepted candidate has
+// left the only collection this extension can query, so "still missing" would
+// send the user looking for a button that cannot exist.
+describe('someone who was accepted', () => {
+  it('is reported as unfetchable, not as missing', () => {
+    expect(describeRefetch({ refetched: 0, stillMissing: 0, acceptedGone: 2 })).toBe(
+      'Nothing to re-download: 2 were accepted and can no longer be fetched',
+    );
+  });
+
+  it('is named alongside the people the walk did fetch', () => {
+    expect(describeRefetch({ refetched: 3, stillMissing: 1, acceptedGone: 1 })).toBe(
+      'Re-downloaded 3, 1 still missing, 1 was accepted and can no longer be fetched',
+    );
+  });
+
+  it('says nothing at all when nobody was accepted', () => {
+    expect(describeRefetch({ refetched: 3, stillMissing: 0 })).toBe('Re-downloaded 3');
   });
 });

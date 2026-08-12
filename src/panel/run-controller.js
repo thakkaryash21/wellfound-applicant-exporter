@@ -484,10 +484,31 @@ export function createController({
       trace.record('redownload_start', { jobId });
       try {
         const status = await reconcileJob(jobId);
-        if (status.missing.length === 0) return { refetched: 0, stillMissing: 0 };
+        const job = await ledgerService.describe(jobId);
+        if (status.missing.length === 0) {
+          return { refetched: 0, stillMissing: 0, acceptedGone: 0, jobTitle: job.jobTitle };
+        }
+
+        // An accepted candidate is not in NEEDS_REVIEW and never will be, so
+        // the walk below cannot find them however far it goes: it would page to
+        // its cap and then report them missing, which is forty pages of
+        // requests spent to arrive at a wrong answer. Checked here, before a
+        // single fetch, and said plainly instead.
+        const accepted = new Set(
+          (await ledgerService.acceptedUserIdsFor(jobId)).map((id) => String(id)),
+        );
+        const wanted = status.missing.filter((id) => !accepted.has(String(id)));
+        const acceptedGone = status.missing.length - wanted.length;
+        if (acceptedGone) trace.record('redownload_accepted', { jobId, count: acceptedGone });
+        // Nobody left to look for. Opening a tab and walking a page to confirm
+        // what the ledger already knows is the pretending-to-work this project
+        // does not do.
+        if (wanted.length === 0) {
+          return { refetched: 0, stillMissing: 0, acceptedGone, jobTitle: job.jobTitle };
+        }
+
         const tab = await tabs.workingTab();
         await tabs.focusJob(tab.id, jobId);
-        const job = await ledgerService.describe(jobId);
         const dest = folder ?? job.folder ?? 'wellfound-resumes';
 
         const result = await runJob(
@@ -505,7 +526,7 @@ export function createController({
             // Empty, deliberately: everyone wanted here is already in the
             // ledger, and the guest list is what narrows the walk.
             seenUserIds: [],
-            only: status.missing,
+            only: wanted,
             pageSize: REDOWNLOAD_PAGE_SIZE,
             pageCap: REDOWNLOAD_PAGE_CAP,
             folder: dest,
@@ -513,7 +534,7 @@ export function createController({
             // accepts anybody: repairing a missing file is not a decision
             // about a candidate.
             actions: runActions({ download: true }),
-            limit: status.missing.length,
+            limit: wanted.length,
             signal,
             jobIndex: 1,
             jobTotal: 1,
@@ -526,6 +547,7 @@ export function createController({
         return {
           refetched: result.downloaded.length,
           stillMissing: result.stillWanted.length,
+          acceptedGone,
           failed: result.failed.length,
           noResume: result.skippedNoResume.length,
           pages: result.pages,

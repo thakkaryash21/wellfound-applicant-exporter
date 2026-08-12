@@ -1,6 +1,6 @@
 import { escapeHtml } from './escape-html.js';
 
-function describeRefetch({
+export function describeRefetch({
   refetched,
   stillMissing,
   stoppedBecause,
@@ -8,8 +8,20 @@ function describeRefetch({
   noResume = 0,
   pages = 0,
   pageCap = 0,
+  acceptedGone = 0,
 }) {
+  // The one outcome with no remedy. An accepted candidate has left the only
+  // collection this extension can query, so no walk will ever find them - and
+  // saying "still missing" would send the user looking for a button that
+  // cannot exist.
+  const gone = acceptedGone
+    ? `${acceptedGone} ${acceptedGone === 1 ? 'was' : 'were'} accepted and can no longer be fetched`
+    : '';
+  if (acceptedGone && refetched === 0 && stillMissing === 0) {
+    return `Nothing to re-download: ${gone}`;
+  }
   let tail = stillMissing ? `, ${stillMissing} still missing` : '';
+  if (gone) tail += `, ${gone}`;
   // A rejection used to propagate out of the walk and take the successes with
   // it. Now they are counted, so both numbers have to be shown.
   if (failed) tail += `, ${failed} failed`;
