@@ -147,72 +147,124 @@ and must be handled, not assumed away.
 
 ## Architecture
 
-Four components, each with one responsibility.
+Everything above this line is recon: what was observed against Wellfound. What
+follows describes the extension as it is built, and is written against the code
+rather than against the plan.
+
+Five parts. Two of them run on Wellfound's page and two of them run in the
+panel; `src/lib/` is pure and runs wherever it is imported.
 
 ### 1. `collector.js` — MAIN-world content script
 
-Injected at `https://wellfound.com/recruit/applicants/*` with `world: "MAIN"`.
-The **only** component that touches Wellfound.
+Injected at `https://wellfound.com/recruit/*` with `world: "MAIN"` at
+`document_idle`. The **only** component that touches Wellfound.
 
 Responsibilities:
 - Locate `window.__APOLLO_CLIENT__` and the live `RecruitJobListingApplicants`
   observable query.
-- Copy that query's own variables verbatim, overriding only `first` and `after`.
-  Never construct a query shape from scratch — `filters`, `orderBy`,
-  `preferences` and `talentCandidateId` come from whatever the UI currently has.
-- Fetch one page on request and return a normalized
-  `{ applicants: [...], endCursor, hasNextPage }`.
+- Copy that query's own variables verbatim, overriding only `jobId`, `first` and
+  `after`. Never construct a query shape from scratch — `filters`, `orderBy` and
+  everything else come from whatever the UI currently has live. `first` is the
+  wire's name for the page size; inside this extension the same number is called
+  `pageSize`, and `mergeVariables` is the one place that translates.
+- Unwrap one GraphQL response into `{ jobTitle, edges, endCursor, hasNextPage }`.
+  The connection arrives as `edges: [{ __typename, node }]` with `pageInfo`
+  nested under `applicants`; the unwrap happens here and nowhere else.
+- Answer `QUERY_READY` with **which** job the live query is serving, never a
+  bare boolean. A document the browser is about to discard can truthfully answer
+  "yes" and take a run down with it.
+- Read the job list out of the Apollo cache (`cache.extract()`), filtered to
+  `__typename === 'JobListing'`.
 
 It holds no state, does no pacing, and knows nothing about downloads or dedup.
+It is a classic script with no imports and no exports — MV3 will not run a module
+in the MAIN world — so the message-type literals are duplicated inline from
+`src/lib/messages.js` rather than imported, and the only test seam is a
+`__WFX_COLLECTOR__` container that nothing in the extension ever defines.
 
 ### 2. `bridge.js` — ISOLATED-world content script
 
-A `window.postMessage` ↔ `chrome.runtime` relay with an explicit message
-allowlist. Exists solely because MAIN world cannot reach extension APIs. No logic.
+Injected at the same match pattern. A `window.postMessage` / `chrome.runtime`
+relay with an explicit allowlist of three message types — `LIST_JOBS`,
+`FETCH_PAGE`, `QUERY_READY` — and a 30 s timeout per pending request. Exists
+solely because MAIN world cannot reach extension APIs. No logic, no state beyond
+the pending map.
 
 ### 3. `service-worker.js` — service worker
 
-Almost nothing: it sets the side panel to open on toolbar click, and that is all.
+Three lines. On install it sets the side panel to open when the toolbar icon is
+clicked. That is the whole file.
 
-**It deliberately does not own the run loop.** Chrome terminates an MV3 service
-worker after 30 seconds of inactivity, and neither `setTimeout` nor an open
-message port resets that timer — only receiving an event or calling an extension
-API does. This extension sleeps on purpose: reading breaks are drawn from
-15-40 s and about a third exceed 30 s, and one fires every 8-12 candidates. A
-worker-hosted loop would be killed mid-run, silently, on essentially every run.
+**It deliberately does not own the run loop, and never has.** Chrome terminates
+an MV3 service worker after 30 seconds of inactivity, and neither `setTimeout`
+nor an open message port resets that timer — only receiving an event or calling
+an extension API does. This extension sleeps on purpose: reading breaks are drawn
+from 15–40 s and about a third exceed 30 s, and one fires every 8–12 candidates.
+A worker-hosted loop would be killed mid-run, silently, on essentially every run.
 
-### 3b. `panel/run-controller.js` — the orchestrator
-
-The run loop lives in the side panel, an ordinary page document with no such
-timeout. It owns pacing, the working tab, downloads, CSV assembly and the abort path,
-and never talks to Wellfound's GraphQL API directly. The ledger and everything
-that reconciles it against Chrome's download history sit beside it in
-`panel/ledger-service.js`, which takes no lock and touches no tab. Hosting it here makes
-"closing the panel aborts the run" physics rather than a feature, and removes
-worker-to-panel event broadcasting entirely: the loop updates its own UI.
-
-### 4. `panel/` — side panel UI
+### 4. `panel/` — the side panel, and the run
 
 A `chrome.sidePanel` page, **not** a browser-action popup. A popup is destroyed
 the moment focus moves, which would kill a 12-minute run mid-flight. The panel
 persists and stays visible beside the applicant list as the run works through it.
 
-Two screens, described in **Interface** below: **Run** (job selection, settings,
-live progress) and **Library** (per-job state and maintenance).
+The run loop lives here, in `panel/run-controller.js`: an ordinary page document
+has no idle timeout. It owns the run lock, pacing, the working tab, downloads,
+CSV assembly and the abort path, and never talks to Wellfound's GraphQL API
+directly — every request goes out through `tab-driver.js` to the bridge. Hosting
+it here makes "closing the panel ends the run" physics rather than a feature, and
+removes worker-to-panel event broadcasting entirely: the loop updates its own UI.
+
+Three modules sit beside it, each with a boundary worth naming:
+
+- `tab-driver.js` — find or open a recruiter tab, navigate it to a job's
+  applicant list, poll `QUERY_READY` until the page can answer (500 ms poll,
+  1500 ms settle after a navigation, 15 s timeout), and relay messages. It
+  touches the tab; nothing else does.
+- `ledger-service.js` — everything the extension knows about who has been
+  fetched and whether their file is still on disk. It owns the ledger outright,
+  takes no lock, drives no tab and paces nothing, so the Library screen can call
+  all of it while no run is in flight.
+- `downloader.js` — the `onDeterminingFilename` listener and the download
+  promise. Registration is idempotent, because two listeners over one pending
+  map would hand filenames back to Chrome.
+
+The view modules (`home-view.js`, `running-view.js`, `post-run-view.js`,
+`library.js`, `summary.js`, `trace-view.js`) are markup and plain-data models, so
+every string and every judgement they make can be asserted without a DOM.
+
+### 5. `src/lib/` — the pure core
+
+`normalize.js`, `csv.js`, `filename.js`, `reconcile.js`, `dedup.js`, `jitter.js`,
+`trace.js`, `local-time.js`, `messages.js` and the run loop itself (`runner.js`)
+are pure: no `chrome`, no `document`, no network. `ledger.js` is the single
+exception, and takes its storage as an argument rather than reaching for
+`chrome.storage` — which is what lets the whole dedup story be tested against a
+plain object.
 
 ## Run flow
 
-For each selected job, sequentially:
+For each selected job, sequentially, driven from the panel:
 
-1. Service worker navigates the working tab to
+1. `tab-driver` finds a recruiter tab (or opens one) and navigates it to
    `/recruit/applicants/jobs/{jobId}`.
-2. Waits for `collector.js` to report the app's query is registered.
-3. Requests one page (`after` = last cursor, `first` = configured size).
-4. Diffs returned applicant IDs against the job's seen set.
-5. Queues unseen resumes; downloads them one at a time, interleaved with paging.
-6. Sleeps a jittered interval, then loops to step 3.
-7. Stops when `hasNextPage` is false, the early-stop rule fires, or a cap/abort
-   triggers.
+2. It polls `QUERY_READY` until the page answers with **that** jobId, or gives
+   up after 15 s.
+3. `ledger-service` reconciles the ledger against Chrome's download history, and
+   subtracts from the seen set anyone whose file has since gone missing, so the
+   run quietly fetches them again.
+4. `runner.js` requests one page (`after` = last cursor, `pageSize` = 10, or 20
+   under the "faster" toggle).
+5. It diffs the page's userIds against the seen set, and marks every record's
+   Resume status before the download loop touches it, so a truncated run says
+   which rows it never reached.
+6. It downloads fresh resumes one at a time, recording each in the ledger
+   *before* anything else can interrupt, and sleeping a jittered interval between
+   each.
+7. It stops when `hasNextPage` is false, the per-role `limit` is reached, the
+   early-stop rule fires, five downloads fail in a row, or the run is aborted.
+8. The CSV for that job is written, the ledger's run is closed out with the
+   folder it wrote to, and the loop moves to the next job.
 
 Downloads interleave with paging rather than batching at the end, so an aborted
 run still leaves completed files and a partial CSV on disk.
@@ -236,7 +288,9 @@ Naming is handled by a `chrome.downloads.onDeterminingFilename` listener, which
 receives both `downloadItem.finalUrl` (the resolved S3 URL, whose path carries the
 real extension) and Chrome's own suggested filename. The listener rewrites the
 name and returns `conflictAction: 'overwrite'` so a re-download replaces rather
-than accumulating ` (1)` suffixes.
+than accumulating ` (1)` suffixes. Pending downloads are keyed by URL rather than
+by download id, because the listener can fire before `download()` resolves with
+an id.
 
 ## File naming
 
@@ -245,41 +299,64 @@ subfolders). `{ext}` comes from the final S3 URL's path, falling back to the
 response `Content-Type`, then to `pdf`.
 
 Name sanitizing: strip `\ / : * ? " < > |` and control characters, collapse
-whitespace, trim trailing dots and spaces (Windows rejects both), cap the base
-name at 100 characters. A missing name (masked candidate) becomes `unknown`.
-Because `userId` and `jobId` are in every filename, collisions cannot occur and
-no dedup suffix logic is needed.
+whitespace, cap the base name at 100 characters, then trim trailing dots and
+spaces (Windows rejects both, and truncating can expose a new one). A missing
+name (masked candidate) becomes `unknown`. Because `userId` and `jobId` are in
+every filename, collisions cannot occur and no dedup suffix logic is needed.
+
+`src/lib/filename.js` owns this grammar outright: it both builds the name and
+parses it back, and `reconcile.js` asks it rather than matching a regex of its
+own. A separator changed in one place and not the other would have left every
+file reported missing with no test failing.
 
 ## Dedup and resume-where-I-left-off
 
 Three sources, in order of authority. The ledger is fast, the download history is
-true, the CSV is portable.
+true, the CSV is portable. All three agree on one identifier: **`userId`**. It is
+the only one that survives a CSV round-trip, a filename and a move to another
+machine. Wellfound sends it as a string; `normalize.js` coerces it with `String()`
+anyway, which is what keeps the dedup Set and the filename parser talking about
+the same people whichever type the schema returns next.
 
 ### 1. Ledger (`chrome.storage.local`)
 
-Per-job record in `chrome.storage.local`:
+Per-job record:
 
 ```
 job:{jobId} = {
-  jobTitle, seenIds: string[], lastRunAt, lastRunCount, totalDownloaded
+  jobId, jobTitle, seenUserIds: string[], lastRunAt, totalDownloaded, folder
 }
 ```
 
-The list is sorted NEWEST-first, so new applicants appear at the *top* and a
-saved cursor goes stale immediately. Cursors are therefore never persisted
-across runs. Each run walks from the top, skipping IDs already in `seenIds`.
+`seenUserIds` is the seen set, and that is its name everywhere: the stored field,
+the reader inside `ledger.js`, and the accessor callers use. The one place the
+codebase says something else is `known` on a described record — deliberately
+broader, because it counts everyone the ledger will not re-fetch including people
+it learned about from a CSV import or an orphan adoption, while `totalDownloaded`
+counts only files this extension actually fetched. After importing 400 people,
+`downloaded` is still 0 and only `known` shows the import did anything.
+
+`folder` is remembered so a later re-download lands beside the originals rather
+than in whatever default the Library would have guessed.
+
+The applicant list is sorted NEWEST-first, so new applicants appear at the *top*
+and a saved cursor goes stale immediately. Cursors are therefore never persisted
+across runs. Each run walks from the top, skipping userIds already seen.
 
 **Early stop:** halt after 3 consecutive pages that are entirely already-seen.
 This gives full-walk correctness under reordering for the cost of ~3 requests
-when nothing has changed. A **Force full walk** checkbox disables it for the
-case where applicants were inserted mid-list.
+when nothing has changed. A per-role **Re-read pages I have already downloaded**
+checkbox disables it for the case where applicants were inserted mid-list.
 
-Downloading 100 and returning at 300 reads roughly 20 pages and fetches 200 files.
+"Entirely already-seen" is judged only over records that *have* a userId. Wellfound
+conceals candidates until the recruiter unlocks them, so a queue can genuinely
+open with a full page of masked applicants; reading that as "fully seen" would
+have stopped a run before it reached anybody real.
 
-An ID is added to `seenIds` only after its file is written. A failed download is
-retried on the next run.
+A userId is added to `seenUserIds` only after its file is written. A failed
+download is retried on the next run.
 
-`seenIds` is capped at 5000 entries per job with oldest-first eviction, a
+`seenUserIds` is capped at 5000 entries per job with oldest-first eviction, a
 practical bound on `chrome.storage.local`'s 10 MB quota.
 
 ### 2. Reconciliation against Chrome's download history
@@ -288,16 +365,21 @@ The ledger records what the extension *believes* it downloaded. Chrome's downloa
 history records what actually landed on disk. Before each run, and on opening the
 Library screen, the two are reconciled.
 
-`chrome.downloads.search({ filenameRegex: '-\\d+-{jobId}\\.' })` returns every
-file this extension wrote for that job. Filenames embed `userId` and `jobId`
-precisely so this lookup is exact. Each `DownloadItem` carries `state` and
-`exists`, so three drifts become visible:
+`chrome.downloads.search({ filenameRegex })` — the regex built by `filename.js`
+for that job — returns every file this extension wrote for it. Filenames embed
+`userId` and `jobId` precisely so this lookup is exact. Each `DownloadItem`
+carries `state` and `exists`, so three drifts become visible:
 
 | Drift | Meaning | Action |
 |---|---|---|
-| In ledger, `exists: false` | file deleted or moved off disk | offer to re-download |
+| In ledger, `exists: false` or interrupted | file deleted, moved, or never finished | offer to re-download |
 | In ledger, no download record | history cleared, or never really wrote | trust the ledger, flag as unverifiable |
 | Download record, not in ledger | extension storage was cleared | adopt into the ledger |
+
+The judgement is made per person, not per download record: Chrome keeps a
+separate entry for every attempt, so one candidate can have both a completed
+download and an interrupted retry, and any completed attempt counts. A download
+still in flight is neither present nor missing and is left for the next pass.
 
 This turns "the extension thinks it has this" into "the file is on your disk",
 which is the claim you actually care about. No extra permission is needed —
@@ -309,9 +391,17 @@ Library screen offers the actions.
 ### 3. CSV import
 
 The Library screen accepts a previously exported CSV, reads its User ID column,
-and adopts those IDs into the job's ledger. This covers the cases the first two
-sources cannot: a new machine, a fresh Chrome profile, or hand-correcting the
+and adopts those userIds into the job's ledger. This covers the cases the first
+two sources cannot: a new machine, a fresh Chrome profile, or hand-correcting the
 ledger in a spreadsheet.
+
+**Only rows whose Resume cell says the file actually landed** are adopted —
+`downloaded` and `already downloaded`, nothing else. A CSV from a run that hit
+its limit carries hundreds of "not fetched: the run stopped first" rows, and
+adopting those would mark people seen who were never fetched, permanently, since
+nothing revisits the ledger afterwards. Older CSVs written before the Resume
+column existed fall back to a non-empty Resume Filename cell; a CSV with neither
+column adopts nobody rather than everybody.
 
 Deliberately rejected: a `submittedAt` **watermark** that stops paging at the
 last-seen timestamp. It is by far the cheapest option and reduces a re-run to two
@@ -322,7 +412,8 @@ not have.
 
 ## CSV
 
-Written to the same subfolder as `applicants-{jobId}-{YYYY-MM-DD}.csv`.
+Written to the same subfolder as `applicants-{jobId}-{YYYY-MM-DD}.csv`, dated on
+the user's own clock rather than UTC's.
 
 The CSV is assembled in the side panel (a page context, so `Blob` and
 `URL.createObjectURL` are available — MV3 service workers have neither) and
@@ -330,12 +421,24 @@ handed to `chrome.downloads.download`. It is written once at the end of each
 job's run, plus on abort, so an interrupted run still yields a CSV of whatever
 completed.
 
-Columns: Name, User ID, Job ID, Job Title, Location, Years Experience, LinkedIn,
-GitHub, Website, Wellfound URL, US Authorized, Resume Link, Resume Filename.
+Fifteen columns, in order:
 
-User ID, Job ID and Resume Filename are included beyond the requested set because
-filenames are `Name-userId-jobId`; without them a row cannot be mapped back to
-its file.
+Name, User ID, Job ID, Job Title, Location, Years Experience, LinkedIn, GitHub,
+Website, Wellfound URL, US Authorized, Applied At, Resume Link, Resume Filename,
+Resume.
+
+- **User ID, Job ID and Resume Filename** are there because filenames are
+  `Name-userId-jobId`; without them a row cannot be mapped back to its file.
+- **Resume** is the status of that row — `downloaded`, `already downloaded`,
+  `no resume on file`, `not identifiable`, `locked on Wellfound`, `preview`,
+  `not fetched: the run stopped first`, or `failed: {reason}`. It exists because
+  without it "fetched on an earlier run" and "never fetched" are the same empty
+  Resume Filename cell, and it is the column the import-safety rule above reads.
+- **Applied At** is rendered `YYYY-MM-DD`. Wellfound sends Unix seconds, which
+  are meaningless in a spreadsheet, and a locale string is neither sortable nor
+  unambiguous.
+- `headline` is deliberately absent: Wellfound returned null for it on every
+  applicant sampled, and a column empty in every row is noise.
 
 RFC 4180 quoting: fields containing comma, quote or newline are wrapped in double
 quotes with internal quotes doubled. A UTF-8 BOM is prepended so Excel on Windows
@@ -398,44 +501,70 @@ Fonts at runtime, so nothing is loaded from the network.
 Scale: 11 / 12 / 13 / 15 / 22 / 32. Body 13 px at 1.5 line-height. Labels 11 px
 uppercase with wide tracking, in `muted`.
 
-### Layout
+### Screens
 
-One column, no top tabs. A 400 px column fragmented by tabs reads as a dashboard;
-this is a single task. Library pushes in as a second view with a back affordance.
+Four, not two. One column, no top tabs: a 400 px column fragmented by tabs reads
+as a dashboard, and this is a single task.
+
+- **Home** — the roles, their per-role settings, the destination folder, an
+  Advanced disclosure, and the start button.
+- **Running** — the breath lane, the progress bar, the running breakdown and a
+  stop button.
+- **Post-run** — the account the run gives of itself, with the trace available
+  to download. It is a separate screen because Home answers "what do you want to
+  do now" and a summary answers "what happened last time", and one screen cannot
+  honestly do both.
+- **Library** — per-job state and maintenance. It pushes in as a second view
+  with a back affordance rather than as a tab.
+
+### Layout
 
 ```
 ┌──────────────────────────────┐
 │ Wellfound            Library │
 ├──────────────────────────────┤
-│ ▌Platform Engineer         │  ← sand left rule + surface-hi = selected
-│  281 · 100 new               │
+│ ☑ Platform Engineer        ⌄ │  ← sand left rule + surface-hi = selected
+│   281 applicants · 100 new   │
+│   ┌ GET ────────────────────┐│
+│   │ ◉ all 100 new           ││
+│   │ ○ first [ 25 ]          ││
+│   │ ☐ Re-read pages I have  ││
+│   │   already downloaded    ││
+│   └─────────────────────────┘│
 │                              │
-│  Backend Engineer         │
-│  114 · all downloaded        │
-│                              │
-│  Data Scientist               │
-│  155 · 155 new               │
+│ ☐ Backend Engineer         ⌄ │
+│   114 applicants · all       │
+│   downloaded                 │
 ├──────────────────────────────┤
-│ FOLDER    wellfound-resumes  │
-│ PACE      ●───────  natural  │
-│ STOP AT   250                │
+│ SAVE TO   wellfound-resumes  │
+│ ▸ Advanced                   │
 ├──────────────────────────────┤
-│      Download 255 new        │  ← sand fill, ink text
+│     Download 100 resumes     │  ← sand fill, ink text
 └──────────────────────────────┘
 
 running ───────────────────────
 │ ││ │   ││ │ ▏                │  ← breath lane, live
 │                              │
-│ 47 / 255                     │  ← mono, tabular
-│ Jane Doe                     │
-│ resting · 22s                │
+│ 47 of ~255 applicants        │  ← mono, tabular
+│ ███████░░░░░░░░░░░░░░░░░░░░░ │
+│ Platform Engineer · job 1of 2│
+│ 44 downloaded · 3 skipped    │
+│ resting 22s · pacing so this │
+│ looks like a person          │
+└──────────────────────────────┘
 ```
 
-The **Library** screen lists each known job with: total applicants seen,
-downloaded, new since last run, files missing from disk, and last run date.
-Actions per job: **Download new**, **Re-download missing**, **Import CSV**,
-**Export ledger**, **Forget this job** (confirmed, and visually separated from
-the rest).
+**Advanced** holds exactly three things: **Preview only** (write the CSV,
+download nothing), **Fetch 20 at a time instead of 10**, and a verbose console
+toggle. There is no per-run item cap and no pace control; the number of people to
+take is a per-role choice on the row itself.
+
+The **Library** screen lists each known job with: downloaded, known, last run
+date, and the three reconciliation drifts. Actions per job, and only these:
+**Re-download missing**, **Adopt N found files** (shown only when reconciliation
+found orphans), **Import CSV**, and **Forget this job** (confirmed, and visually
+separated from the rest). There is no ledger export — the CSV *is* the portable
+form, and the import path reads it back.
 
 ### Motion
 
@@ -444,78 +573,133 @@ entries stagger 40 ms on first paint. Pressable elements take `transform:
 scale(0.97)` on `:active`. Only `transform` and `opacity` animate.
 
 Under `prefers-reduced-motion` the breath lane stops moving and reports the same
-state as text ("resting · 22s"). Reduced, not removed — the information survives.
+state as text ("resting 22s · pacing so this looks like a person"). Reduced, not
+removed — the information survives.
 
 ### Copy
 
-Plain and specific. Buttons name what happens: **Download 255 new**, not "Start".
-An action keeps its name through the flow — **Download new** produces "Downloaded
-255". Errors state cause and recovery: "Wellfound rate-limited the request. The
-run stopped at 47 of 255 and nothing was lost — try again in a few minutes."
-Empty state is an invitation: "No jobs yet. Open a job's applicant list to add
-it."
+Plain and specific. Buttons name what happens: **Download 100 resumes**, not
+"Start"; where the count cannot be known, no number is shown at all rather than a
+guess. A run that has fetched everyone offers **Check for new applicants**.
+
+One word per concept, all the way to the CSV. The mode that writes the CSV and
+downloads nothing is **preview** everywhere a reader can see it — the checkbox,
+the running breakdown, the summary and the Resume column — while the code calls
+the flag `dryRun`. The seen set is `seenUserIds`. The GraphQL page size is
+`pageSize` and the number of candidates to take from a role is `limit`; they used
+to share the name `first`, which is why the constant that means "25 candidates"
+was once called `DEFAULT_FIRST`.
+
+Errors state cause and recovery rather than naming a mechanism: "Open your hiring
+pages on Wellfound (wellfound.com/recruit) to see your jobs", not "no matching
+tab". The pause is the moment a user decides the panel has hung, so it is the one
+line that explains itself rather than naming itself.
 
 ## Rate limiting and detection avoidance
 
 - **Strictly serial.** Never more than one in-flight request, ever.
 - **Jittered sleeps** drawn from a log-normal distribution, not a fixed value:
-  2.5–7 s between page queries, 1.5–4 s between resume downloads.
+  2.5–7 s between page queries, 1.5–4 s between resume downloads. Overshooting
+  draws are resampled rather than clamped — clamping piles ~12% of draws onto the
+  exact upper bound, and a spike at one value is the most fingerprintable shape
+  there is.
 - **Reading breaks:** a 15–40 s pause every 8–12 candidates.
 - **Default page size 10**, matching what the UI actually sends. The 20 ceiling
   is exposed as an opt-in "faster" toggle, with the panel stating that 20 is a
   value the real UI never sends.
-- **Abort, do not retry**, on any GraphQL error, 403, 429, or Cloudflare
-  challenge response. The panel reports what happened and the run is resumable.
-- **Abort if the user navigates the working tab away** or closes the panel.
-- **Per-run item cap**, user-settable, defaulting to 250.
+- **Stop a role after 5 consecutive download failures.** If Wellfound starts
+  refusing signed URLs, continuing means issuing hundreds of failing requests at
+  human pacing — the most suspicious pattern this extension could produce — and
+  then reporting success. A GraphQL error on a page request ends the run outright.
+- **Per-role limit, not a per-run cap.** Each selected role is either "all new"
+  (the default, and unbounded) or "first N", where N defaults to 25 once the user
+  picks it. There is no global cap, and no run-wide default of 250: an earlier
+  draft of this document described one that was never built.
 
 At default pacing a 281-applicant job takes roughly 12 minutes. That is the point.
+
+**Not built:** aborting when the user navigates the working tab away. There is no
+`tabs.onUpdated`, `tabs.onRemoved` or `visibilitychange` listener anywhere in the
+source. A run does stop when the tab leaves the applicant list, but only because
+the next message to the content script fails and the run reports that failure —
+which is a consequence, not a designed abort. Closing the panel does end the run,
+because the loop lives in the panel document.
 
 ## Error handling
 
 | Failure | Behavior |
 |---|---|
-| Apollo client not found | Panel says the page is not loaded or the app changed; run refuses to start. |
-| `RecruitJobListingApplicants` query not registered | Wait up to 15 s, then fail with that message. |
-| Candidate has no `resumeUrl` | Skip the file, still emit the CSV row, count as seen, report in the summary. |
-| Download interrupted or fails | `chrome.downloads` reports `state: 'interrupted'`; do **not** mark seen, log for the next run. |
-| User cancels a download in Chrome's UI | Treated as a failure, same handling. |
-| GraphQL error / rate limit | Abort the whole run, preserve state. |
-| Extension reloaded mid-run | State is already persisted per page; restarting resumes from the seen set. |
+| No Wellfound tab open | Panel says "Open Wellfound to get started"; the run refuses to start. |
+| A Wellfound tab, but not in the recruiter area | Panel names the recruiter URL; the run refuses to start. |
+| Apollo client not found | The content script throws "Wellfound app not loaded on this page"; the panel reports it. |
+| `RecruitJobListingApplicants` query not registered | Poll every 500 ms for up to 15 s, then fail with that message. |
+| The live query is serving a different job | Treated as not ready, and polled again. A bare "ready" would let the run fetch against a document seconds from being discarded. |
+| Candidate has no `userId` | Refuse the download — the file could never be reconciled or repaired — still emit the CSV row, mark it `not identifiable`, and report it. |
+| Candidate is masked | Same, but marked `locked on Wellfound`, because the recruiter can unlock them and run again. |
+| Candidate has no `resumeUrl` | Skip the file, emit the CSV row marked `no resume on file`, count as seen, report in the summary. |
+| Download interrupted or fails | Record `failed: {reason}` in the CSV row, do **not** mark seen, count towards the consecutive-failure limit. |
+| 5 downloads fail in a row | Stop that role, keep its CSV, and continue to the next role. Deliberately not a fatal run error. |
+| GraphQL error / rate limit | End the run, preserve everything already written. |
+| A render throws mid-run | Logged to the console and swallowed. A broken UI must never abort a run that is fetching files correctly. |
+| Panel closed or extension reloaded mid-run | The run ends with it. A marker in `chrome.storage.local` lets the next panel open say the last run was interrupted; the ledger already holds everyone fetched before the interruption, so the next run resumes from there. |
 
 ## Testing
 
-Pure functions get real unit tests under `vitest`: CSV field escaping, filename
-sanitizing (including Windows reserved characters and trailing dots), the jitter
-sampler's bounds, the dedup diff, and the early-stop rule.
+`npm test` runs the whole suite under `vitest`; it is 480 tests and green.
 
-The Apollo and download layers are verified by hand against the live account
-— there is no honest way to fake a signature-gated API. Two safety valves make
-manual verification cheap:
+Everything pure gets real unit tests: CSV field escaping and the import-safety
+filter, filename sanitizing and its round trip through the parser, the jitter
+sampler's bounds and distribution, the dedup diff, the early-stop rule, the
+ledger's arithmetic against a plain-object storage, reconciliation, and the trace
+scrubber. The panel's views are tested through a fake DOM, and the run controller
+through a fake `chrome` and a fake page.
 
-- **Dry run**: walks pages and produces the CSV, downloads nothing.
-- **Limit to N**: stop after N candidates.
+`collector.js` is tested by evaluating the file's own text with the
+`__WFX_COLLECTOR__` container pre-defined — not a copy of it, and not a rewrite —
+because MV3 will not run a module in the MAIN world and `export` is not available
+there.
+
+**The fixture rule.** `tests/helpers/captured-shape.js` is the one fixture built
+from a live capture, and it must be carried across every seam by at least one
+test. It once flattened `recruitCandidate.candidate` away — the level
+`normalize.js` actually reads — and 480 tests stayed green, because every test
+met it at one seam and stopped. `tests/captured-shape-e2e.test.js` now walks it
+from `capturedResponse()` through `unwrapPage`, `normalizeNode` and `toCsv`, and
+asserts a real userId and a real name in the CSV a recruiter opens. A fixture that
+claims to be the live shape and is never fed to the code that reads it proves
+nothing.
+
+The Apollo and download layers are also verified by hand against a live account —
+there is no honest way to fake a signature-gated API. Two safety valves make
+manual verification cheap: **Preview only** walks pages and produces the CSV while
+downloading nothing, and a per-role **first N** stops after N candidates.
 
 Manual verification checklist:
 
-1. Dry run on Sales Engineer (15 applicants) — CSV row count matches the sidebar.
+1. Preview a small role — CSV row count matches the sidebar.
 2. Real run limited to 3 — files land in `Downloads/<subfolder>/`, named
    `Name-userId-jobId.pdf`, and open as valid documents.
 3. Immediate re-run — early stop fires, nothing re-downloads.
 4. Delete one downloaded file, open Library — it reports one file missing and
    re-downloads only that one.
-5. Clear extension storage, open Library — reconciliation adopts the existing
+5. Clear extension storage, open Library — it offers to adopt the existing
    downloads instead of re-fetching everything.
-6. Full run on Solutions Engineer (33) — complete, no rate limiting.
+6. A full run on a role of ~30 — completes, no rate limiting.
 7. Panel at 320 px and 500 px width; `prefers-reduced-motion` enabled; keyboard-
    only traversal with visible focus.
 
 ## Permissions
 
 ```
-"permissions":      ["storage", "downloads", "sidePanel", "tabs"]
+"permissions":      ["storage", "downloads", "sidePanel"]
 "host_permissions": ["https://wellfound.com/*"]
 ```
+
+Three API permissions and one host. **`tabs` is not requested.** The host
+permission on `https://wellfound.com/*` is what lets `chrome.tabs.query` match
+and read the Wellfound tab this extension works with; without `tabs`, the title
+and URL of every other tab stay invisible to it. README.md states the same thing,
+and the two must not drift apart again.
 
 No `<all_urls>`. No permission for the S3 host is needed — `chrome.downloads`
 does not perform an extension-origin fetch, so the redirect is never subject to
@@ -531,6 +715,11 @@ deliberately not requested.
   the live query instead of hardcoding them absorbs variable changes; a renamed
   operation breaks the extension and surfaces as a clear error, not silent
   corruption. Accepted.
+- **Wellfound changes the response nesting.** This is the failure that has
+  actually happened once, in a fixture. `normalizeNode` reading a level that has
+  moved returns null for every field, and the run then downloads nothing, marks
+  everyone "not identifiable", writes a CSV of empty rows and reports success.
+  The end-to-end fixture test exists to make that loud.
 - **The signature scheme tightens** (e.g. body-bound signatures). Would not break
   this design, since requests go through the app's own client.
 - **Terms of service.** This automates actions the account is already entitled to
