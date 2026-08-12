@@ -45,6 +45,10 @@ export function createFakeChrome(options = {}) {
   const items = [];
   const onChanged = listeners();
   const onDeterminingFilename = listeners();
+  const onUpdated = listeners();
+  // Tabs whose reload has been requested and whose new document has not
+  // arrived yet.
+  const reloading = new Set();
   const calls = { downloads: [], updates: [], sendMessage: [], reloads: [] };
   let nextId = 1;
 
@@ -80,16 +84,34 @@ export function createFakeChrome(options = {}) {
         if (tab) Object.assign(tab, props);
         return { ...tab };
       },
-      // Chrome's own wording for a tab with no listener, which is what the panel
-      // has to recognise. A page can be added back after a reload, which is the
-      // remedy the panel offers for exactly this.
+      onUpdated,
+      // Chrome resolves this when the reload has been REQUESTED. At that
+      // instant the tab still holds the OLD document, still says `complete`,
+      // and still answers messages - and only later does it flip to `loading`
+      // and then to `complete` on the new one. A fake that flipped the status
+      // synchronously would agree with any caller that assumed the reload had
+      // already happened, which is the window a real reload lands in.
+      //
+      // `reloading` is the test-side truth about that window: true from the
+      // request until the new document is complete. Anything the extension says
+      // to the page during it is being said to a document on its way out.
       async reload(tabId) {
         calls.reloads.push(tabId);
         const tab = tabs.find((t) => t.id === tabId);
         if (!tab) throw new Error(`No tab with id ${tabId}`);
+        reloading.add(tabId);
+        setTimeout(() => {
+          tab.status = 'loading';
+          onUpdated.emit(tabId, { status: 'loading' }, { ...tab });
+          setTimeout(() => {
+            tab.status = 'complete';
+            reloading.delete(tabId);
+            onUpdated.emit(tabId, { status: 'complete' }, { ...tab });
+          }, 0);
+        }, 0);
       },
       async sendMessage(tabId, message) {
-        calls.sendMessage.push({ tabId, message });
+        calls.sendMessage.push({ tabId, message, reloading: reloading.has(tabId) });
         const page = pages[tabId];
         // Chrome's sentence in full. The half of it that names the cause is the
         // half the panel matches on, so a shortened stand-in here would let a

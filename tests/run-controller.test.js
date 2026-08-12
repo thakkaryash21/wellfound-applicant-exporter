@@ -1584,6 +1584,24 @@ describe('the accept pass', () => {
         expect(entries.slice(reloaded).includes('focus_ready')).toBe(true);
       });
 
+      // chrome.tabs.reload resolves when the reload has been REQUESTED. Until
+      // Chrome flips the tab's status the pre-reload document is still there
+      // and still answering - including the readiness probe, correctly, for the
+      // same jobId. So the run could conclude the page was ready before the
+      // navigation had happened, and the navigation could then commit in the
+      // middle of the next accept: the composer's document destroyed with a
+      // real message in it and nothing left to say whether it went out.
+      //
+      // The fake models that window rather than flipping the status the moment
+      // reload() is called, and this asserts nothing is said to the page inside
+      // it.
+      it('says nothing to the page until the new document is the one answering', async () => {
+        await retroactiveRun(Infinity);
+        const duringReload = fake.calls.sendMessage.filter((c) => c.reloading);
+        expect(fake.calls.reloads.length).toBeGreaterThan(0);
+        expect(duringReload).toEqual([]);
+      });
+
       // The durable record, against the run that deliberately destroys its own
       // page several times while making it.
       it('messages everybody exactly once across the reloads, and records each one', async () => {
@@ -1708,7 +1726,9 @@ describe('the accept pass', () => {
     await acceptRun(controller);
 
     const done = events.find((e) => e.type === 'done');
-    expect(done).toMatchObject({ accepted: 0, acceptFailed: 1, stoppedBecause: 'finished' });
+    // The run stops on it, not just the role: a message may have gone out and
+    // nobody can vouch for it.
+    expect(done).toMatchObject({ accepted: 0, acceptFailed: 1, stoppedBecause: 'unclear' });
     // The run itself is unharmed: the resumes are on disk, the ledger has them,
     // and the file that is now the only record of these people was written.
     expect(done.jobs[0].wroteCsv).toBe(true);
@@ -1716,6 +1736,76 @@ describe('the accept pass', () => {
     expect(csv).toContain('failed: Could not confirm the accept');
     expect(csv).toContain('not attempted: the run stopped first');
     expect(trace_hasAcceptStop(controller)).toBe(true);
+  });
+
+  // `unclear` is the strongest signal this system has: a message may have gone
+  // out and nobody can vouch for it, on a page that is degraded almost by
+  // definition - that is how a send comes to be unconfirmed in the first place.
+  // The run used to spend it on one role and then navigate the same tab, in the
+  // same session, and start sending irreversible messages for the next one. The
+  // operator saw the single alert after those had gone.
+  describe('an accept pass that ends unclear', () => {
+    const OTHER = '9100002';
+    const ROLE1 = ['7700001', '7700002'];
+    const ROLE2 = ['7800001', '7800002'];
+
+    async function twoAcceptingRoles() {
+      setup({
+        jobs: [
+          { jobId: JOB, title: 'Platform Engineer', actionableCount: 2 },
+          { jobId: OTHER, title: 'Data Scientist', actionableCount: 2 },
+        ],
+        peopleByJob: {
+          [JOB]: ROLE1.map((id) => person(id)),
+          [OTHER]: ROLE2.map((id) => person(id)),
+        },
+        bucketByJob: { [JOB]: ROLE1, [OTHER]: ROLE2 },
+        // The first role's first accept never confirms.
+        unconfirmed: { userId: ROLE1[0], landed: false },
+      });
+      const controller = await controllerFor();
+      await controller.startRun({
+        jobs: [
+          { jobId: JOB, limit: Infinity },
+          { jobId: OTHER, limit: Infinity },
+        ],
+        folder: 'resumes',
+        pageSize: 10,
+        actions: { download: true, accept: true },
+      });
+      return controller;
+    }
+
+    it('stops the run, not just the role', async () => {
+      await twoAcceptingRoles();
+      const done = events.find((e) => e.type === 'done');
+      expect(done.stoppedBecause).toBe('unclear');
+    });
+
+    it('sends nothing at all for the roles after it', async () => {
+      await twoAcceptingRoles();
+      const sentFor = fake.calls.sendMessage
+        .filter((c) => c.message.type === CX.ACCEPT_CANDIDATE)
+        .map((c) => String(c.message.payload.expectedUserId));
+      for (const id of ROLE2) expect(sentFor).not.toContain(id);
+      // And it never even opened that role's reviewer.
+      const opened = fake.calls.sendMessage.filter(
+        (c) => c.message.type === CX.OPEN_REVIEWER && c.tabId === TAB,
+      );
+      expect(opened.length).toBeGreaterThan(0);
+      expect(Object.keys(fake.store[`job:${OTHER}`]?.accepted ?? {})).toEqual([]);
+    });
+
+    it('says which role was never started, and keeps the first role s file', async () => {
+      const controller = await twoAcceptingRoles();
+      const done = events.find((e) => e.type === 'done');
+      expect(done.notWalked).toEqual(['Data Scientist']);
+      expect(done.jobs[0].wroteCsv).toBe(true);
+      // The alert the operator has to act on is still the accept pass's own.
+      expect(summarize(done, controller.trace.entries()).alert).toContain(
+        'may or may not have gone out',
+      );
+    });
   });
 });
 

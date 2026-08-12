@@ -40,6 +40,56 @@ const REVIEW_BUCKET = 'NEEDS_REVIEW';
 const QUEUE_CHECK_PAGE_SIZE = 10;
 const QUEUE_CHECK_PAGE_CAP = 40;
 
+// How long a reload is given to commit before the page is called dead. It is a
+// deadline, not a pause: nothing waits on it when the navigation arrives. The
+// figure is deliberately far beyond the worst load measured on the degraded
+// 111-applicant page (35 s), because the cost of being wrong here is a stopped
+// run, and the accept pass has already written everything it owes to the ledger
+// before a reload is ever asked for.
+export const RELOAD_TIMEOUT_MS = 60000;
+export const RELOAD_NOT_OBSERVED = 'The Wellfound page did not reload';
+
+// Reload the tab and do not come back until the NEW document is the one in it.
+//
+// `chrome.tabs.reload` resolves when the reload has been REQUESTED, not when
+// the new document commits. Until Chrome flips the tab's status the PRE-reload
+// document is still live and still answering - including the readiness probe,
+// which it answers correctly, for the same jobId. So the run used to conclude
+// the page was ready before the navigation had happened at all, and the
+// navigation could then commit in the middle of the next accept: the composer's
+// document destroyed with a real message in it and nothing left to say whether
+// it went out. The accept pass's own interlock cannot see this; it guards the
+// moment the pass ASKS for a reload, not the moment the browser obeys.
+//
+// So the transition is observed rather than assumed, and observed in both
+// halves: `loading` says this navigation has begun, `complete` says the
+// document answering now is the one it brought. No sleep is involved - a sleep
+// would be the same assumption with a number on it.
+export function reloadTab(tabId, { timeoutMs = RELOAD_TIMEOUT_MS } = {}) {
+  return new Promise((resolve, reject) => {
+    let sawLoading = false;
+    let timer = null;
+    const done = (error) => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      if (timer !== null) clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const listener = (id, changeInfo) => {
+      if (id !== tabId) return;
+      if (changeInfo.status === 'loading') sawLoading = true;
+      // `complete` on its own is the old document settling. Only a complete
+      // that follows this navigation's start is evidence of a new one.
+      else if (changeInfo.status === 'complete' && sawLoading) done();
+    };
+    chrome.tabs.onUpdated.addListener(listener);
+    timer = setTimeout(() => done(new Error(RELOAD_NOT_OBSERVED)), timeoutMs);
+    // Asked for only once the listener is in place: on a fast page the
+    // transition can arrive before this call's own promise resolves.
+    Promise.resolve(chrome.tabs.reload(tabId)).catch(done);
+  });
+}
+
 // `sleep` is a seam, not a setting: the panel never passes one, so the shipped
 // extension always paces itself. A test supplies an instant one so that walking
 // twenty candidates does not take a real minute - and then asserts on the delays
@@ -619,14 +669,16 @@ export function createController({
                 // the whole of HOW, and it is deliberately two lines of
                 // existing machinery rather than a mechanism of its own.
                 // `chrome.tabs.reload` needs no permission this extension does
-                // not already hold, and focusJob is the readiness poll every
-                // navigation in this extension goes through - after a reload
-                // the URL has not changed, so it skips the navigation and does
-                // exactly the part that matters: wait until the page can
-                // answer for this job again.
+                // not already hold. It is wrapped because it resolves on the
+                // REQUEST, and focusJob alone cannot tell the two documents
+                // apart - the pre-reload one answers for the same jobId
+                // perfectly well. reloadTab watches the navigation commit;
+                // focusJob then does what it has always done, which is wait
+                // until the page can answer for this job again.
                 reloadPage: async () => {
                   trace.record('accept_reload_start', { jobId });
-                  await chrome.tabs.reload(tab.id);
+                  await reloadTab(tab.id);
+                  trace.record('accept_reload_commit', { jobId });
                   await tabs.focusJob(tab.id, jobId);
                 },
                 sleep,
@@ -683,6 +735,28 @@ export function createController({
           // ledger and CSV writes above have preserved this job's partial work.
           if (result.stoppedBecause === 'failing') {
             stoppedBecause = 'failing';
+            break;
+          }
+
+          // The two accept outcomes that end the RUN, not just the role.
+          //
+          // `unclear` means a message may have gone out and nobody can vouch
+          // for it, and the page is degraded at that point almost by
+          // definition - that is how a send comes to be unconfirmed. Carrying
+          // on navigates the same tab in the same session and starts sending
+          // irreversible messages on it. It is the strongest signal this system
+          // has, and it was being spent on one role.
+          //
+          // `unrecorded` means a message demonstrably went out and the ledger
+          // could not remember it. The ledger is the only thing that stops the
+          // next run messaging somebody twice, so a run that keeps accepting
+          // after it has failed is a run manufacturing more of exactly that.
+          //
+          // Same place as the five-failure stop, and for the same reason: after
+          // this job's ledger and CSV writes, so its partial work survives.
+          const acceptStop = stop.acceptStoppedBecause;
+          if (acceptStop === 'unclear' || acceptStop === 'unrecorded') {
+            stoppedBecause = acceptStop;
             break;
           }
         }
