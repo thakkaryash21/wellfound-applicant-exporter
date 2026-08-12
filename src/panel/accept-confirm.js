@@ -37,6 +37,15 @@ export const CONFIRM_IDS = {
 // - Downloading the first N stops the walk once N new files have landed, so the
 //   people it reaches are bounded rather than counted. `bound` says the number
 //   is a ceiling and the screen says "up to".
+//
+// The role's limit caps the last step in every mode, because that is what it
+// means to the pass that does the messaging: at most N people are messaged from
+// this role. This screen is where that number has to be visible - an operator
+// who approves "3" must not get 115 - so the cap is applied to the figure
+// shown, not to the pool it is drawn from. Refusals are counted before it, and
+// stay whole: someone refused for want of a resume was never going to be
+// messaged, so they do not spend the number and the screen must not imply they
+// did.
 export function acceptRow(job, setting, { download = true } = {}) {
   const inQueue = job.actionableCount ?? null;
   const already = job.accepted ?? 0;
@@ -48,22 +57,27 @@ export function acceptRow(job, setting, { download = true } = {}) {
   // difference twice on the second run over a role.
   const haveResume = Math.max(0, (job.known ?? 0) - already);
   const base = { jobId: job.jobId, title: job.title, alreadyAccepted: already, inQueue };
+  // "Everyone" is genuinely everyone, so it caps nothing at all.
+  const cap = (people) => (setting.mode === 'all' ? people : Math.min(people, setting.limit));
   if (inQueue == null) {
     return { ...base, people: null, bound: false, refused: 0 };
   }
   if (!download) {
-    const people = Math.min(haveResume, inQueue);
-    return { ...base, people, bound: false, refused: inQueue - people };
+    // Eligible first, refusals from that, and only then the cap. Capping first
+    // would report a refusal for everyone the limit held back, and they were
+    // not refused - the run simply stopped once it had messaged its number.
+    const eligible = Math.min(haveResume, inQueue);
+    return { ...base, people: cap(eligible), bound: false, refused: inQueue - eligible };
   }
   if (setting.mode === 'all') {
     return { ...base, people: inQueue, bound: false, refused: 0 };
   }
-  return {
-    ...base,
-    people: Math.min(inQueue, setting.limit + haveResume),
-    bound: true,
-    refused: 0,
-  };
+  // The limited download-and-accept run. The pool it could message is the whole
+  // queue - the walk is forced full, so the people already on disk are
+  // acceptable too - and the limit is what actually decides the figure. Still a
+  // ceiling rather than a count: a download that fails takes its candidate out
+  // of reach, and this screen cannot know how many of those there will be.
+  return { ...base, people: cap(inQueue), bound: true, refused: 0 };
 }
 
 export function roleLine(row) {

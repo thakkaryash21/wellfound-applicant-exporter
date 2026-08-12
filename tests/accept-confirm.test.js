@@ -47,12 +47,38 @@ describe('what one role contributes', () => {
     });
   });
 
-  // A limit stops the walk once N new files land, so the people it reaches are
-  // a ceiling rather than a count, and the screen has to say which it is.
-  it('is a ceiling, not a count, when the run is limited', () => {
+  // The limit is what the run will actually message, so it is what the screen
+  // shows. Still a ceiling rather than a count: a download that fails puts its
+  // candidate out of reach and this screen cannot know how many of those there
+  // will be.
+  it('is the limit, and a ceiling rather than a count, when the run is limited', () => {
     expect(acceptRow(job(), setting({ mode: 'limit', limit: 25 }), { download: true })).toMatchObject(
-      { people: 65, bound: true },
+      { people: 25, bound: true },
     );
+  });
+
+  // The whole point of the number, on the screen that has to show it. An
+  // operator who sets 3 and reads "3" must not get 115 messages sent.
+  it('shows the limit, not the queue, on an accept-only run', () => {
+    expect(acceptRow(job(), setting({ mode: 'limit', limit: 3 }), { download: false })).toMatchObject(
+      { people: 3, refused: 76 },
+    );
+  });
+
+  // The limit held 37 of the 40 back, and being held back is not being
+  // refused: they have resumes, the run simply stopped at its number. Counting
+  // them as refusals would tell the operator their files are missing.
+  it('does not report the people the limit held back as refused', () => {
+    const row = acceptRow(job(), setting({ mode: 'limit', limit: 3 }), { download: false });
+    expect(row.refused).toBe(76);
+    expect(row.people + row.refused).toBeLessThan(row.inQueue);
+  });
+
+  // "Everyone" has to stay everyone. A cap that leaked into the unlimited mode
+  // would silently truncate the run the operator asked to be complete.
+  it('caps nothing when the role is set to everyone', () => {
+    expect(acceptRow(job(), setting({ mode: 'all', limit: 3 }), { download: false }).people).toBe(40);
+    expect(acceptRow(job(), setting({ mode: 'all', limit: 3 }), { download: true }).people).toBe(116);
   });
 
   it('never claims more than the queue holds', () => {
@@ -85,7 +111,7 @@ describe('the line each role gets', () => {
 
   it('says "up to" for a bound rather than a count', () => {
     expect(roleLine(acceptRow(job(), setting({ mode: 'limit', limit: 25 }), { download: true }))).toBe(
-      'Platform Engineer: up to 65 people',
+      'Platform Engineer: up to 25 people',
     );
   });
 
@@ -114,7 +140,7 @@ describe('the whole screen', () => {
     expect(headline(model())).toBe('Accept 45 people');
     expect(
       headline(model({ download: true, settingFor: settingFor({ mode: 'limit', limit: 5 }) })),
-    ).toBe('Accept up to 55 people');
+    ).toBe('Accept up to 10 people');
   });
 
   // A role with no count makes the sum a floor, and a screen that presented it
@@ -181,10 +207,14 @@ describe('a role that has been accepted before', () => {
     });
   });
 
-  it('subtracts them from a limited walk for the same reason', () => {
+  // On a role this size the limit is what decides the figure, and the earlier
+  // accepts are far below it. The subtraction still matters where the library
+  // is nearly drained - the row below covers that - but here the operator's
+  // number is smaller than anything the arithmetic could produce.
+  it('shows the limit on a limited walk, whatever the library holds', () => {
     expect(
       acceptRow(second, setting({ mode: 'limit', limit: 25 }), { download: true }).people,
-    ).toBe(297);
+    ).toBe(25);
   });
 
   it('never goes below zero when the library is all accepted', () => {
@@ -237,6 +267,6 @@ describe('a role that has been accepted before', () => {
       settingFor: () => setting({ mode: 'limit', limit: 25 }),
       download: true,
     });
-    expect(derivation(model)[1]).toBe('up to 297 will be messaged');
+    expect(derivation(model)[1]).toBe('up to 25 will be messaged');
   });
 });
