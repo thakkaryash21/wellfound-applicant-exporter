@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { installFakeChrome } from './helpers/fake-chrome.js';
 import { installFakeDom } from './helpers/fake-dom.js';
 import { SUMMARY_KEY, RUNNING_KEY } from '../src/panel/summary-store.js';
-import { RUN_IDS } from '../src/panel/running-view.js';
+import { RUN_IDS, DOT } from '../src/panel/running-view.js';
 import { POST_RUN_IDS } from '../src/panel/post-run-view.js';
 import { HOME_IDS, RECONNECT_LABEL } from '../src/panel/home-view.js';
 import { pageDisconnectedError } from '../src/panel/tab-driver.js';
@@ -520,6 +520,17 @@ describe('accepting', () => {
     return screen;
   }
 
+  // Home, through the confirm screen, to a run with an accept pass under way.
+  async function acceptRunning() {
+    const screen = await homeWithAccept();
+    await byId('start').click();
+    await settle();
+    byId(CONFIRM_IDS.send).click();
+    await settle();
+    emit({ type: 'accept_started', jobId: JOB_A, intended: 12 });
+    return screen;
+  }
+
   it('opens the wording only once accepting is on', async () => {
     const screen = await openPanel({
       stub: stubController({ listJobs: vi.fn(async () => [job(JOB_A)]) }),
@@ -616,6 +627,91 @@ describe('accepting', () => {
     expect(screen.innerHTML).toContain('1 of 12 accepted');
     expect(screen.innerHTML).toContain('1 passed over');
     expect(byId(RUN_IDS.status).textContent).toContain('passed over');
+  });
+
+  // The settle window is up to a minute of an irreversible operation being
+  // investigated. It used to be a minute in which the panel said nothing at
+  // all, which is indistinguishable from a hang.
+  it('shows the settle window looking at the queue, look by look', async () => {
+    await acceptRunning();
+
+    emit({ type: 'accept_unconfirmed', jobId: JOB_A, userId: '70000001', error: 'no confirmation' });
+    expect(byId(RUN_IDS.status).textContent).toContain('checking the review queue');
+    // Nothing is known yet, so nothing here may read as bad news.
+    expect(byId(RUN_IDS.status).textContent).not.toMatch(/fail|error/i);
+
+    emit({ type: 'accept_checked', jobId: JOB_A, userId: '70000001', verdict: 'queued', look: 1 });
+    expect(byId(RUN_IDS.status).textContent).toBe(`check 1${DOT}still in the review queue`);
+
+    // The waits between looks come through as ordinary rests. Inside the settle
+    // window they must not read as pacing.
+    emit({ type: 'resting', jobId: JOB_A, ms: 15000 });
+    expect(byId(RUN_IDS.status).textContent).toContain('check 1');
+    expect(byId(RUN_IDS.status).textContent).toContain('checking again in 15s');
+    expect(byId(RUN_IDS.status).textContent).not.toContain('resting');
+
+    emit({ type: 'accept_checked', jobId: JOB_A, userId: '70000001', verdict: 'gone', look: 2 });
+    expect(byId(RUN_IDS.status).textContent).toBe(`check 2${DOT}gone from the review queue`);
+  });
+
+  it('goes back to plain pacing once the settle window is over', async () => {
+    await acceptRunning();
+    emit({ type: 'accept_checked', jobId: JOB_A, userId: '70000001', verdict: 'gone', look: 2 });
+    emit({ type: 'accept_candidate', jobId: JOB_A, outcome: 'accepted', accepted: 1, intended: 12 });
+    emit({ type: 'resting', jobId: JOB_A, ms: 4000 });
+    expect(byId(RUN_IDS.status).textContent).toContain('resting 4s');
+    expect(byId(RUN_IDS.status).textContent).not.toContain('check');
+  });
+
+  // A reload is what keeps a long pass alive. Unexplained, it is the panel
+  // reloading the operator's Wellfound tab for no stated reason.
+  it('calls a reload maintenance, and lets a slow accept explain the next one', async () => {
+    await acceptRunning();
+
+    emit({ type: 'accept_reload', jobId: JOB_A, accepted: 6, intended: 12 });
+    expect(byId(RUN_IDS.status).textContent).toBe(
+      `reloading the page${DOT}routine, it keeps a long pass working`,
+    );
+
+    // accept_slow has no line of its own: it is the reason the next reload
+    // happens, and it says so there.
+    emit({ type: 'accept_slow', jobId: JOB_A, userId: '70000001', ms: 24000 });
+    emit({ type: 'accept_candidate', jobId: JOB_A, outcome: 'accepted', accepted: 7, intended: 12 });
+    emit({ type: 'accept_reload', jobId: JOB_A, accepted: 7, intended: 12 });
+    expect(byId(RUN_IDS.status).textContent).toBe(`reloading the page${DOT}the last accept was slow`);
+
+    // And the reason is spent, not sticky.
+    emit({ type: 'accept_reload', jobId: JOB_A, accepted: 8, intended: 12 });
+    expect(byId(RUN_IDS.status).textContent).toContain('routine');
+  });
+
+  it('says a reopen is a reopen when the tab was never reloaded', async () => {
+    await acceptRunning();
+    emit({ type: 'accept_reopen', jobId: JOB_A, accepted: 6, intended: 12 });
+    expect(byId(RUN_IDS.status).textContent).toContain('reopening the review queue');
+  });
+
+  // The most serious state this pass has: the message went out and nothing here
+  // remembers it. It goes to its own region so the next status line cannot wipe
+  // it, and it carries the remedy.
+  it('raises an unmissable alert when a sent message could not be recorded', async () => {
+    const screen = await acceptRunning();
+    const told =
+      'The message to 70000001 was sent, and writing it to the ledger failed: quota exceeded. ' +
+      'Before running this role again, check that person in Wellfound.';
+
+    expect(byId(RUN_IDS.alert).hidden).toBe(true);
+    emit({ type: 'accept_unrecorded', jobId: JOB_A, userId: '70000001', error: told });
+
+    const alert = byId(RUN_IDS.alert);
+    expect(alert.hidden).toBe(false);
+    expect(alert.textContent).toBe(told);
+    expect(alert.getAttribute('role')).toBe('alert');
+    expect(screen.innerHTML).toContain('check that person in Wellfound');
+
+    // And it survives the run's own next repaint, which replaces the body.
+    emit({ type: 'candidate', outcome: 'downloaded', name: 'Jane Doe' });
+    expect(byId(RUN_IDS.alert).textContent).toBe(told);
   });
 
   it('says nothing about accepting on a run that does not accept', async () => {

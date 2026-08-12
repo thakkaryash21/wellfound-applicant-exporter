@@ -31,6 +31,10 @@ import {
   pageLine,
   acceptConsideringLine,
   acceptCandidateLine,
+  acceptUnconfirmedLine,
+  acceptCheckedLine,
+  acceptReloadLine,
+  acceptUnrecordedLine,
 } from './running-view.js';
 
 // The mount point, found by init(). Not read at import time: importing this
@@ -68,6 +72,13 @@ const state = {
   // The accept pass, accumulated across every role in the run. Null until a
   // pass starts, so a run that accepts nobody says nothing about accepting.
   accept: null,
+  // The look the settle window is on, while it is settling. Non-null only
+  // between an unconfirmed send and whatever resolves it, which is what lets
+  // the pauses inside that window read as looks rather than as pacing.
+  settle: null,
+  // A slow accept asks for a reload one candidate before the reload happens.
+  // Held here so the reload can say why it is reloading.
+  acceptSlow: false,
   estimate: null,
   // Which role the run is on, and when it started. The time remaining comes from
   // the run's own observed pace - breaks included - not from the pacing
@@ -469,6 +480,8 @@ function currentModel() {
 function renderRunning() {
   state.counts = emptyCounts();
   state.accept = null;
+  state.settle = null;
+  state.acceptSlow = false;
   state.job = null;
   state.runStartedAt = Date.now();
   screen.innerHTML = runningMarkup(currentModel());
@@ -494,19 +507,23 @@ function renderError(message) {
 
 // A bare "resting" written once is indistinguishable from a hung panel, which is
 // exactly what a reduced-motion user saw for minutes at a time.
-function countdown(kind, ms) {
+//
+// `line` builds the text from the seconds left, because a pause inside the
+// settle window has to keep saying which look it is waiting on rather than
+// replacing that with a bare countdown.
+function countdown(ms, line) {
   clearCountdown();
   if (!document.getElementById(RUN_IDS.status)) return;
   let left = Math.max(1, Math.round(ms / 1000));
-  say(pauseLine(kind, left));
+  say(line(left));
   restTimer = setInterval(() => {
     left -= 1;
     if (left <= 0) {
       clearCountdown();
-      say(pauseLine(kind, 0));
+      say(line(0));
       return;
     }
-    say(pauseLine(kind, left));
+    say(line(left));
   }, 1000);
 }
 
@@ -520,6 +537,17 @@ function renderProgress() {
   const body = document.getElementById(RUN_IDS.body);
   if (!body || !state.counts) return;
   body.innerHTML = renderRunBody(currentModel());
+}
+
+// Shown, never hidden again: the run stops on the event that raises it, and the
+// post-run screen replaces the whole screen anyway. Unhidden before the text
+// lands so the region is in the document when its content changes, which is
+// what makes the announcement happen.
+function raiseAlert(text) {
+  const alert = document.getElementById(RUN_IDS.alert);
+  if (!alert) return;
+  alert.hidden = false;
+  alert.textContent = text;
 }
 
 function handleRunEvent(event) {
@@ -536,6 +564,7 @@ function handleRunEvent(event) {
 
   if (event.type === 'candidate') {
     clearCountdown();
+    state.settle = null;
     if (state.counts && event.outcome in state.counts) state.counts[event.outcome] += 1;
     renderProgress();
     say(candidateLine(event.outcome, event.name));
@@ -554,10 +583,42 @@ function handleRunEvent(event) {
   }
   if (event.type === 'accept_considering' && running) {
     clearCountdown();
+    state.settle = null;
     say(acceptConsideringLine(event));
+  }
+  // A send the page could not vouch for, and the looks at the review queue that
+  // follow it. This is up to a minute of an irreversible operation being
+  // investigated, and it used to be a minute of silence.
+  if (event.type === 'accept_unconfirmed' && running) {
+    clearCountdown();
+    state.settle = null;
+    say(acceptUnconfirmedLine());
+  }
+  if (event.type === 'accept_checked' && running) {
+    clearCountdown();
+    state.settle = { verdict: event.verdict, look: event.look };
+    say(acceptCheckedLine(state.settle));
+  }
+  // The reload cadence and the slow accept that can bring it forward. Kept for
+  // the reload to explain itself with, rather than said on its own line one
+  // candidate early where the next outcome would wipe it.
+  if (event.type === 'accept_slow') state.acceptSlow = true;
+  if ((event.type === 'accept_reload' || event.type === 'accept_reopen') && running) {
+    clearCountdown();
+    state.settle = null;
+    say(acceptReloadLine({ reload: event.type === 'accept_reload', slow: state.acceptSlow }));
+    state.acceptSlow = false;
+  }
+  // The message went out and nothing here remembers it. The run stops on this,
+  // so it gets the one region on the screen that is not the activity line.
+  if (event.type === 'accept_unrecorded') {
+    clearCountdown();
+    state.settle = null;
+    raiseAlert(acceptUnrecordedLine(event));
   }
   if (event.type === 'accept_candidate') {
     clearCountdown();
+    state.settle = null;
     if (state.accept) {
       if (event.outcome === 'accepted') state.accept.accepted += 1;
       else if (event.outcome === 'failed') state.accept.failed += 1;
@@ -569,11 +630,17 @@ function handleRunEvent(event) {
   }
 
   if (event.type === 'resting') {
-    countdown('rest', event.ms);
+    // The waits between looks are emitted as ordinary rests. Inside the settle
+    // window they are not pacing, and saying "pacing so this looks like a
+    // person" there would hide the one thing the operator needs to see.
+    const settling = state.settle;
+    countdown(event.ms, (left) =>
+      settling ? acceptCheckedLine({ ...settling, seconds: left }) : pauseLine('rest', left),
+    );
     lane?.rest(event.ms);
   }
   if (event.type === 'break') {
-    countdown('break', event.ms);
+    countdown(event.ms, (left) => pauseLine('break', left));
     lane?.break(event.ms);
   }
   if (event.type === 'job_error' && running) {
