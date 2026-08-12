@@ -643,6 +643,45 @@ because the loop lives in the panel document.
 | A render throws mid-run | Logged to the console and swallowed. A broken UI must never abort a run that is fetching files correctly. |
 | Panel closed or extension reloaded mid-run | The run ends with it. A marker in `chrome.storage.local` lets the next panel open say the last run was interrupted; the ledger already holds everyone fetched before the interruption, so the next run resumes from there. |
 
+## Working out what Wellfound actually sends
+
+Every field shape in the recon section above was observed against a live account,
+not inferred from this code. That distinction is load-bearing, because getting it
+wrong is the most expensive mistake available here and it has already happened
+three times during this project.
+
+**The failure mode.** A probe that fetches and formats in the same step hides its
+own gaps, and the gap then looks exactly like a property of the server:
+
+- A probe printed `resumeUrl` through `new URL(value, location.origin)`, which
+  silently resolved a relative path. The absolute form went into this document
+  and into every fixture. `chrome.downloads` requires an absolute URL, so real
+  downloads would have failed on every candidate, with the whole suite green.
+- `submittedAt` and `currentLocation` were assumed rather than inspected.
+  Fixtures used an ISO string and a bare string; the wire sends Unix seconds and
+  an object. Every end-to-end test drove branches production never takes.
+- A structural capture printed `recruitCandidate: object` because the inspection
+  stopped at depth 2. The fixture built from it omitted the `candidate` level
+  that holds every field, so feeding it through `normalizeNode` returned null for
+  everything — and the tests asserting that fixture passed.
+
+**If you need to re-establish a shape**, capture the raw value first and inspect
+it as a separate step. Print `typeof`, the key list, or `JSON.stringify` of the
+raw object; never a value that has been through a formatter on the way out. State
+how deep the inspection went and treat anything below that as unknown rather than
+as absent.
+
+**Then pin it.** `tests/captured-shape-e2e.test.js` runs a captured response
+through the real pipeline — unwrap, normalize, CSV — and asserts a real user ID
+and name reach the output. Break the nesting in `tests/helpers/captured-shape.js`
+and it fails with `expected [ null, null ]`, which is the exact production
+symptom. That test exists because a fixture cannot be trusted to stay honest on
+its own.
+
+The general rule, which outlives this API: **a test built on the same assumption
+as the code cannot detect that assumption being wrong.** When verification sits
+downstream of a belief, it launders the belief into evidence.
+
 ## Testing
 
 `npm test` runs the whole suite under `vitest`; it is 480 tests and green.
