@@ -78,10 +78,24 @@ export function createFakeChrome(options = {}) {
         if (!tab) throw new Error(`No tab with id ${tabId}`);
         return { ...tab };
       },
+      // Sending a tab to a url is a navigation, and Chrome reports one the same
+      // way whoever asked for it: `loading`, then `complete` on the document
+      // that arrived. A fake that only swapped the url would agree with any
+      // caller that treated `update` resolving as the page being there.
       async update(tabId, props) {
         const tab = tabs.find((t) => t.id === tabId);
         calls.updates.push({ tabId, ...props });
         if (tab) Object.assign(tab, props);
+        // Announced rather than drawn out: a test that needs the window where
+        // the tab is still loading holds it open with setTabStatus, and the
+        // drawn-out version belongs to `reload`, where the extension's
+        // correctness depends on the two documents being told apart.
+        if (tab && props.url) {
+          tab.status = 'loading';
+          onUpdated.emit(tabId, { status: 'loading' }, { ...tab });
+          tab.status = 'complete';
+          onUpdated.emit(tabId, { status: 'complete' }, { ...tab });
+        }
         return { ...tab };
       },
       onUpdated,

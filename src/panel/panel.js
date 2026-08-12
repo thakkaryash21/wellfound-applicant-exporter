@@ -746,12 +746,14 @@ async function load() {
         renderRun();
       },
     });
-    // A count that is still missing after a trip to fetch it is a fact about
-    // this panel, not a blank to be left unexplained.
+    // A count that is still missing after a trip to fetch it is a blank the
+    // user can see, so it is named rather than left unexplained. It says `yet`
+    // because that is all this panel knows: nothing here writes a role off, and
+    // the next load asks again.
     const missing = state.jobs.filter((job) => job.actionableCount == null).length;
     if (hydrationRan && missing > 0) {
       state.hydrationNote =
-        `${missing} ${missing === 1 ? 'role has' : 'roles have'} no applicant count. ` +
+        `${missing} ${missing === 1 ? 'role has' : 'roles have'} no applicant count yet. ` +
         'Open that role\u2019s applicant list on Wellfound to see one.';
     }
   } catch (error) {

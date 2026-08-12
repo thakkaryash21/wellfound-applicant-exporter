@@ -43,23 +43,28 @@ const QUEUE_CHECK_PAGE_CAP = 40;
 // The wait for the counts to land in the page's Apollo cache, in re-reads
 // rather than in seconds. Counted in reads so the pace is the test's to set:
 // at the driver's poll cadence this is about twelve seconds of waiting at the
-// very worst, and about two on a page that answers.
+// very worst, and about two on a page that has already answered.
 export const COUNTS_READS = 24;
 
-// How many identical reads in a row mean the cache has stopped changing.
+// How many identical reads in a row mean the cache has stopped filling.
 //
-// The counts do not arrive together. The job the panel navigates to gets its
-// count from the applicants query, which the new document runs first; the other
-// fifteen roles get theirs from the job list query, which lands afterwards. A
-// wait that stopped on the first count present stopped between the two, which
-// is how a recruiter with sixteen roles saw one count and fifteen blanks.
+// The counts do not arrive together. The role the panel navigates to is counted
+// by the applicants query, which the new document runs first; every other role
+// is counted by the job list query, which lands about three seconds later. So a
+// read taken between the two shows one count and fifteen blanks, and that is
+// exactly what the recruiter saw.
 //
-// So what is waited on is not a count but quiet: the number of listings, and
-// how many of them carry a count, unchanged across four consecutive reads. It
-// is a local cache read costing Wellfound nothing, so the asymmetry is all one
-// way - a second of extra quiet against a screen of roles reading "not loaded
-// yet" - and this is deliberately the more patient side of it.
+// Quiet alone cannot tell those two apart: a document still loading is quiet
+// between its own queries. So quiet is only ever measured on a document the
+// browser has said is loaded, and it is the second half of the wait rather than
+// the whole of it.
 export const SETTLED_READS = 4;
+
+// How long the document itself is given to arrive. Nothing waits on this when
+// the navigation lands, and reaching it is not fatal: the roles are still
+// listed, without whatever counts have not appeared.
+export const LOAD_TIMEOUT_MS = 30000;
+export const LOAD_NOT_OBSERVED = 'The Wellfound page did not finish loading';
 
 // The listings and the counts among them, as one comparable value. Two numbers
 // rather than the jobs themselves: what is being watched is the cache filling
@@ -78,7 +83,8 @@ export function countsSignature(jobs) {
 export const RELOAD_TIMEOUT_MS = 60000;
 export const RELOAD_NOT_OBSERVED = 'The Wellfound page did not reload';
 
-// Reload the tab and do not come back until the NEW document is the one in it.
+// Watching a navigation instead of assuming one, which two callers now need:
+// the accept pass's reload, and the panel's wait for the counts.
 //
 // `chrome.tabs.reload` resolves when the reload has been REQUESTED, not when
 // the new document commits. Until Chrome flips the tab's status the PRE-reload
@@ -94,29 +100,45 @@ export const RELOAD_NOT_OBSERVED = 'The Wellfound page did not reload';
 // halves: `loading` says this navigation has begun, `complete` says the
 // document answering now is the one it brought. No sleep is involved - a sleep
 // would be the same assumption with a number on it.
-export function reloadTab(tabId, { timeoutMs = RELOAD_TIMEOUT_MS } = {}) {
-  return new Promise((resolve, reject) => {
-    let sawLoading = false;
-    let timer = null;
-    const done = (error) => {
+// A navigation in one tab, watched rather than assumed. The listener is in
+// place the moment this returns, so whatever asks the browser to navigate can
+// be called afterwards and no fast page can beat it.
+//
+// `arrived` resolves on the complete that followed this navigation's own
+// `loading`, and rejects at the deadline. `cancel` is for the caller who finds
+// out afterwards that no navigation was needed: it settles the watch quietly
+// rather than leaving a rejection nobody is waiting for.
+export function watchNavigation(tabId, { timeoutMs, notObserved }) {
+  let sawLoading = false;
+  let timer = null;
+  let finish = null;
+  const arrived = new Promise((resolve, reject) => {
+    finish = (error) => {
       chrome.tabs.onUpdated.removeListener(listener);
       if (timer !== null) clearTimeout(timer);
       if (error) reject(error);
       else resolve();
     };
-    const listener = (id, changeInfo) => {
-      if (id !== tabId) return;
-      if (changeInfo.status === 'loading') sawLoading = true;
-      // `complete` on its own is the old document settling. Only a complete
-      // that follows this navigation's start is evidence of a new one.
-      else if (changeInfo.status === 'complete' && sawLoading) done();
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    timer = setTimeout(() => done(new Error(RELOAD_NOT_OBSERVED)), timeoutMs);
-    // Asked for only once the listener is in place: on a fast page the
-    // transition can arrive before this call's own promise resolves.
-    Promise.resolve(chrome.tabs.reload(tabId)).catch(done);
   });
+  const listener = (id, changeInfo) => {
+    if (id !== tabId) return;
+    if (changeInfo.status === 'loading') sawLoading = true;
+    // `complete` on its own is the old document settling. Only a complete
+    // that follows this navigation's start is evidence of a new one.
+    else if (changeInfo.status === 'complete' && sawLoading) finish();
+  };
+  chrome.tabs.onUpdated.addListener(listener);
+  timer = setTimeout(() => finish(new Error(notObserved)), timeoutMs);
+  return { arrived, fail: (error) => finish(error), cancel: () => finish() };
+}
+
+// Reload the tab and do not come back until the NEW document is the one in it.
+export function reloadTab(tabId, { timeoutMs = RELOAD_TIMEOUT_MS } = {}) {
+  const navigation = watchNavigation(tabId, { timeoutMs, notObserved: RELOAD_NOT_OBSERVED });
+  // Asked for only once the listener is in place: on a fast page the
+  // transition can arrive before this call's own promise resolves.
+  Promise.resolve(chrome.tabs.reload(tabId)).catch(navigation.fail);
+  return navigation.arrived;
 }
 
 // `sleep` is a seam, not a setting: the panel never passes one, so the shipped
@@ -144,14 +166,8 @@ export function createController({
   // its own module; the run uses it, it does not use the run.
   const ledgerService = createLedgerService(chrome.storage.local);
   const { reconcileJob } = ledgerService;
-  const tabs = createTabDriver({ trace });
+  const tabs = createTabDriver({ sleep, trace });
   let controller = null;
-  // Roles whose count stayed null after a hydration pass that ran all the way
-  // out. That is evidence about the role - a draft has nobody to count - so it
-  // is worth remembering, and it stops the tab travelling on every load. A pass
-  // that failed or was cut short records nothing, because it established
-  // nothing, and the next load tries it again.
-  const noCountFor = new Set();
 
   // One lock for every activity that drives the working tab. A re-download and a
   // run both navigate it, so letting them overlap would have one loop's next
@@ -449,42 +465,53 @@ export function createController({
       // actionableApplicantsCount only for the one being viewed. One trip to an
       // applicant list fills in the rest, and the counts are the whole point of
       // the list: without them the panel cannot say how many are new.
-      const blank = jobs.find((job) => job.actionableCount == null && !noCountFor.has(job.jobId));
+      // Nothing is remembered between passes about which roles have no count.
+      // It was, and one early read wrote fifteen real roles off for the life of
+      // the panel: the tab was then parked on that applicant list, so the trip
+      // is not made again anyway, and an extra navigation is a far smaller
+      // price than a role the panel has decided to stop asking about.
+      const blank = jobs.find((job) => job.actionableCount == null);
       if (blank && !controller) {
         onHydrating?.();
+        // In place before anything navigates. `focusJob` returns when the
+        // applicants query is REGISTERED, which is the right answer for a fetch
+        // and is mid-load here, so the document's own arrival is watched
+        // separately rather than inferred from it.
+        const navigation = watchNavigation(tab.id, {
+          timeoutMs: LOAD_TIMEOUT_MS,
+          notObserved: LOAD_NOT_OBSERVED,
+        });
         try {
-          await tabs.focusJob(tab.id, blank.jobId);
-          // focusJob proves the page has ASKED for this job's applicants, and
-          // the counts arrive with the answers - plural, from two queries that
-          // land at different times. So what is waited on is the cache going
-          // quiet rather than any one count appearing. Nothing here touches the
-          // network; this is the page's own cache, read again.
+          const { navigated } = await tabs.focusJob(tab.id, blank.jobId);
+          // A tab already on the applicant list is not navigating, so there is
+          // no transition coming and nothing to wait for.
+          if (navigated) await navigation.arrived;
+          else navigation.cancel();
+        } catch {
+          // Either the navigation failed or the document never arrived. The
+          // roles already read are still worth showing, and the counts below
+          // are still worth asking for.
+          navigation.cancel();
+        }
+        try {
+          // Only now, on a document the browser has called loaded: re-read the
+          // page's own cache until it stops filling. Nothing here touches the
+          // network, so waiting costs Wellfound nothing and costs the panel a
+          // second it spends saying what it is doing.
           let signature = null;
           let quiet = 0;
           for (let read = 1; read <= COUNTS_READS; read += 1) {
-            jobs = await tabs.ask(tab.id, { type: CX.LIST_JOBS });
-            const seen = countsSignature(jobs);
-            quiet = seen === signature ? quiet + 1 : 0;
-            signature = seen;
-            if (quiet + 1 >= SETTLED_READS) {
-              // A settled cache is the only place a missing count is a fact
-              // about the role rather than about the moment. Every role still
-              // without one is written down here, so the panel does not send
-              // the tab travelling for them again.
-              for (const job of jobs) {
-                if (job.actionableCount == null) noCountFor.add(job.jobId);
-              }
-              break;
-            }
+            const seen = await tabs.ask(tab.id, { type: CX.LIST_JOBS });
+            jobs = seen;
+            const shape = countsSignature(seen);
+            quiet = shape === signature ? quiet + 1 : 0;
+            signature = shape;
+            if (quiet + 1 >= SETTLED_READS) break;
             await sleep(READY_POLL_MS);
           }
-          // Falling out of that loop is the cache still changing at the bound.
-          // Nothing is remembered: the pass established nothing about any role,
-          // and the counts it does have are still worth showing.
         } catch {
-          // The list is still usable without counts, and a failed navigation is
-          // not worth throwing away the jobs we already have. Nothing is
-          // remembered about the role either: this pass established nothing.
+          // The list is still usable without counts, and a page that stopped
+          // answering is not worth throwing away the jobs we already have.
         }
       }
 

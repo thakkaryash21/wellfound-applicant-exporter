@@ -190,7 +190,10 @@ export function createTabDriver({ sleep = realSleep, now = () => Date.now(), tra
           const seenJobId = ready?.jobId == null ? null : String(ready.jobId);
           if (seenJobId === String(jobId)) {
             trace.record('focus_ready', { jobId, attempts, ms: now() - startedAt });
-            return;
+            // Whether the tab was sent anywhere. A caller watching for the
+            // document to arrive has to know whether one is coming: a tab
+            // already on this job's list produces no navigation to wait for.
+            return { navigated };
           }
           // A stale document answers for the job it is still showing. That is
           // not readiness, it is the race - keep polling.

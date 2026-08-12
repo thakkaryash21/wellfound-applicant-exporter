@@ -657,48 +657,99 @@ describe('listJobs hydration', () => {
   // panel showed one count and fifteen roles reading "not loaded yet" while
   // Wellfound's own sidebar showed them all.
   //
-  // `late` is how many reads after the navigation the second query takes.
-  function countsLandInTwoWaves({ late = 3, roles = 3 } = {}) {
+  // The part that made this hard to see: Chrome reports the tab `complete` for
+  // the document being LEFT, so anything that asks "is this tab loaded" is
+  // answered yes while the new document is still on its way. Only the loading
+  // -> complete pair on the tab says the new one arrived, so this fake sends
+  // that pair on its own schedule rather than with the url change.
+  //
+  // `late` is how many reads after the document arrives the job list query
+  // takes to answer. Zero is the two queries landing together.
+  function slowLoad({ late = 0, roles = 3 } = {}) {
     let navigated = false;
+    let arrived = false;
     let reads = 0;
     const others = Array.from({ length: roles - 1 }, (_, i) => String(9100002 + i));
     setup({
       tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
       jobs: () => {
-        if (navigated) reads += 1;
+        if (arrived) reads += 1;
         return [
-          // The role the panel navigates to. Its count comes from the
-          // applicants query, which the new document runs first, so it is there
-          // on the very next read.
+          // The role the panel navigates to. Counted by the applicants query,
+          // which the new document runs first.
           { jobId: JOB, title: 'Platform Engineer', actionableCount: navigated ? 4 : null },
-          // Every other role. These counts come from the job list query, which
-          // lands afterwards - and this gap is the whole bug.
+          // Every other role, counted by the job list query when it answers.
           ...others.map((jobId, i) => ({
             jobId,
             title: `Data Scientist ${i + 1}`,
-            actionableCount: navigated && reads > late ? 7 : null,
+            actionableCount: arrived && reads > late ? 7 : null,
           })),
         ];
       },
     });
-    const original = fake.chrome.tabs.update;
     fake.chrome.tabs.update = async (tabId, props) => {
+      fake.calls.updates.push({ tabId, ...props });
       navigated = true;
-      return original(tabId, props);
+      fake.setTabUrl(tabId, props.url);
+      // The tab keeps saying `complete` throughout, because the document being
+      // left is complete. This is the answer that used to be mistaken for the
+      // new page being there.
+      fake.chrome.tabs.onUpdated.emit(tabId, { status: 'loading' });
+      setTimeout(() => {
+        arrived = true;
+        fake.chrome.tabs.onUpdated.emit(tabId, { status: 'complete' });
+      }, 0);
+      return {};
     };
-    return { others };
   }
 
-  it('waits for every count the page is going to give, not the first one', async () => {
-    countsLandInTwoWaves();
+  it('waits for the document to arrive before believing what the cache says', async () => {
+    slowLoad();
     const controller = await controllerFor();
     const jobs = await controller.listJobs();
     expect(jobs.map((j) => j.actionableCount)).toEqual([4, 7, 7]);
   });
 
-  // The condition is quiet, not completeness: a role the page never counts must
-  // not hold the panel open to the bound, and it must not be asked for again.
-  it('settles on a cache that has stopped changing, counts or no counts', async () => {
+  // And the quiet window on top of it, for the gap between the two queries the
+  // arrived document then runs.
+  it('waits for the second query on a document that has already arrived', async () => {
+    slowLoad({ late: 3 });
+    const controller = await controllerFor();
+    const jobs = await controller.listJobs();
+    expect(jobs.map((j) => j.actionableCount)).toEqual([4, 7, 7]);
+  });
+
+  // Nothing is written down about a role that came back without a count. The
+  // panel used to record those and stop asking, so one read taken a moment too
+  // early wrote off fifteen real roles for the life of the panel and told the
+  // owner to go and open each one by hand.
+  it('never decides a role has no count', async () => {
+    // The count is there on the second look and not on the first, so a panel
+    // that stopped looking is a panel that never sees it. Counted by the
+    // readiness probe, which happens once per pass whether or not the tab has
+    // anywhere to go.
+    let looks = 0;
+    setup({
+      tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
+      jobs: () => [
+        { jobId: JOB, title: 'Platform Engineer', actionableCount: 4 },
+        { jobId: OTHER, title: 'Data Scientist', actionableCount: looks > 1 ? 7 : null },
+      ],
+    });
+    const page = fake.chrome.tabs.sendMessage;
+    fake.chrome.tabs.sendMessage = async (tabId, message) => {
+      if (message.type === CX.QUERY_READY) looks += 1;
+      return page(tabId, message);
+    };
+    const controller = await controllerFor();
+    expect((await controller.listJobs()).map((j) => j.actionableCount)).toEqual([4, null]);
+    expect((await controller.listJobs()).map((j) => j.actionableCount)).toEqual([4, 7]);
+  });
+
+  // A role the page never counts must not hold the panel open to the bound, and
+  // it must not send the tab travelling again either: after the first trip the
+  // tab is already on that applicant list, so there is nowhere to go.
+  it('settles on a cache that has stopped filling, counts or no counts', async () => {
     setup({
       tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
       jobs: [
@@ -716,36 +767,8 @@ describe('listJobs hydration', () => {
     await controller.listJobs();
     // The first read, then the four identical ones that say the page is done.
     expect(reads).toBe(5);
-    // And the role is now known to have no count, so a second load leaves the
-    // tab where it is.
     await controller.listJobs();
     expect(fake.calls.updates).toHaveLength(1);
-  });
-
-  // A cache that never goes quiet establishes nothing about any role, so
-  // nothing is written down and the next load tries again.
-  it('asks again for a role whose count was still in flight at the bound', async () => {
-    let reads = 0;
-    setup({
-      tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
-      jobs: () => {
-        reads += 1;
-        return [
-          { jobId: JOB, title: 'Platform Engineer', actionableCount: 4 },
-          // A cache still filling on every single read.
-          ...Array.from({ length: reads }, (_, i) => ({
-            jobId: String(9100002 + i),
-            title: `Data Scientist ${i + 1}`,
-            actionableCount: null,
-          })),
-        ];
-      },
-    });
-    const controller = await controllerFor();
-    const told = [];
-    await controller.listJobs({ onHydrating: () => told.push('reading') });
-    await controller.listJobs({ onHydrating: () => told.push('reading') });
-    expect(told).toEqual(['reading', 'reading']);
   });
 
   it('loads an applicant list once to fill in the missing counts', async () => {
