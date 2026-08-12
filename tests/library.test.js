@@ -18,6 +18,7 @@ const row = (over = {}) => ({
   known: 3,
   lastRunAt: null,
   missing: 0,
+  unreachable: 0,
   unverifiable: 0,
   orphans: 0,
   ...over,
@@ -125,6 +126,39 @@ describe('an action that worked', () => {
 // left the only collection this extension can query, so "still missing" would
 // send the user looking for a button that cannot exist.
 describe('someone who was accepted', () => {
+  const withAccepts = (over) => stubController({ library: vi.fn(async () => [row(over)]) });
+
+  it('is not counted among the files missing from disk', async () => {
+    await show(withAccepts({ missing: 0, unreachable: 2 }));
+    expect(screen.innerHTML).not.toContain('missing from disk');
+    expect(screen.innerHTML).toContain('2');
+    expect(screen.innerHTML).toContain('were accepted');
+    expect(screen.innerHTML).toContain('can no longer be fetched');
+  });
+
+  it('is not offered a Re-download button, because no walk can find them', async () => {
+    await show(withAccepts({ missing: 0, unreachable: 2 }));
+    expect(screen.querySelector('[data-act="refetch"]')).toBe(null);
+  });
+
+  it('leaves the button standing for the people a walk can still fetch', async () => {
+    await show(withAccepts({ missing: 3, unreachable: 2 }));
+    expect(screen.querySelector('[data-act="refetch"]')).not.toBe(null);
+    expect(screen.innerHTML).toContain('missing from disk');
+    expect(screen.innerHTML).toContain('can no longer be fetched');
+  });
+
+  it('is spoken of one person at a time without a plural verb', async () => {
+    await show(withAccepts({ unreachable: 1 }));
+    expect(screen.innerHTML).toContain('was accepted');
+    expect(screen.innerHTML).not.toContain('were accepted');
+  });
+
+  it('does not let a row of accepts read as all files present', async () => {
+    await show(withAccepts({ unreachable: 2 }));
+    expect(screen.innerHTML).not.toContain('all files present');
+  });
+
   it('is reported as unfetchable, not as missing', () => {
     expect(describeRefetch({ refetched: 0, stillMissing: 0, acceptedGone: 2 })).toBe(
       'Nothing to re-download: 2 were accepted and can no longer be fetched',

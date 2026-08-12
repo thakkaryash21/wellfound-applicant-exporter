@@ -61,7 +61,7 @@ function showNote(element, message) {
   say(element, message, { marker: 'lib-note' });
 }
 
-// All three states, not just `missing`. Chrome's download history is what
+// All four states, not just `missing`. Chrome's download history is what
 // reconciliation reads, so a user who cleared it would otherwise be told "all
 // files present" while the disk may hold nothing at all.
 function states(job) {
@@ -69,6 +69,16 @@ function states(job) {
   if (job.missing) {
     parts.push(`<span class="warn num">${job.missing}</span>
       <span class="job-meta"> missing from disk</span>`);
+  }
+  // Not "missing", which is this screen's word for a file a walk can fetch
+  // back. An accepted candidate has left the only collection this extension can
+  // query, so there is nothing to fetch and no button below to offer. The
+  // wording is the one describeRefetch already uses, because it is the same
+  // fact told at a different moment.
+  if (job.unreachable) {
+    parts.push(`<span class="num">${job.unreachable}</span>
+      <span class="job-meta"> ${job.unreachable === 1 ? 'was' : 'were'} accepted
+      and can no longer be fetched</span>`);
   }
   if (job.unverifiable) {
     parts.push(`<span class="num">${job.unverifiable}</span>

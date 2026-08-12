@@ -72,6 +72,22 @@ describe('ledger-service accept dimension', () => {
     expect(await service.seenUserIdsFor(JOB)).toEqual(['1']);
   });
 
+  // The Library screen renders straight off these counts, so the split between
+  // "a walk can fetch this back" and "nothing ever can" has to be made here
+  // rather than inside the action the operator presses afterwards.
+  it('counts an accepted person whose file is gone as unreachable, never as missing', async () => {
+    await service.recordDownloaded(JOB, { userId: '1' }, { jobTitle: 'Platform Engineer' });
+    await service.recordDownloaded(JOB, { userId: '2' }, { jobTitle: 'Platform Engineer' });
+    await service.recordAccepted(JOB, '2');
+    // Both files are off the disk; only one of them can ever be fetched again.
+    fake.chrome.downloads.search = async () => [
+      { id: 1, state: 'complete', exists: false, filename: `Jane Doe-1-${JOB}.pdf` },
+      { id: 2, state: 'complete', exists: false, filename: `Jane Doe-2-${JOB}.pdf` },
+    ];
+    const [job] = await service.library();
+    expect(job).toMatchObject({ missing: 1, unreachable: 1 });
+  });
+
   it('forget (the download reset) does not silently clear accepts as a side effect readers can rely on separately', async () => {
     // forget removes the whole job record, which necessarily includes
     // accepts too - but forgetAccepted is the operation that clears accepts

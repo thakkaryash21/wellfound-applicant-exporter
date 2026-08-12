@@ -61,6 +61,14 @@ export function createLedgerService(storage) {
       const rows = [];
       for (const job of jobs) {
         const status = await reconcileJob(job.jobId);
+        // An accepted candidate has left NEEDS_REVIEW, which is the only
+        // collection this extension can query, so no walk will ever fetch them
+        // again. Counting them under `missing` would put a Re-download button
+        // in front of the one drift that has no remedy. Split here, where the
+        // reconciliation is read, rather than inside the action that runs after
+        // the button is pressed.
+        const accepted = new Set((await ledger.acceptedUserIds(job.jobId)).map(String));
+        const unreachable = status.missing.filter((id) => accepted.has(String(id)));
         rows.push({
           jobId: job.jobId,
           jobTitle: job.jobTitle,
@@ -70,7 +78,8 @@ export function createLedgerService(storage) {
           // "0 downloaded" alone reads as "the import did nothing".
           known: job.known,
           lastRunAt: job.lastRunAt,
-          missing: status.missing.length,
+          missing: status.missing.length - unreachable.length,
+          unreachable: unreachable.length,
           unverifiable: status.unverifiable.length,
           orphans: status.orphans.length,
         });
