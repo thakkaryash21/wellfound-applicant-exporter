@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { runJob, MAX_CONSECUTIVE_FAILURES } from '../src/lib/runner.js';
+import { runJob, needsFullWalk, MAX_CONSECUTIVE_FAILURES } from '../src/lib/runner.js';
 import { RESUME_STATUS } from '../src/lib/csv.js';
 
 // Wellfound's shapes, not ours. submittedAt is a number (Unix seconds) and
@@ -144,6 +144,28 @@ describe('runJob', () => {
     });
     expect(d.fetchPage).toHaveBeenCalledTimes(4);
     expect(out.stoppedBecause).toBe('exhausted');
+  });
+
+  // The early stop is an economy for a download run. An ACCEPTING run decides
+  // who to message from the rows this walk produced, and the operator's main
+  // workflow - accept everyone already downloaded - makes every page all-seen
+  // by construction. Under the old rule the streak fired on page 3, the walk
+  // returned a fifth of the role, and the run accepted a fifth of the number
+  // the confirm screen had promised, reporting success.
+  it('reads every page when the run is accepting, however many are already seen', async () => {
+    const d = deps({
+      fetchPage: pager([page([1]), page([2]), page([3]), page([4]), page([5], false)]),
+    });
+    const out = await runJob(d, {
+      ...options,
+      actions: { download: false, accept: true },
+      seenUserIds: ['1', '2', '3', '4', '5'],
+    });
+    expect(d.fetchPage).toHaveBeenCalledTimes(5);
+    expect(out.stoppedBecause).toBe('exhausted');
+    // All five reach the accept pass, which can only act on the rows it is
+    // handed. Four of them are the ones the old walk never fetched.
+    expect(out.records.map((r) => r.userId)).toEqual(['1', '2', '3', '4', '5']);
   });
 
   it('honours the per-run limit', async () => {
@@ -386,6 +408,27 @@ describe('runJob', () => {
     return n;
   }
 
+  // The one that must fail if anybody ever disconnects accepting from the full
+  // walk again. It asserts the RELATIONSHIP rather than a symptom, so a change
+  // that keeps the walk complete by some other means still has to say so here.
+  describe('needsFullWalk', () => {
+    it('is true for every accepting run, whatever else it was asked to do', () => {
+      expect(needsFullWalk({ actions: { download: false, accept: true } })).toBe(true);
+      expect(needsFullWalk({ actions: { download: true, accept: true } })).toBe(true);
+    });
+
+    it('leaves a run that is not accepting free to stop early', () => {
+      expect(needsFullWalk({ actions: { download: true, accept: false } })).toBe(false);
+      // The default, spelled out: `accept` is opt-in at every layer.
+      expect(needsFullWalk({})).toBe(false);
+    });
+
+    it('still honours the operator s own re-read, and a targeted walk', () => {
+      expect(needsFullWalk({ forceFullWalk: true })).toBe(true);
+      expect(needsFullWalk({ only: ['7'] })).toBe(true);
+    });
+  });
+
   it('downloads one person once when they hold two rows on the same page', async () => {
     const d = deps({
       fetchPage: pager([
@@ -398,6 +441,54 @@ describe('runJob', () => {
     expect(out.downloaded.map((r) => r.userId)).toEqual(['7']);
     // Both rows still reach the CSV: they are two real applications.
     expect(out.records).toHaveLength(2);
+    // The second row is a pointer, not an outcome. It must never read as
+    // "already downloaded", which is this walk's word for a file the LEDGER
+    // already held - the one status the accept pass treats as proof we have
+    // somebody's resume.
+    expect(out.records[1].resumeStatus).toBe(RESUME_STATUS.ANOTHER_ROW);
+    expect(out.records[1].resumeStatus).not.toBe(RESUME_STATUS.ALREADY);
+  });
+
+  // The case the whole ALREADY split exists for. One person, two applications,
+  // and the download for the row that was actually attempted fails. Under the
+  // old single word the second row read `already downloaded`, the accept pass
+  // read that as "we hold their resume", and it sent them a message - which
+  // removes them from NEEDS_REVIEW, so the retryable failure became a resume
+  // lost for good.
+  it('does not stamp the second row already downloaded when the first row s download failed', async () => {
+    const d = deps({
+      fetchPage: pager([
+        { edges: [nodeFor(1, 7), nodeFor(2, 7)], endCursor: 'c', hasNextPage: false },
+      ]),
+      downloadResume: vi.fn(async () => {
+        throw new Error('NETWORK_FAILED');
+      }),
+    });
+    const out = await runJob(d, options);
+
+    expect(out.failed.map((r) => r.userId)).toEqual(['7']);
+    expect(out.records.map((r) => r.resumeStatus)).toEqual([
+      'failed: NETWORK_FAILED',
+      RESUME_STATUS.ANOTHER_ROW,
+    ]);
+    // Nothing anywhere in this walk's output claims a file for person 7.
+    expect(out.records.some((r) => r.resumeStatus === RESUME_STATUS.ALREADY)).toBe(false);
+  });
+
+  it('still says already downloaded for the second row when the ledger held them all along', async () => {
+    const d = deps({
+      fetchPage: pager([
+        { edges: [nodeFor(1, 7), nodeFor(2, 7)], endCursor: 'c', hasNextPage: false },
+      ]),
+    });
+    const out = await runJob(d, { ...options, seenUserIds: ['7'] });
+    // Both rows: the file is on disk from an earlier run, and that is true of
+    // the person, so it is true of every row they hold.
+    expect(out.records.map((r) => r.resumeStatus)).toEqual([
+      RESUME_STATUS.ALREADY,
+      RESUME_STATUS.ALREADY,
+    ]);
+    expect(d.downloadResume).not.toHaveBeenCalled();
   });
 
   it('names the job position on started so the running screen can label itself', async () => {

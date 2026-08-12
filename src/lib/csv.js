@@ -16,7 +16,17 @@ export const PREVIEW = 'preview';
 // name the same strings the CSV does.
 export const RESUME_STATUS = {
   DOWNLOADED: 'downloaded',
+  // The file is on disk from an EARLIER run - the ledger already knew this
+  // person before this walk began. That, and only that: this word is what the
+  // accept pass reads as "we hold their resume", and it used to also cover the
+  // case below, which does not mean that at all.
   ALREADY: 'already downloaded',
+  // One person can hold two applications, so one person can hold two rows. The
+  // walk spends a download on the first row it reaches and the second row gets
+  // this: not an outcome, a pointer to where the outcome is. Whether the file
+  // landed is whatever the other row says, which is exactly why this must not
+  // be confused with ALREADY - the other row may say `failed: ...`.
+  ANOTHER_ROW: 'this person has another row; the outcome is on that one',
   NO_RESUME: 'no resume on file',
   NO_ID: 'not identifiable',
   LOCKED: 'locked on Wellfound',
@@ -194,6 +204,10 @@ function parseRow(line) {
 // identifiable", "preview", "locked on Wellfound", "failed: ..." - means the
 // import must not teach the ledger that this person is done, or they would
 // never be fetched again.
+//
+// ANOTHER_ROW is deliberately absent. It says nothing about a file; the row it
+// points at does, and that row is in the same CSV and is adopted on its own
+// merits. Adopting on the pointer would adopt people whose only real row failed.
 export const ADOPTABLE_RESUME_STATUSES = new Set([
   RESUME_STATUS.DOWNLOADED,
   RESUME_STATUS.ALREADY,

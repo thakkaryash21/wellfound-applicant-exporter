@@ -19,6 +19,26 @@ export const MAX_CONSECUTIVE_FAILURES = 5;
 // never anything but opt-in.
 export const runActions = ({ download = true, accept = false } = {}) => ({ download, accept });
 
+// Whether this walk must read every page, rather than stopping once three
+// pages in a row turn out to be all-seen.
+//
+// The early stop is an economy for a download run: a walk that keeps finding
+// nobody new has nothing left to fetch, so re-reading forty pages is traffic
+// spent for nothing. An ACCEPTING run is the opposite case. It decides who to
+// accept from the rows this walk produced, and the operator's main workflow -
+// accept everyone already downloaded - makes every single page all-seen by
+// construction. The streak fires on page 3 and the run then accepts a fifth of
+// the people the confirm screen promised, and reports success.
+//
+// So the relationship is derived here, from the actions, rather than left to a
+// caller remembering a flag. `forceFullWalk` remains the operator's own
+// re-read checkbox; `only` is stated rather than relied upon, since a targeted
+// walk starts with an empty ledger set and no page can look all-seen anyway.
+export function needsFullWalk({ forceFullWalk = false, only = null, actions } = {}) {
+  const { accept } = runActions(actions);
+  return Boolean(forceFullWalk) || Boolean(only) || accept;
+}
+
 export async function runJob(deps, options) {
   const { fetchPage, downloadResume, recordDownloaded, sleep, emit } = deps;
   const rand = deps.rand ?? Math.random;
@@ -48,11 +68,24 @@ export async function runJob(deps, options) {
   } = options;
 
   const actions = runActions(askedActions);
-  const seen = new Set(seenUserIds);
+  // Two sets, because "already downloaded" was one word for two facts. This one
+  // is the ledger as it stood before the walk began and is never added to: an id
+  // in here has a file on disk from an earlier run, which is the only reading
+  // that lets the accept pass treat it as captured.
+  const fromLedger = new Set([...seenUserIds].map(String));
+  // This one grows as the walk spends downloads, so it also holds people whose
+  // download just failed. It answers "has this walk already dealt with them",
+  // never "do we hold their resume".
+  const seen = new Set(fromLedger);
+  // Which of the two an already-seen row is. A row for somebody the ledger knew
+  // is ALREADY; a row for somebody only this walk has touched points at the
+  // other row rather than claiming an outcome it does not have.
+  const seenStatus = (userId) =>
+    fromLedger.has(String(userId)) ? RESUME_STATUS.ALREADY : RESUME_STATUS.ANOTHER_ROW;
   const wanted = only ? new Set(only) : null;
-  // A targeted walk starts with an empty `seen`, so no page can ever look fully
-  // seen and the streak would never fire anyway. Stated rather than relied upon.
-  const earlyStop = createEarlyStop({ forceFullWalk: forceFullWalk || Boolean(wanted) });
+  const earlyStop = createEarlyStop({
+    forceFullWalk: needsFullWalk({ forceFullWalk, only, actions }),
+  });
   const downloaded = [];
   // One bucket per cause. They used to share a single `skipped` array, which
   // made "we have no resume for them" and "we cannot identify them" the same
@@ -110,7 +143,7 @@ export async function runJob(deps, options) {
     for (const record of pageRecords) {
       // Anyone already in the ledger keeps their file from an earlier run, so
       // the blank filename cell must not read as a gap.
-      if (record.userId && !freshSet.has(record)) record.resumeStatus = RESUME_STATUS.ALREADY;
+      if (record.userId && !freshSet.has(record)) record.resumeStatus = seenStatus(record.userId);
       // Whatever the loop below does not reach keeps this, so a truncated run
       // says which rows it never got to instead of leaving them blank.
       else if (freshSet.has(record)) record.resumeStatus = RESUME_STATUS.NOT_REACHED;
@@ -177,7 +210,7 @@ export async function runJob(deps, options) {
       // page. Now that the key is userId, one person can hold two rows on the
       // same page, so re-check before spending a download on them.
       if (seen.has(record.userId)) {
-        record.resumeStatus = RESUME_STATUS.ALREADY;
+        record.resumeStatus = seenStatus(record.userId);
         continue;
       }
       seen.add(record.userId);
