@@ -1,4 +1,5 @@
 import { escapeHtml } from './escape-html.js';
+import { DOT } from './running-view.js';
 import { renderTraceRegion, traceText } from './trace-view.js';
 import { localDateStamp, localClockStamp, localDateTimeText } from '../lib/local-time.js';
 
@@ -15,9 +16,6 @@ export const POST_RUN_IDS = {
   download: 'run-download',
   done: 'run-done',
 };
-
-// Written as an escape so this file stays plain ASCII, as the rest of src does.
-const DOT = ' \u00b7 ';
 
 // A name a user can find in their downloads folder a week later, sorted next to
 // the CSV of the same run. Local time, because that is the clock the run was

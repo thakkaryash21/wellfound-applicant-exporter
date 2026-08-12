@@ -438,13 +438,6 @@ function handleRunEvent(event) {
     showPostRun();
     load();
   }
-  if (event.type === 'error') {
-    // Kept as a fallback: startRun now reports its failure on `done` with the
-    // totals attached, so this only fires for an emitter that has no totals.
-    clearCountdown();
-    setLibraryEnabled(true);
-    renderError(event.error);
-  }
 }
 
 // A failure here degrades to an inline note, never to a screen replacement. The

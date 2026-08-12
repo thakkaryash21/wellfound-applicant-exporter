@@ -29,8 +29,11 @@ export const RUN_IDS = {
   abort: 'abort',
 };
 
+// The separator every panel screen puts between two facts on one line.
+// Exported because post-run-view.js held a byte-identical copy, comment and
+// all - the exact duplication escape-html.js exists to prevent.
 // Written as an escape so this file stays plain ASCII, as the rest of src does.
-const DOT = ' \u00b7 ';
+export const DOT = ' \u00b7 ';
 
 // Before this many candidates the observed pace has almost certainly not crossed
 // a reading break, and a pace measured only across the short delays would

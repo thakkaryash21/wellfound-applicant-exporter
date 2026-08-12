@@ -1,5 +1,5 @@
 // ISOLATED world. A relay and nothing else - no logic, no state beyond pending
-// requests. Only the two message types below are forwarded.
+// requests. Only the three message types below are forwarded.
 (() => {
   const ALLOWED = new Set(['LIST_JOBS', 'FETCH_PAGE', 'QUERY_READY']);
   const TIMEOUT_MS = 30000;

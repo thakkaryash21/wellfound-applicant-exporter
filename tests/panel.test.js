@@ -329,12 +329,6 @@ describe('the running screen', () => {
   });
 
   // The fallback path: an emitter that failed with no totals to report.
-  it('falls back to a bare error screen for an error carrying no summary', async () => {
-    const screen = await startRunning();
-    emit({ type: 'error', error: 'the working tab was closed' });
-    expect(screen.innerHTML).toContain('the working tab was closed');
-    expect(byId('nav-library').disabled).toBe(false);
-  });
 });
 
 describe('the post-run screen', () => {

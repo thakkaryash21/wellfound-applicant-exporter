@@ -1,6 +1,6 @@
 // MAIN world. Talks to the page's own Apollo client so every request carries
 // Wellfound's signature headers. Never constructs a query or its variables.
-// Message type strings mirror src/lib/messages.js (MSG.LIST_JOBS, "FETCH_PAGE"
+// Message type strings mirror src/lib/messages.js (CX.LIST_JOBS, "FETCH_PAGE"
 // is content-script-only). This is a classic script, not a module, so the
 // strings are duplicated inline rather than imported.
 (() => {

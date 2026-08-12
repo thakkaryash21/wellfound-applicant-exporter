@@ -1,9 +1,5 @@
 import { localDateStamp } from './local-time.js';
 
-// Every value the Resume column can hold. This file declares the column, and
-// these strings are nothing but the text that goes in it, so this is where
-// they live; the runner imports them to write one, and the panel and the tests
-// name the same strings the CSV does.
 // The run that writes the CSV and downloads nothing had five names: `dryRun`
 // in the options, `'dry-run'` as an outcome key and a trace kind, "Preview
 // only" on the checkbox, "listed" in the running screen, and "dry run" in this
@@ -13,6 +9,10 @@ import { localDateStamp } from './local-time.js';
 // this constant, so a grep for one finds all three.
 export const PREVIEW = 'preview';
 
+// Every value the Resume column can hold. This file declares the column, and
+// these strings are nothing but the text that goes in it, so this is where
+// they live; the runner imports them to write one, and the panel and the tests
+// name the same strings the CSV does.
 export const RESUME_STATUS = {
   DOWNLOADED: 'downloaded',
   ALREADY: 'already downloaded',

@@ -9,7 +9,6 @@ function emptyRecord(jobId) {
     jobTitle: null,
     seenUserIds: [],
     lastRunAt: null,
-    lastRunCount: 0,
     totalDownloaded: 0,
     folder: null,
   };
@@ -127,12 +126,14 @@ export function createLedger(storage) {
     },
     // `folder` is remembered so a later re-download lands beside the originals
     // instead of in whatever default the Library screen would have guessed.
-    async finishRun(jobId, { downloaded, folder }) {
+    // `downloaded` is deliberately not stored. It used to be written as
+    // `lastRunCount` on every run and read by nothing; `totalDownloaded` is the
+    // number the Library actually shows.
+    async finishRun(jobId, { folder }) {
       const record = await get(jobId);
       await put({
         ...record,
         lastRunAt: new Date().toISOString(),
-        lastRunCount: downloaded,
         folder: folder ?? record.folder ?? null,
       });
     },

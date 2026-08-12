@@ -86,22 +86,24 @@ describe('ledger.adopt', () => {
 });
 
 describe('ledger.finishRun', () => {
-  it('stamps the run time and count', async () => {
+  it('stamps the run time', async () => {
     await ledger.markDownloaded('9100001', ['1'], { jobTitle: 'x' });
-    await ledger.finishRun('9100001', { downloaded: 1 });
+    await ledger.finishRun('9100001', {});
     const record = await ledger.get('9100001');
-    expect(record.lastRunCount).toBe(1);
     expect(typeof record.lastRunAt).toBe('string');
+    // The run's own count is deliberately not stored: nothing ever read it,
+    // and totalDownloaded is the number the Library shows.
+    expect('lastRunCount' in record).toBe(false);
   });
 
   it('remembers the folder the run wrote to, so re-downloads land beside it', async () => {
-    await ledger.finishRun('9100001', { downloaded: 1, folder: 'clients/acme' });
+    await ledger.finishRun('9100001', { folder: 'clients/acme' });
     expect((await ledger.get('9100001')).folder).toBe('clients/acme');
   });
 
   it('keeps the previous folder when a later run does not name one', async () => {
-    await ledger.finishRun('9100001', { downloaded: 1, folder: 'clients/acme' });
-    await ledger.finishRun('9100001', { downloaded: 2 });
+    await ledger.finishRun('9100001', { folder: 'clients/acme' });
+    await ledger.finishRun('9100001', {});
     expect((await ledger.get('9100001')).folder).toBe('clients/acme');
   });
 });

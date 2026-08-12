@@ -45,7 +45,7 @@ export function createLedgerService(storage) {
 
     // `folder` is remembered with the run so a later re-download lands beside
     // the originals rather than in whatever default the Library would guess.
-    finishRun: (jobId, { downloaded, folder }) => ledger.finishRun(jobId, { downloaded, folder }),
+    finishRun: (jobId, { folder }) => ledger.finishRun(jobId, { folder }),
 
     // Every job, with where the ledger and the disk disagree.
     async library() {

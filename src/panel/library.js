@@ -78,7 +78,7 @@ function row(job) {
       <div class="job-title">${escapeHtml(job.jobTitle ?? job.jobId)}</div>
       <div class="job-meta">
         <span class="num">${job.downloaded}</span> downloaded \u00b7
-        <span class="num">${job.known ?? job.downloaded}</span> known \u00b7 last run ${last}
+        <span class="num">${job.known}</span> known \u00b7 last run ${last}
       </div>
       <div>${missing}</div>
       <div class="lib-actions">

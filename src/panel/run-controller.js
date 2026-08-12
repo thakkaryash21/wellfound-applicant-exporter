@@ -149,8 +149,13 @@ export function createController({
   }
 
   return {
-    // The Library screen's whole surface, and the run's own view of the ledger.
-    ...ledgerService,
+    // The four the Library screen calls, named rather than spread. Spreading
+    // the whole service put the run's own writes - recordDownloaded and
+    // finishRun - on the object the Library holds.
+    library: ledgerService.library,
+    importCsv: ledgerService.importCsv,
+    adoptOrphans: ledgerService.adoptOrphans,
+    forget: ledgerService.forget,
 
     // Enriched with ledger state so the UI can say how many are actually new
     // rather than how many sit in the review queue. `estimatedNew` is an
@@ -318,10 +323,7 @@ export function createController({
           if (!dryRun) {
             // The folder is stored with the run so a later re-download lands
             // beside the originals rather than in the default directory.
-            await ledgerService.finishRun(jobId, {
-              downloaded: result.downloaded.length,
-              folder,
-            });
+            await ledgerService.finishRun(jobId, { folder });
             trace.record('ledger_write', { jobId, count: result.downloaded.length });
           }
           // A job that yielded nothing wrote no CSV and said nothing at all,
