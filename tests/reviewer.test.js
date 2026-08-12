@@ -82,7 +82,6 @@ function createPage(options = {}) {
           `<button id="accept"${aria}>Accept</button>` +
           '<button id="reject">Reject</button>' +
           '<button id="next">Next applicant</button>' +
-          '<button id="exit">Exit</button>' +
           // The noise the live page carries around the Accept button, which the
           // earlier shape of this harness did not, and which is the whole reason
           // the anchor on ACCEPT_LABEL is load-bearing. Counted live with the
@@ -96,14 +95,29 @@ function createPage(options = {}) {
           '<button class="profile">Ken Onyekwere - accepting new roles</button>' +
           '<div role="button" class="ideal">' +
           'Ideal next opportunity - open to accepting offers</div>' +
-          // The second EXACT `Accept` match, and the other half of the same
-          // point. It is a button, not a span: the selector reaches it, and the
-          // only thing standing between it and `Found 2 Accept controls` is the
-          // visible/enabled filter - which is what uniqueControl exists for, and
-          // which the old span could never exercise because usableControls never
-          // queried it. Its zero box is applied in wire(), so it survives every
+          // The collapsed keyboard-shortcut legend, which is where the page puts
+          // BOTH of the controls this harness exists to be awkward about. Its
+          // text reads `Exit Reject Accept`, as measured.
+          //
+          // `accept-legend` is the second EXACT `Accept` match, and the point it
+          // makes is the one uniqueControl exists for: a button, not a span, so
+          // the selector reaches it, and the only thing standing between it and
+          // `Found 2 Accept controls` is the visible/enabled filter. The old span
+          // could never exercise that, because usableControls never queried it.
+          //
+          // `exit` is the SAME SHAPE and the opposite lesson, and modelling it
+          // as a normal button was this harness agreeing with the code again.
+          // Measured live: exactly one control whose text is `Exit`, enabled,
+          // not hidden, display block, visibility visible, opacity 1 - and a
+          // bounding rect of 0 x 0, because the legend it sits in is collapsed.
+          // It closes the reviewer when clicked; that was verified directly on
+          // the page. A rect test that is right about Accept is wrong about it.
+          //
+          // Both zero boxes are applied in wire(), so they survive every
           // re-render.
           '<div class="legend"><kbd>A</kbd>' +
+          '<button id="exit">Exit</button>' +
+          '<button id="reject-legend">Reject</button>' +
           '<button id="accept-legend">Accept</button></div>' +
           (options.extraMarkup ?? '') +
           composer +
@@ -113,10 +127,19 @@ function createPage(options = {}) {
   }
 
   function wire() {
-    // The page does not render it, so nothing can click it. A browser answers
-    // this with layout; here the harness says so directly.
-    const legend = document.getElementById('accept-legend');
-    if (legend) legend.rect = { width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 };
+    // The collapsed legend, as a browser would report it: real controls, drawn
+    // at no size. A browser answers this with layout; here the harness says so
+    // directly, because saying nothing is how the fake ends up agreeing with
+    // whatever predicate it is handed.
+    const flat = { width: 0, height: 0, top: 0, left: 0, bottom: 0, right: 0 };
+    for (const id of ['accept-legend', 'reject-legend', 'exit']) {
+      const el = document.getElementById(id);
+      if (el) el.rect = options.legendHasSize ? undefined : flat;
+    }
+    // The other way a control can be out of reach, and a genuinely different
+    // claim: the page saying this element is not part of it, rather than saying
+    // its layout is collapsed.
+    if (options.exitAriaHidden) document.getElementById('exit')?.setAttribute('aria-hidden', 'true');
     for (const button of document.querySelectorAll('button, [role="button"]')) {
       button.addEventListener('click', () => {
         state.clicks.push(button.textContent.trim());
@@ -719,6 +742,47 @@ describe('the exactly-one-control guard', () => {
     expect(count(/accept/i)).toEqual({ matched: 4, usable: 3 });
   });
 
+  // Every selector this file carries, counted against the page it drives, in
+  // one place. A census run live on 2026-08-12 found six of the seven exactly
+  // right and one - Exit - matching a control with no box, which no test could
+  // have caught while the harness drew it like an ordinary button.
+  it('reproduces the whole measured census, not just the row that was checked', async () => {
+    start();
+    await driver.openReviewer();
+    // With the composer up, so the two controls that only exist then are in it.
+    page.state.composer = true;
+    page.render();
+
+    const acting = (pattern) => {
+      const { matched, usable } = count(pattern);
+      return [matched, usable];
+    };
+    expect({
+      accept: acting(/^accept$/i),
+      send: acting(/accept application/i),
+      next: acting(/^next applicant$/i),
+      cancel: acting(/^cancel response$/i),
+      reject: acting(/reject/i),
+      exit: acting(/^exit$/i),
+    }).toEqual({
+      accept: [2, 1],
+      send: [1, 1],
+      next: [1, 1],
+      cancel: [1, 1],
+      // The legend carries a second `Reject` with no box, as the live page does.
+      reject: [2, 1],
+      // The row that mattered: present, unique, and invisible to the acting
+      // predicate. Leaving asks a different question of the same control.
+      exit: [1, 0],
+    });
+    expect(driver.reachableControls(page.document.querySelector('[role="dialog"]'), /^exit$/i)
+      .usable.length).toBe(1);
+
+    // The opener is plural and lives outside the dialog; plurality is the
+    // property, not the count, so the live figure of 12 is not reproduced here.
+    expect(page.document.querySelectorAll('.open').length).toBeGreaterThan(1);
+  });
+
   it('would abort every accept if the anchor were loosened', async () => {
     start();
     await driver.openReviewer();
@@ -1033,7 +1097,7 @@ describe('leaving the page as it was found', () => {
     page.document.getElementById('exit').remove();
     const report = await driver.closeReviewer();
     expect(report.closed).toBe(false);
-    expect(report.notes).toEqual(['no usable Exit control (0 matched by text)']);
+    expect(report.notes[0]).toBe('no usable Exit control (0 matched by text)');
     // Still on the page - but the pass's own error reaches the operator intact,
     // which is the property that matters more.
     expect(dialog()).not.toBe(null);
@@ -1046,7 +1110,7 @@ describe('leaving the page as it was found', () => {
     await vi.advanceTimersByTimeAsync(2000);
     const report = await pending;
     expect(report.closed).toBe(false);
-    expect(report.notes).toEqual(['Clicked Exit, but the page did not respond to it']);
+    expect(report.notes[0]).toBe('Clicked Exit, but the page did not respond to it');
   });
 
   it('clicks nothing when two controls could be the way out', async () => {
@@ -1054,8 +1118,99 @@ describe('leaving the page as it was found', () => {
     await driver.openReviewer();
     const report = await driver.closeReviewer();
     expect(report.closed).toBe(false);
-    expect(report.notes).toEqual(['found 2 Exit controls, so clicked none']);
+    expect(report.notes[0]).toBe('found 2 Exit controls, so clicked none');
     expect(page.state.clicks).toEqual(['View application']);
+  });
+
+  // Exit is best-effort and cancelling is the guarantee, so a teardown that
+  // half-worked says which half. Two booleans and a button name are not a thing
+  // to hand somebody who needs to know whether a stranger is about to get a
+  // message.
+  describe('what it says when it could not finish', () => {
+    it('says the page is merely untidy when nothing is composed in it', async () => {
+      start({ exitDoesNothing: true });
+      await driver.openReviewer();
+      const pending = driver.closeReviewer();
+      await vi.advanceTimersByTimeAsync(2000);
+      const report = await pending;
+      expect(report.notes.at(-1)).toMatch(/nothing can be sent from it/);
+      expect(report.notes.at(-1)).not.toMatch(/COMPOSED MESSAGE/);
+    });
+
+    it('raises the alarm when the message is still sitting in the composer', async () => {
+      // Both ways out refused. This is the state the whole finding was about,
+      // and the operator has to be told in the words that describe it.
+      start({ cancelDoesNothing: true, exitDoesNothing: true });
+      await driver.openReviewer();
+      const accept = driver.acceptCurrent({
+        expectedUserId: '21527289',
+        message: MESSAGE,
+        afterPasteMs: 30000,
+      });
+      const settled = accept.catch((e) => e);
+      await vi.advanceTimersByTimeAsync(200);
+      await driver.handlers.STOP();
+      await vi.advanceTimersByTimeAsync(200);
+      await settled;
+
+      const pending = driver.closeReviewer();
+      await vi.advanceTimersByTimeAsync(4000);
+      const report = await pending;
+      expect(report).toMatchObject({ cancelled: false, closed: false });
+      expect(report.notes.at(-1)).toMatch(/WITH A COMPOSED MESSAGE IN IT/);
+      // Never sent, whatever else went wrong on the way out.
+      expect(report.notes.at(-1)).toMatch(/Nothing was sent/);
+      expect(page.state.sentText).toBe(null);
+    });
+
+    it('says nothing extra when it left cleanly', async () => {
+      start();
+      await driver.openReviewer();
+      expect((await driver.closeReviewer()).notes).toEqual([]);
+    });
+  });
+
+  // The census, run with the driver's own two predicates. This is the row that
+  // was wrong: judged by the acting predicate the only way out of the reviewer
+  // does not exist.
+  it('reaches the one Exit control the live page draws at no size', async () => {
+    start();
+    await driver.openReviewer();
+    const scope = page.document.querySelector('[role="dialog"]');
+    const acting = driver.usableControls(scope, /^exit$/i);
+    const leaving = driver.reachableControls(scope, /^exit$/i);
+    // 1 matched by text, 0 usable - exactly what was measured live, and exactly
+    // what made teardown decline in silence.
+    expect([acting.matching.length, acting.usable.length]).toEqual([1, 0]);
+    // The same control, the same page, the question leaving actually asks.
+    expect([leaving.matching.length, leaving.usable.length]).toEqual([1, 1]);
+    expect(leaving.usable[0].id).toBe('exit');
+  });
+
+  it('still refuses a way out the page says is not part of it', async () => {
+    // A zero box is a collapsed layout; aria-hidden is the page stating this
+    // element is not there. Dropping the box test does not drop that.
+    start({ exitAriaHidden: true });
+    await driver.openReviewer();
+    const report = await driver.closeReviewer();
+    expect(report.closed).toBe(false);
+    expect(report.notes[0]).toBe('no usable Exit control (1 matched by text)');
+    expect(page.state.clicks).toEqual(['View application']);
+  });
+
+  it('does not let leaving loosen what acting is allowed to click', async () => {
+    // The whole risk of splitting the predicate. Accept is judged by the strict
+    // one, and the legend's second exact-`Accept` button is still excluded.
+    start();
+    await driver.openReviewer();
+    const scope = page.document.querySelector('[role="dialog"]');
+    expect(driver.usableControls(scope, /^accept$/i).usable.length).toBe(1);
+    // Reachable would have found both - which is precisely why the accept path
+    // does not ask that question.
+    expect(driver.reachableControls(scope, /^accept$/i).usable.length).toBe(2);
+    await expect(
+      driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE }),
+    ).resolves.toMatchObject({ accepted: true });
   });
 
   it('refuses a way out that reads as accept or reject, whatever it is called', async () => {

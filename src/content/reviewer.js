@@ -30,12 +30,23 @@
   const OPEN_LABEL = /^view application$/i;
   // Advance without acting on the current candidate. Exactly one on the page.
   const NEXT_LABEL = /^next applicant$/i;
-  // The two ways out, measured live. `Cancel response` exists only while the
-  // composer is open - exactly one match - and clicking it clears the composer
-  // and returns to the profile. `Exit` sits in the reviewer itself and closes
-  // it. Both are anchored for the same reason `Accept` is: an unanchored
-  // /exit/i would reach an "Exit interview" block, and a teardown that clicks
-  // the wrong thing is a teardown that can act on a candidate.
+  // The two ways out, measured live, and NOT equally important.
+  //
+  // `Cancel response` exists only while the composer is open - exactly one
+  // match, with a box - and clicking it clears the composed message and returns
+  // to the profile. That is the one that removes the danger, and it is the one
+  // this file can promise.
+  //
+  // `Exit` closes the reviewer. Exactly one match, enabled, unhidden, and drawn
+  // at 0 x 0 in the collapsed shortcut legend. It works when clicked, but a
+  // control the page renders at no size is a control the page may move, resize
+  // or stop drawing without telling anyone, so closing the modal is best-effort
+  // and is reported as such. A reviewer left open with no composed message in it
+  // is untidy; a composer left open with one is a message to a stranger.
+  //
+  // Both are anchored for the same reason `Accept` is: an unanchored /exit/i
+  // would reach an "Exit interview" block, and a teardown that clicks the wrong
+  // thing is a teardown that can act on a candidate.
   const CANCEL_LABEL = /^cancel response$/i;
   const EXIT_LABEL = /^exit$/i;
   // Nothing on the way out may read as either irreversible verb. `clickSafely`
@@ -166,25 +177,71 @@
     return `${text(el)} ${el?.getAttribute?.('aria-label') ?? ''}`.trim();
   }
 
-  function isVisible(el) {
+  // The page saying an element is not part of it. Two different claims live in
+  // the two halves below, and separating them is what lets one predicate serve
+  // acting and another serve leaving.
+  function isPresent(el) {
     if (!el) return false;
     if (el.hidden) return false;
     if (el.getAttribute?.('aria-hidden') === 'true') return false;
-    if (typeof el.getBoundingClientRect === 'function') {
-      const rect = el.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
-    }
     return true;
+  }
+
+  // Whether the operator can actually SEE it. A collapsed region draws its
+  // controls at 0 x 0 while they remain perfectly real - measured on the live
+  // page, where the keyboard-shortcut legend renders `Exit`, `Reject` and
+  // `Accept` as enabled, unhidden buttons with no box at all.
+  function hasBox(el) {
+    if (typeof el?.getBoundingClientRect !== 'function') return true;
+    const rect = el.getBoundingClientRect();
+    return Boolean(rect) && rect.width > 0 && rect.height > 0;
+  }
+
+  function isVisible(el) {
+    return isPresent(el) && hasBox(el);
   }
 
   function isEnabled(el) {
     return !el.disabled && el.getAttribute?.('aria-disabled') !== 'true';
   }
 
+  function controlsMatching(scope, pattern) {
+    return Array.from(scope.querySelectorAll('button, [role="button"]')).filter((el) =>
+      pattern.test(text(el)),
+    );
+  }
+
+  // ACTING. Everything on the way IN goes through here, and the box test is
+  // load-bearing: a second `Accept` the operator cannot see is genuine
+  // ambiguity about what a click does, and the cost of guessing is an
+  // irreversible message. Measured live, `/^accept$/i` matches 2 controls and
+  // exactly 1 of them has a box. That is this predicate working.
   function usableControls(scope, pattern) {
-    const controls = Array.from(scope.querySelectorAll('button, [role="button"]'));
-    const matching = controls.filter((el) => pattern.test(text(el)));
+    const matching = controlsMatching(scope, pattern);
     return { matching, usable: matching.filter((el) => isVisible(el) && isEnabled(el)) };
+  }
+
+  // LEAVING, which turned out to be a different question, and the live page is
+  // what said so.
+  //
+  // `Exit` is one control, uniquely labelled, enabled, not hidden - and drawn
+  // at 0 x 0, because the legend holding it is collapsed. Clicking it closes
+  // the reviewer; that was verified directly. Judged by the predicate above it
+  // is `1 matched by text, none usable`, so teardown declined, turned that into
+  // a note rather than a throw, and left the modal standing in silence - the
+  // exact zombie the teardown was built to end.
+  //
+  // A box is a proxy for "is it obvious what this click does", and that
+  // question belongs to acting. What leaving actually requires is that exactly
+  // one control carries the label and that it cannot read as accept or reject,
+  // which clickToLeave settles on its own. So the box test is dropped here and
+  // NOWHERE ELSE. Presence still counts: `hidden` and `aria-hidden` are the page
+  // stating the element is not part of it, which is a different claim from its
+  // layout being collapsed, and the only one of the two worth obeying on the
+  // way out.
+  function reachableControls(scope, pattern) {
+    const matching = controlsMatching(scope, pattern);
+    return { matching, usable: matching.filter((el) => isPresent(el) && isEnabled(el)) };
   }
 
   // Exactly one visible, enabled control whose label matches - or nothing
@@ -238,7 +295,7 @@
   // that legitimately may not be on the page, and two matches means the same
   // thing it means everywhere else in this file - do not click.
   function leavingControl(scope, pattern, name) {
-    const { matching, usable } = usableControls(scope, pattern);
+    const { matching, usable } = reachableControls(scope, pattern);
     if (usable.length === 1) return { el: usable[0], note: null };
     if (usable.length === 0) {
       return { el: null, note: `no usable ${name} control (${matching.length} matched by text)` };
@@ -630,6 +687,14 @@
   // What it does NOT do is interrupt an accept. While one is unresolved the
   // modal belongs to it: clicking `Cancel response` next to a send that may
   // have landed is how a teardown becomes the thing that needed tearing down.
+  //
+  // The two steps are not equal, and the report says which is which rather than
+  // averaging them into one boolean. Clearing the composer is the guarantee -
+  // it is what stops a message reaching somebody who was never meant to get
+  // one. Closing the modal afterwards is best-effort, because the control that
+  // does it is drawn at no size and could stop being findable without warning.
+  // A run that cancels and cannot exit has removed the hazard and left a mess;
+  // saying so plainly is more use than a note that reads like a failure.
   async function closeReviewer() {
     const report = { cancelled: false, closed: false, notes: [] };
 
@@ -642,13 +707,27 @@
       return report;
     }
 
-    if (composerBox()) {
+    const hadComposer = Boolean(composerBox());
+    if (hadComposer) {
       await leave(CANCEL_LABEL, 'Cancel response', () => !composerBox(), report, 'cancelled');
     }
     if (reviewerRoot()) {
       await leave(EXIT_LABEL, 'Exit', () => !reviewerRoot(), report, 'closed');
     } else {
       report.closed = true;
+    }
+
+    // The sentence an operator would want, assembled once from what actually
+    // happened rather than left for a reader to infer from two booleans and a
+    // list of button names.
+    if (!report.closed) {
+      report.notes.push(
+        report.cancelled || !hadComposer
+          ? 'The reviewer is still open on Wellfound, but nothing is composed in it and ' +
+              'nothing can be sent from it. Close the tab or press Exit when convenient.'
+          : 'The reviewer is still open on Wellfound WITH A COMPOSED MESSAGE IN IT. ' +
+              'Nothing was sent. Cancel that response in Wellfound before touching the page.',
+      );
     }
     return report;
   }
@@ -739,9 +818,11 @@
       ACCEPT_WORST_CASE_MS,
       uniqueControl,
       firstOfMany,
-      // The predicate itself, so a test can count what the driver counts rather
-      // than reimplement it and agree with itself.
+      // Both predicates, so a test can count what the driver counts rather than
+      // reimplement it and agree with itself - and so the difference between
+      // them is something the harness can measure rather than take on trust.
       usableControls,
+      reachableControls,
       clickSafely,
       sendKey,
       pasteMessage,
