@@ -649,6 +649,61 @@ describe('listJobs hydration', () => {
     return page;
   }
 
+  // The second half of the owner's report: the panel opens, navigates for the
+  // counts and reads the cache back before the answer has landed in it, so the
+  // roles show no count until the panel is closed and opened again.
+  //
+  // `focusJob` proves the query is REGISTERED, which is asking, not answering.
+  // Here the page takes three more reads to write the count, exactly as a real
+  // one does while the response is in flight.
+  function countsLandLate(reads = 3) {
+    let navigated = false;
+    let after = 0;
+    setup({
+      tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
+      jobs: () => {
+        if (navigated) after += 1;
+        return [
+          { jobId: JOB, title: 'Backend Engineer', actionableCount: 4 },
+          {
+            jobId: OTHER,
+            title: 'Data Scientist',
+            actionableCount: navigated && after > reads ? 7 : null,
+          },
+        ];
+      },
+    });
+    const original = fake.chrome.tabs.update;
+    fake.chrome.tabs.update = async (tabId, props) => {
+      navigated = true;
+      return original(tabId, props);
+    };
+  }
+
+  it('waits for the count to reach the cache instead of reading it straight back', async () => {
+    countsLandLate();
+    const controller = await controllerFor();
+    const jobs = await controller.listJobs();
+    expect(jobs.map((j) => j.actionableCount)).toEqual([4, 7]);
+  });
+
+  // And it is the count that is waited on, not a length of time: the pass ends
+  // on the read that has it and does not keep going.
+  it('stops reading as soon as the count is there', async () => {
+    countsLandLate();
+    const page = fake.chrome.tabs.sendMessage;
+    let reads = 0;
+    fake.chrome.tabs.sendMessage = async (tabId, message) => {
+      if (message.type === CX.LIST_JOBS) reads += 1;
+      return page(tabId, message);
+    };
+    const controller = await controllerFor();
+    await controller.listJobs();
+    // The first read, then four more: three that came back null and the one
+    // that carried the count.
+    expect(reads).toBe(5);
+  });
+
   it('loads an applicant list once to fill in the missing counts', async () => {
     withMissingCounts();
     const controller = await controllerFor();

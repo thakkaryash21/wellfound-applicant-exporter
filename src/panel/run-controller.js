@@ -6,7 +6,7 @@ import { CX } from '../lib/messages.js';
 import { createTrace, scrubVariables } from '../lib/trace.js';
 import { localDateStamp } from '../lib/local-time.js';
 import { consoleSink } from './verbose-console.js';
-import { createTabDriver } from './tab-driver.js';
+import { createTabDriver, READY_POLL_MS } from './tab-driver.js';
 import { createLedgerService } from './ledger-service.js';
 import { registerFilenameHandler, downloadResume, downloadBlobText } from './downloader.js';
 import { runAcceptPass } from './accept-pass.js';
@@ -39,6 +39,11 @@ const REVIEW_BUCKET = 'NEEDS_REVIEW';
 // pages a very large role would keep handing it.
 const QUEUE_CHECK_PAGE_SIZE = 10;
 const QUEUE_CHECK_PAGE_CAP = 40;
+
+// The wait for the counts to land in the page's Apollo cache, in re-reads
+// rather than in seconds. Counted in tries so the pace is the test's to set:
+// twenty at the driver's poll cadence is about ten seconds of real waiting.
+export const COUNTS_TRIES = 20;
 
 // How long a reload is given to commit before the page is called dead. It is a
 // deadline, not a pause: nothing waits on it when the navigation arrives. The
@@ -117,10 +122,12 @@ export function createController({
   const { reconcileJob } = ledgerService;
   const tabs = createTabDriver({ trace });
   let controller = null;
-  // At most one silent navigation per panel lifetime. A job whose count stays
-  // null after hydration (a draft, say) must not send the tab travelling on
-  // every single load.
-  let hydrated = false;
+  // Roles whose count stayed null after a hydration pass that ran all the way
+  // out. That is evidence about the role - a draft has nobody to count - so it
+  // is worth remembering, and it stops the tab travelling on every load. A pass
+  // that failed or was cut short records nothing, because it established
+  // nothing, and the next load tries it again.
+  const noCountFor = new Set();
 
   // One lock for every activity that drives the working tab. A re-download and a
   // run both navigate it, so letting them overlap would have one loop's next
@@ -176,6 +183,12 @@ export function createController({
     // that says a real person was messaged with nothing left remembering it.
     else if (event.type === 'accept_unrecorded')
       trace.record('accept_unrecorded', { jobId, userId: event.userId, error: event.error });
+    // The pass asking again, after the role is done, about every send it could
+    // not settle on the spot. Recorded so a later timing question can see that
+    // the sweep ran and how much it had to do - a run whose deferrals all
+    // resolved looks otherwise identical to one that never had any.
+    else if (event.type === 'accept_settling')
+      trace.record('accept_settling', { jobId, count: event.count });
     else if (event.type === 'accept_checked')
       trace.record('accept_checked', { jobId, userId: event.userId, outcome: event.verdict });
     else if (event.type === 'accept_reopen')
@@ -403,25 +416,40 @@ export function createController({
     // it is true.
     async listJobs({ onHydrating } = {}) {
       const tab = await tabs.workingTab();
-      let jobs = await tabs.ask(tab.id, { type: CX.LIST_JOBS });
+      // The first thing this panel ever says to the page, and the one message
+      // worth repeating: a tab can be `complete` a beat before its content
+      // scripts are in it.
+      let jobs = await tabs.askWhenListening(tab.id, { type: CX.LIST_JOBS });
 
       // The job overview page caches every listing but populates
       // actionableApplicantsCount only for the one being viewed. One trip to an
       // applicant list fills in the rest, and the counts are the whole point of
       // the list: without them the panel cannot say how many are new.
-      const blank = jobs.find((job) => job.actionableCount == null);
-      if (blank && !hydrated && !controller) {
+      const blank = jobs.find((job) => job.actionableCount == null && !noCountFor.has(job.jobId));
+      if (blank && !controller) {
         onHydrating?.();
         try {
           await tabs.focusJob(tab.id, blank.jobId);
-          jobs = await tabs.ask(tab.id, { type: CX.LIST_JOBS });
-          // Only on success. Set before the try, one failed navigation disabled
-          // retry for the whole life of the panel and left those roles reading
-          // "applicant count not loaded yet" with no way back.
-          hydrated = true;
+          // focusJob proves the page has ASKED for this job's applicants. The
+          // count arrives with the answer, so it is the count itself that is
+          // waited on: re-read the cache until it is there. The old code read
+          // once, straight after focusJob, and got the null it had just been
+          // told about - which is the missing counts the owner reopens the
+          // panel to fix. Nothing here touches the network; this is the page's
+          // own cache, read again.
+          for (let attempt = 1; attempt <= COUNTS_TRIES; attempt += 1) {
+            jobs = await tabs.ask(tab.id, { type: CX.LIST_JOBS });
+            const counted = jobs.find((job) => job.jobId === blank.jobId)?.actionableCount;
+            if (counted != null) break;
+            // The role may simply have no count to give. Waited out in full
+            // first, and only then written down as such.
+            if (attempt === COUNTS_TRIES) noCountFor.add(blank.jobId);
+            else await sleep(READY_POLL_MS);
+          }
         } catch {
           // The list is still usable without counts, and a failed navigation is
-          // not worth throwing away the jobs we already have.
+          // not worth throwing away the jobs we already have. Nothing is
+          // remembered about the role either: this pass established nothing.
         }
       }
 
@@ -532,6 +560,12 @@ export function createController({
         acceptRefused: 0,
         acceptFailed: 0,
         acceptAlready: 0,
+        // People whose send was clicked and whose outcome nothing could settle,
+        // even after the accept pass asked again at the end of the role. Kept
+        // apart from `accepted` and from `acceptFailed` because it is neither:
+        // saying either about these people is the mistake this counter exists
+        // to stop the report making.
+        acceptUnresolved: 0,
       };
       // Per job, so the summary can name which job hit the limit and which one
       // stopped early. Without this those reasons died inside job_done, which
@@ -711,8 +745,10 @@ export function createController({
             totals.acceptRefused += acceptResult.refusedNoResume;
             totals.acceptFailed += acceptResult.failed;
             totals.acceptAlready += acceptResult.alreadyAccepted;
+            totals.acceptUnresolved += acceptResult.unresolved;
             stop.accepted = acceptResult.accepted;
             stop.acceptIntended = acceptResult.intended;
+            stop.acceptUnresolved = acceptResult.unresolved;
             stop.acceptStoppedBecause = acceptResult.stoppedBecause;
           } else {
             // A run that was never accepting says so in the column rather than
