@@ -1,5 +1,5 @@
 import { runJob, runActions } from '../lib/runner.js';
-import { toCsv, PREVIEW } from '../lib/csv.js';
+import { toCsv, PREVIEW, ACCEPT_STATUS } from '../lib/csv.js';
 import { sleep as realSleep } from '../lib/jitter.js';
 import { CX } from '../lib/messages.js';
 import { createTrace, scrubVariables } from '../lib/trace.js';
@@ -8,6 +8,7 @@ import { consoleSink } from './verbose-console.js';
 import { createTabDriver } from './tab-driver.js';
 import { createLedgerService } from './ledger-service.js';
 import { registerFilenameHandler, downloadResume, downloadBlobText } from './downloader.js';
+import { runAcceptPass } from './accept-pass.js';
 
 // The trace's one word for which of the four modes a run is. 'live' is what the
 // download-only run has always been called in the trace, and stays.
@@ -86,6 +87,25 @@ export function createController({
         jobId,
         userId: event.userId,
         outcome: event.outcome,
+        error: event.error,
+      });
+    // The accept pass, in the same three shapes the download walk uses: one
+    // entry when it starts, one per person it acted on, one when it stops. The
+    // name never travels, exactly as on `candidate`.
+    else if (event.type === 'accept_started')
+      trace.record('accept_start', { jobId, count: event.intended });
+    else if (event.type === 'accept_candidate')
+      trace.record('accept_candidate', {
+        jobId,
+        userId: event.userId,
+        outcome: event.outcome,
+        error: event.error,
+      });
+    else if (event.type === 'accept_done')
+      trace.record('accept_done', {
+        jobId,
+        count: event.accepted,
+        outcome: event.stoppedBecause,
         error: event.error,
       });
     else if (event.type === 'resting') trace.record('sleep', { jobId, ms: event.ms, kind: 'rest' });
@@ -226,7 +246,11 @@ export function createController({
     // under the summary and store it beside one.
     trace,
 
-    async startRun({ jobs: requested, folder, pageSize, actions: asked }) {
+    // `acceptMessage` is the operator's wording, passed in rather than reached
+    // for: the panel shows the exact text on the confirm screen, and the text
+    // that was shown must be the text that is sent. Absent, accept-message.js's
+    // own default stands.
+    async startRun({ jobs: requested, folder, pageSize, actions: asked, acceptMessage }) {
       const actions = runActions(asked);
       const signal = takeLock();
       trace.reset();
@@ -245,6 +269,15 @@ export function createController({
         skippedNoResume: 0,
         skippedNoId: 0,
         masked: 0,
+        // The accept dimension, counted separately from every download number
+        // above it: they answer different questions, and a summary that added
+        // them together would say a run touched more people than it did.
+        accepted: 0,
+        // People this run declined to accept because their resume was never
+        // captured. Accepting them would have lost that resume for good.
+        acceptRefused: 0,
+        acceptFailed: 0,
+        acceptAlready: 0,
       };
       // Per job, so the summary can name which job hit the limit and which one
       // stopped early. Without this those reasons died inside job_done, which
@@ -337,6 +370,49 @@ export function createController({
             await ledgerService.finishRun(jobId, { folder });
             trace.record('ledger_write', { jobId, count: result.downloaded.length });
           }
+          // Pass 2, and only now: accepting removes people from the very
+          // NEEDS_REVIEW collection pass 1 above paginates with a cursor, so
+          // the two passes are never interleaved. It drives the applicant
+          // reviewer rather than the API, which is why it is a second pass
+          // over the same job rather than a branch inside runJob.
+          //
+          // Before the CSV write, not after: an accepted candidate can never
+          // be fetched again, so this file is the only surviving copy of what
+          // happened to them, and its Accept column has to say. The pass never
+          // throws - an abort, a refusal or an unclear send all come back as a
+          // result - so the CSV below is still written either way.
+          if (actions.accept) {
+            const acceptResult = await runAcceptPass(
+              {
+                review: (message) => tabs.ask(tab.id, message),
+                recordAccepted: (id, userId) => ledgerService.recordAccepted(id, userId),
+                sleep,
+                emit,
+              },
+              {
+                jobId,
+                jobTitle,
+                records: result.records,
+                alreadyAccepted: await ledgerService.acceptedUserIdsFor(jobId),
+                template: acceptMessage,
+                signal,
+              },
+            );
+            totals.accepted += acceptResult.accepted;
+            totals.acceptRefused += acceptResult.refusedNoResume;
+            totals.acceptFailed += acceptResult.failed;
+            totals.acceptAlready += acceptResult.alreadyAccepted;
+            stop.accepted = acceptResult.accepted;
+            stop.acceptIntended = acceptResult.intended;
+            stop.acceptStoppedBecause = acceptResult.stoppedBecause;
+          } else {
+            // A run that was never accepting says so in the column rather than
+            // leaving it blank, which reads as "we tried and nothing happened".
+            for (const record of result.records) {
+              record.acceptStatus = ACCEPT_STATUS.NOT_ACCEPTING;
+            }
+          }
+
           // A job that yielded nothing wrote no CSV and said nothing at all,
           // which reads as a silent failure rather than an empty queue.
           const wrote = await writeCsv(jobId, result.records, folder);
@@ -346,12 +422,6 @@ export function createController({
           // event, and the post-run screen replaces the screen entirely. The
           // durable account is `wroteCsv` above, which summary.js reads.
           if (!wrote) emit({ type: 'job_note', jobId, jobTitle, note: 'no applicants to export' });
-
-          // Where the accept pass slots in, when `actions.accept` is set: it
-          // drives the applicant reviewer rather than this API walk, so it is a
-          // second pass over the same job rather than a branch inside runJob.
-          // The driver that performs it is owned elsewhere and is not wired up
-          // here yet, so ticking accept currently changes nothing but the trace.
 
           // The five-failure stop is per job, but the cause almost never is: if
           // Wellfound starts refusing signed URLs, every remaining job would

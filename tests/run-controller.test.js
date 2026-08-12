@@ -24,8 +24,18 @@ function fakePage({
   // A whole recruiter account, for the runs that walk more than one role.
   jobs = null,
   peopleByJob = null,
+  // The applicant reviewer's bucket, per job: the userIds a recruiter would
+  // see in the modal. A queue, as measured live - an accept removes the
+  // candidate and holds the index, a skip advances the index.
+  bucketByJob = null,
 }) {
-  const calls = { fetches: [], listJobs: 0 };
+  const calls = { fetches: [], listJobs: 0, reviewer: [] };
+  const buckets = new Map();
+  const positions = new Map();
+  const bucketFor = (jobId) => {
+    if (!buckets.has(jobId)) buckets.set(jobId, (bucketByJob?.[jobId] ?? []).map(String));
+    return buckets.get(jobId);
+  };
   const server = async (message, context) => {
     // The probe answers for the job the tab is actually showing, as a real
     // document does: readiness alone was answerable by a stale page.
@@ -86,6 +96,42 @@ function fakePage({
         },
       };
     }
+    // The reviewer, which is positional and knows nothing about jobs: it acts
+    // on whatever the tab is showing, so the job comes from the URL exactly as
+    // the readiness probe's does.
+    const reviewerTypes = [
+      CX.OPEN_REVIEWER,
+      CX.READ_CANDIDATE,
+      CX.ACCEPT_CANDIDATE,
+      CX.SKIP_CANDIDATE,
+    ];
+    if (reviewerTypes.includes(message.type)) {
+      const jobId = String(context?.tab?.url ?? '').match(/jobs\/(\d+)/)?.[1] ?? null;
+      calls.reviewer.push({ jobId, type: message.type, ...(message.payload ?? {}) });
+      const queue = bucketFor(jobId);
+      if (message.type === CX.OPEN_REVIEWER) positions.set(jobId, 1);
+      const at = () => {
+        const index = positions.get(jobId) ?? 1;
+        return index > queue.length
+          ? null
+          : { userId: queue[index - 1], index, total: queue.length };
+      };
+      if (message.type === CX.SKIP_CANDIDATE) {
+        positions.set(jobId, (positions.get(jobId) ?? 1) + 1);
+      }
+      if (message.type === CX.ACCEPT_CANDIDATE) {
+        const here = at();
+        if (!here || here.userId !== String(message.payload.expectedUserId)) {
+          return { ok: false, error: `The reviewer is showing ${here?.userId}` };
+        }
+        queue.splice((positions.get(jobId) ?? 1) - 1, 1);
+        return { ok: true, data: { userId: here.userId, accepted: true, next: at() } };
+      }
+      const now = at();
+      if (!now) return { ok: false, error: 'The reviewer has no candidate at this position' };
+      return { ok: true, data: message.type === CX.OPEN_REVIEWER ? { opened: true, ...now } : now };
+    }
+
     return { ok: false, error: `unexpected message ${message.type}` };
   };
   server.calls = calls;
@@ -116,8 +162,9 @@ function setup({
   jobs = null,
   peopleByJob = null,
   actionableCount = null,
+  bucketByJob = null,
 } = {}) {
-  const page = fakePage({ people, jobs, peopleByJob, actionableCount });
+  const page = fakePage({ people, jobs, peopleByJob, actionableCount, bucketByJob });
   fake = installFakeChrome({ tabs: [{ id: TAB, url: tabUrl }], pages: { [TAB]: page }, storage });
   return page;
 }
@@ -1134,3 +1181,157 @@ describe('when a role stops because everything is failing', () => {
     for (const id of ['7700001', '7700005']) expect(csv).toContain(id);
   });
 });
+
+// The accept pass, end to end: the real controller, the real ledger, the real
+// CSV writer, against a reviewer that drains like the measured one.
+describe('the accept pass', () => {
+  const acceptRun = (controller, extra = {}) =>
+    controller.startRun({
+      jobs: [{ jobId: JOB, limit: Infinity }],
+      folder: 'resumes',
+      pageSize: 1,
+      actions: { download: true, accept: true },
+      ...extra,
+    });
+
+  // Rule 1, and the reason this is a pass rather than a branch: accepting
+  // removes people from the collection the API walk paginates, so a single
+  // accept before the last fetch silently shortens the walk. Every fetch for a
+  // job must therefore precede that job's first reviewer message.
+  it('finishes the whole API walk before it opens the reviewer', async () => {
+    const roster = ['7700001', '7700002', '7700003'];
+    const page = setup({
+      people: roster.map((id) => person(id)),
+      bucketByJob: { [JOB]: roster },
+    });
+    const controller = await controllerFor();
+    await acceptRun(controller);
+
+    const order = fake.calls.sendMessage.map((c) => c.message.type);
+    const lastFetch = order.lastIndexOf(CX.FETCH_PAGE);
+    const firstReviewer = order.indexOf(CX.OPEN_REVIEWER);
+    expect(page.calls.fetches.length).toBeGreaterThan(1);
+    expect(firstReviewer).toBeGreaterThan(lastFetch);
+  });
+
+  it('accepts everyone it captured, records them, and writes it in the CSV', async () => {
+    const roster = ['7700001', '7700002'];
+    setup({
+      people: roster.map((id) => person(id)),
+      bucketByJob: { [JOB]: roster },
+    });
+    const controller = await controllerFor();
+    await acceptRun(controller);
+
+    expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(roster);
+    const done = events.find((e) => e.type === 'done');
+    expect(done).toMatchObject({ accepted: 2, acceptRefused: 0, acceptFailed: 0 });
+    const csv = await objectUrls[0].text();
+    expect(csv.match(/,accepted,/g)).toHaveLength(2);
+  });
+
+  // Rule 2 at the level the operator sees it: the person with no resume is in
+  // the bucket, and the run walks past them rather than losing them forever.
+  it('refuses to accept anybody whose resume was never captured', async () => {
+    const roster = ['7700001', '7700002'];
+    setup({
+      people: [person('7700001'), { ...person('7700002'), resumeUrl: null }],
+      bucketByJob: { [JOB]: roster },
+    });
+    const controller = await controllerFor();
+    await acceptRun(controller);
+
+    const sent = fake.calls.sendMessage
+      .filter((c) => c.message.type === CX.ACCEPT_CANDIDATE)
+      .map((c) => c.message.payload.expectedUserId);
+    expect(sent).toEqual(['7700001']);
+    expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(['7700001']);
+    const done = events.find((e) => e.type === 'done');
+    expect(done).toMatchObject({ accepted: 1, acceptRefused: 1 });
+    const csv = await objectUrls[0].text();
+    expect(csv).toContain('refused: no resume on file');
+  });
+
+  it('sends the operator s wording, with the candidate and the role in it', async () => {
+    setup({
+      people: [person('7700001', 'Jane Doe')],
+      bucketByJob: { [JOB]: ['7700001'] },
+    });
+    const controller = await controllerFor();
+    await acceptRun(controller, { acceptMessage: 'Hey [first_name], re [role_name].' });
+
+    const sent = fake.calls.sendMessage.find((c) => c.message.type === CX.ACCEPT_CANDIDATE);
+    expect(sent.message.payload.message).toBe('Hey Jane, re Platform Engineer.');
+  });
+
+  it('leaves the reviewer alone entirely when the run is not accepting', async () => {
+    setup({
+      people: [person('7700001')],
+      bucketByJob: { [JOB]: ['7700001'] },
+    });
+    const controller = await controllerFor();
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: Infinity }],
+      folder: 'resumes',
+      pageSize: 10,
+    });
+
+    const order = fake.calls.sendMessage.map((c) => c.message.type);
+    expect(order).not.toContain(CX.OPEN_REVIEWER);
+    const csv = await objectUrls[0].text();
+    expect(csv).toContain('not attempted: this run was not accepting');
+  });
+
+  it('does not send a second message to somebody the ledger already accepted', async () => {
+    setup({
+      people: [person('7700001')],
+      bucketByJob: { [JOB]: ['7700001'] },
+      storage: {
+        [`job:${JOB}`]: {
+          jobId: JOB,
+          seenUserIds: [],
+          totalDownloaded: 0,
+          accepted: { 7700001: '2026-08-11 09:00:00' },
+        },
+      },
+    });
+    const controller = await controllerFor();
+    await acceptRun(controller);
+
+    const order = fake.calls.sendMessage.map((c) => c.message.type);
+    expect(order).not.toContain(CX.ACCEPT_CANDIDATE);
+    const csv = await objectUrls[0].text();
+    expect(csv).toContain('already accepted');
+  });
+
+  it('keeps the CSV when the accept pass stops on an unclear send', async () => {
+    const roster = ['7700001', '7700002'];
+    setup({
+      people: roster.map((id) => person(id)),
+      bucketByJob: { [JOB]: roster },
+    });
+    const controller = await controllerFor();
+    const send = fake.chrome.tabs.sendMessage;
+    fake.chrome.tabs.sendMessage = async (tabId, message) => {
+      if (message.type === CX.ACCEPT_CANDIDATE) throw new Error('Could not confirm the accept');
+      return send(tabId, message);
+    };
+    await acceptRun(controller);
+
+    const done = events.find((e) => e.type === 'done');
+    expect(done).toMatchObject({ accepted: 0, acceptFailed: 1, stoppedBecause: 'finished' });
+    // The run itself is unharmed: the resumes are on disk, the ledger has them,
+    // and the file that is now the only record of these people was written.
+    expect(done.jobs[0].wroteCsv).toBe(true);
+    const csv = await objectUrls[0].text();
+    expect(csv).toContain('failed: Could not confirm the accept');
+    expect(csv).toContain('not attempted: the run stopped first');
+    expect(trace_hasAcceptStop(controller)).toBe(true);
+  });
+});
+
+// The trace is the durable account of where a run stopped, so the accept pass
+// has to be in it as plainly as the walk is.
+function trace_hasAcceptStop(controller) {
+  return controller.trace.entries().some((e) => e.step === 'accept_done' && e.outcome === 'unclear');
+}
