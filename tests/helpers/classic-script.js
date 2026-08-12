@@ -63,6 +63,9 @@ export function loadClassicScript(relativePath, { globals = {}, expose = null } 
     String,
     Boolean,
     Array,
+    Number,
+    Date,
+    Symbol,
   };
   if (expose) context[expose] = exposed;
   runInNewContext(source, context);

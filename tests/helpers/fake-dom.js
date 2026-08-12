@@ -146,6 +146,15 @@ class FakeElement {
     else this.removeAttribute('disabled');
   }
 
+  get hidden() {
+    return this.hasAttribute('hidden');
+  }
+
+  set hidden(next) {
+    if (next) this.setAttribute('hidden', '');
+    else this.removeAttribute('hidden');
+  }
+
   get open() {
     return this.hasAttribute('open');
   }
@@ -260,8 +269,23 @@ class FakeElement {
     return Promise.all(handlers.map((handler) => handler(event)));
   }
 
+  // An event object, as a caller in a page would build one. Only the type is
+  // consulted here; there is no bubbling, so a listener sits on the element the
+  // event is dispatched to.
+  dispatchEvent(event) {
+    this.dispatch(event?.type, event);
+    return true;
+  }
+
   click() {
     return this.dispatch('click');
+  }
+
+  // The reviewer decides whether a control is visible before it clicks it. A
+  // browser answers that with layout; here a test says so directly, by setting
+  // `rect` to a zero-sized box for something the page is not showing.
+  getBoundingClientRect() {
+    return this.rect ?? { width: 120, height: 32, top: 0, left: 0, bottom: 32, right: 120 };
   }
 
   // --- stubs the panel calls but never observes -----------------------------
@@ -400,6 +424,21 @@ class FakeDocument {
   constructor() {
     this.documentElement = new FakeElement('html');
     this.body = this.documentElement.appendChild(new FakeElement('body'));
+    // Keyboard traffic in a page goes to the document, so the document listens
+    // and dispatches like an element does.
+    this.events = new FakeElement('document');
+  }
+
+  addEventListener(type, handler) {
+    this.events.addEventListener(type, handler);
+  }
+
+  removeEventListener(type, handler) {
+    this.events.removeEventListener(type, handler);
+  }
+
+  dispatchEvent(event) {
+    return this.events.dispatchEvent(event);
   }
 
   createElement(tag) {
