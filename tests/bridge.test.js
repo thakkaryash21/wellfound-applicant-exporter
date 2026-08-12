@@ -9,12 +9,14 @@ function load() {
   const fakeWindow = createFakeWindow();
   const runtimeListeners = [];
   const chrome = { runtime: { onMessage: { addListener: (fn) => runtimeListeners.push(fn) } } };
-  loadClassicScript('src/content/bridge.js', {
+  const { exposed } = loadClassicScript('src/content/bridge.js', {
     globals: { window: fakeWindow.window, chrome },
+    expose: '__WFX_BRIDGE__',
   });
   const listener = runtimeListeners[0];
   return {
     ...fakeWindow,
+    budget: exposed,
     // What the panel sends. The returned value is the one Chrome reads to
     // decide whether sendResponse may still be called.
     send(message) {
@@ -101,7 +103,7 @@ describe('the bridge', () => {
   it('answers not-ok when the page goes quiet, rather than hanging the run forever', async () => {
     const bridge = load();
     const sent = bridge.send({ type: 'CX_LIST_JOBS' });
-    await vi.advanceTimersByTimeAsync(29999);
+    await vi.advanceTimersByTimeAsync(44999);
     expect(sent.read()).toBe(undefined);
     await vi.advanceTimersByTimeAsync(1);
     await flush();
@@ -133,6 +135,12 @@ describe('the bridge', () => {
     expect(sent.read()).toEqual({ ok: true, data: 'first' });
   });
 
+  it('forwards the teardown message, which is how a composer ever gets closed', async () => {
+    const bridge = load();
+    expect(bridge.send({ type: 'CX_CLOSE_REVIEWER' }).returned).toBe(true);
+    expect(bridge.lastAsk()).toMatchObject({ source: 'wfx-cs', type: 'CLOSE_REVIEWER' });
+  });
+
   it('ignores traffic from other frames, other senders and unknown ids', async () => {
     const bridge = load();
     const sent = bridge.send({ type: 'CX_LIST_JOBS' });
@@ -142,5 +150,46 @@ describe('the bridge', () => {
     bridge.reply('wfx-999', { ok: true, data: 'nobody asked' });
     await flush();
     expect(sent.read()).toBe(undefined);
+  });
+});
+
+// The relationship that used to be arithmetic in nobody's comment.
+//
+// One ACCEPT_CANDIDATE can legitimately occupy most of this budget: the composer
+// wait, both operator-shaped pauses, and the confirmation wait. If the budget
+// expires around one, the panel is told the page went quiet WHILE THE MESSAGE IS
+// GOING OUT - booked as failed, never written to the ledger, and a candidate for
+// being messaged a second time on a later run. It was 30000 against a driver
+// worst case of 28000: two seconds, in two files, related by nothing.
+//
+// It is now stated on both sides and checked here, against the driver's real
+// constant read out of the real file rather than a number retyped into a test.
+describe('the budget against the driver it has to cover', () => {
+  // reviewer.js is a classic MAIN-world script like the bridge, so it is loaded
+  // the same way. It touches `document` only inside its functions, so a window
+  // is all it needs to publish its constants.
+  function reviewerBudget() {
+    const { exposed } = loadClassicScript('src/content/reviewer.js', {
+      globals: { window: createFakeWindow().window },
+      expose: '__WFX_REVIEWER__',
+    });
+    return exposed.ACCEPT_WORST_CASE_MS;
+  }
+
+  it('covers the driver worst case the driver itself declares', () => {
+    const { budget } = load();
+    // Not "roughly equal to": the same number. The bridge's copy is a claim
+    // about another file, and a claim nothing checks is a comment.
+    expect(budget.DRIVER_WORST_CASE_MS).toBe(reviewerBudget());
+  });
+
+  it('leaves margin on top of it rather than sitting flush against it', () => {
+    const { budget } = load();
+    expect(budget.TIMEOUT_MS).toBe(budget.DRIVER_WORST_CASE_MS + budget.MARGIN_MS);
+    // Half as much again. A driver operation that runs long is a page behaving
+    // unusually, and the answer to that is to let the driver's own confirmation
+    // contract reach its own conclusion - not to have the relay give up first
+    // and hand the panel an unclear outcome the driver could have named.
+    expect(budget.MARGIN_MS).toBeGreaterThanOrEqual(budget.DRIVER_WORST_CASE_MS / 2);
   });
 });

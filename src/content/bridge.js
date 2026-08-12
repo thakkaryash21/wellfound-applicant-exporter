@@ -14,8 +14,42 @@
     'ACCEPT_CANDIDATE',
     'SKIP_CANDIDATE',
     'STOP',
+    'CLOSE_REVIEWER',
   ]);
-  const TIMEOUT_MS = 30000;
+
+  // The budget, and where it comes from.
+  //
+  // ACCEPT_CANDIDATE is by far the longest message this relay carries, and a
+  // budget that expires around one is not a timeout - it is the panel being told
+  // the page went quiet while the message is on its way out. The candidate is
+  // then booked as failed, never written to the ledger, and is a candidate for
+  // being messaged a second time on a later run. Nothing retries the send, but
+  // nothing has to: the second run does not know it happened.
+  //
+  // That budget used to be 30000 against a driver whose own worst case was
+  // 28000, in a different file, with the relationship stated nowhere. Two
+  // seconds of margin, held by arithmetic in a comment.
+  //
+  // Now the driver states its worst case and enforces it - src/content/reviewer.js
+  // clamps the pauses the panel hands it so that no accept may exceed the figure
+  // below - and this is that figure, plus margin. The duplication is the same
+  // one the message types above carry, for the same reason: a classic content
+  // script cannot import. tests/bridge.test.js reads both constants and fails if
+  // they stop agreeing, so the copy cannot drift silently.
+  //
+  //   composer wait  5000  (COMPOSER_TIMEOUT_MS)
+  //   before paste   5000  (clamped, PACING.beforePasteMs upper bound)
+  //   after paste    3000  (clamped, PACING.afterPasteMs upper bound)
+  //   confirm wait  15000  (CONFIRM_TIMEOUT_MS)
+  //   slack          2000  (poll granularity, click dispatch, re-render)
+  //                 -----
+  //                 30000
+  const DRIVER_WORST_CASE_MS = 30000;
+  // Half as much again. Large because expiring early costs a person a second
+  // message, and waiting too long costs the operator a few seconds in front of
+  // a panel that is already telling them the run has stopped.
+  const MARGIN_MS = 15000;
+  const TIMEOUT_MS = DRIVER_WORST_CASE_MS + MARGIN_MS;
   const pending = new Map();
   let counter = 0;
 
@@ -56,7 +90,15 @@
     ['CX_ACCEPT_CANDIDATE', 'ACCEPT_CANDIDATE'],
     ['CX_SKIP_CANDIDATE', 'SKIP_CANDIDATE'],
     ['CX_STOP_REVIEWER', 'STOP'],
+    ['CX_CLOSE_REVIEWER', 'CLOSE_REVIEWER'],
   ]);
+
+  // The relay has no logic to reach into and exposes none. These two numbers are
+  // the exception: they are a claim about another file, and a claim is worth
+  // nothing if nothing can check it.
+  if (globalThis.__WFX_BRIDGE__) {
+    Object.assign(globalThis.__WFX_BRIDGE__, { TIMEOUT_MS, DRIVER_WORST_CASE_MS, MARGIN_MS });
+  }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     const type = FROM_PANEL.get(message?.type);
