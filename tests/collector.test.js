@@ -93,6 +93,156 @@ describe('unwrapPage', () => {
   });
 });
 
+// The counts have a query of their own, and it is the only thing that answers
+// for them. The cache holds titles from the moment the page loads and counts
+// long afterwards, if at all, which is why every version of this that watched
+// the cache reported one count out of sixteen.
+const COUNTS_OP_NAME = 'RecruitApplicantCounts';
+
+// The measured shape: no titles, an id and two counts per listing.
+function countsResponse(listings) {
+  return {
+    talent: {
+      viewer: {
+        currentStartup: {
+          jobListings: listings.map(({ id, count }) => ({
+            __typename: 'JobListing',
+            id,
+            actionableApplicantsCount: count,
+            shortlistedApplicantsCount: 0,
+          })),
+        },
+      },
+    },
+  };
+}
+
+// A page that has both queries live, or only the applicants one when
+// `countsRegistered` is false - which is what wellfound.com/recruit looks like.
+function apolloWithCounts({
+  snapshot = {},
+  listings = [],
+  countsRegistered = true,
+  countsVariables = { visibility: 'LIVE' },
+  countsFails = null,
+} = {}) {
+  const calls = [];
+  const applicants = {
+    options: { query: { definitions: [{ name: { value: OP_NAME } }] }, variables: {} },
+  };
+  const counts = {
+    options: {
+      query: { definitions: [{ name: { value: COUNTS_OP_NAME } }] },
+      variables: countsVariables,
+    },
+  };
+  const live = countsRegistered ? [applicants, counts] : [applicants];
+  return {
+    calls,
+    counts,
+    client: {
+      getObservableQueries: () => new Map(live.map((q, i) => [`q${i}`, q])),
+      cache: { extract: () => snapshot },
+      async query(args) {
+        calls.push(args);
+        if (args.query === counts.options.query) {
+          if (countsFails) throw new Error(countsFails);
+          return { data: countsResponse(listings) };
+        }
+        return { data: capturedResponse() };
+      },
+    },
+  };
+}
+
+describe('the applicant counts', () => {
+  // Titles and no counts, which is every cache this panel has ever met.
+  const untitledCounts = {
+    'JobListing:9100001': { __typename: 'JobListing', id: 9100001, title: 'Platform Engineer' },
+    'JobListing:9100002': { __typename: 'JobListing', id: 9100002, title: 'Data Scientist' },
+  };
+
+  it('come from the query, not from waiting for the cache to fill', async () => {
+    const apollo = apolloWithCounts({
+      snapshot: untitledCounts,
+      listings: [
+        { id: 9100001, count: 101 },
+        { id: 9100002, count: 2 },
+      ],
+    });
+    const { listJobs } = load({ apollo: apollo.client });
+    expect(await listJobs()).toEqual([
+      { jobId: '9100002', title: 'Data Scientist', actionableCount: 2, draft: false },
+      { jobId: '9100001', title: 'Platform Engineer', actionableCount: 101, draft: false },
+    ]);
+  });
+
+  // The counts response carries no titles at all, so this is a join and not a
+  // replacement: the titles can only come from the cache.
+  it('are joined onto the titles the cache holds, by id', async () => {
+    const apollo = apolloWithCounts({
+      snapshot: untitledCounts,
+      listings: [{ id: 9100002, count: 2 }],
+    });
+    const { listJobs } = load({ apollo: apollo.client });
+    const jobs = await listJobs();
+    expect(jobs.map((j) => j.title)).toEqual(['Data Scientist', 'Platform Engineer']);
+    // The listing the query said nothing about keeps what the cache had.
+    expect(jobs.map((j) => j.actionableCount)).toEqual([2, null]);
+  });
+
+  it('are asked for over the network, on the variables the page uses', async () => {
+    const apollo = apolloWithCounts({ snapshot: untitledCounts, listings: [] });
+    const { listJobs } = load({ apollo: apollo.client });
+    await listJobs();
+    const [ask] = apollo.calls;
+    expect(ask.fetchPolicy).toBe('network-only');
+    expect(ask.variables).toEqual({ visibility: 'LIVE' });
+    // Copied, because the object belongs to the live query and Apollo is still
+    // reading it.
+    expect(ask.variables).not.toBe(apollo.counts.options.variables);
+  });
+
+  // wellfound.com/recruit holds every title and registers no counts query at
+  // all. The roles are still listable, and the panel's answer to a missing
+  // count is to go where the query lives.
+  it('are absent, not fatal, on a page where the query is not registered', async () => {
+    const apollo = apolloWithCounts({ snapshot: untitledCounts, countsRegistered: false });
+    const { listJobs } = load({ apollo: apollo.client });
+    expect((await listJobs()).map((j) => j.actionableCount)).toEqual([null, null]);
+  });
+
+  it('leave the roles listed when the query fails outright', async () => {
+    const apollo = apolloWithCounts({
+      snapshot: untitledCounts,
+      countsFails: 'Network request failed',
+    });
+    const { listJobs } = load({ apollo: apollo.client });
+    expect((await listJobs()).map((j) => j.title)).toEqual([
+      'Data Scientist',
+      'Platform Engineer',
+    ]);
+  });
+
+  it('read a count Wellfound omits as unknown, never as zero', () => {
+    const { countsFrom } = load();
+    const counts = countsFrom(
+      countsResponse([
+        { id: 9100001, count: undefined },
+        { id: 9100002, count: 0 },
+      ]),
+    );
+    expect(counts.get('9100001')).toBe(null);
+    expect(counts.get('9100002')).toBe(0);
+  });
+
+  it('answer with nothing for a response that carries no listings', () => {
+    const { countsFrom } = load();
+    expect(countsFrom(undefined).size).toBe(0);
+    expect(countsFrom({}).size).toBe(0);
+  });
+});
+
 describe('listJobsFrom', () => {
   const snapshot = {
     'JobListing:2': { __typename: 'JobListing', id: 2, title: 'Backend Engineer' },

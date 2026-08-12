@@ -5,6 +5,11 @@
 // strings are duplicated inline rather than imported.
 (() => {
   const OP = 'RecruitJobListingApplicants';
+  // The counts have a query of their own, and it is the reason the panel spent
+  // three attempts waiting for numbers that arrive after the page is loaded.
+  // The cache fills with titles long before this answers, so anything that
+  // watched the cache saw a finished page holding one count out of sixteen.
+  const COUNTS_OP = 'RecruitApplicantCounts';
 
   function client() {
     const c = window.__APOLLO_CLIENT__;
@@ -12,13 +17,13 @@
     return c;
   }
 
-  function liveQuery() {
+  function liveQuery(name = OP) {
     const queries = [...client().getObservableQueries().values()];
     const found = queries.find((q) => {
       const def = q.options?.query?.definitions?.[0];
-      return def?.name?.value === OP;
+      return def?.name?.value === name;
     });
-    if (!found) throw new Error(`${OP} is not active yet`);
+    if (!found) throw new Error(`${name} is not active yet`);
     return found;
   }
 
@@ -36,8 +41,56 @@
       .sort((a, b) => a.title.localeCompare(b.title));
   }
 
-  function listJobs() {
-    return listJobsFrom(client().cache.extract());
+  // The counts response, reduced to id -> count. It carries no titles, which is
+  // why this is a merge rather than a replacement: the titles are in the cache
+  // and only there.
+  function countsFrom(data) {
+    const listings = data?.talent?.viewer?.currentStartup?.jobListings ?? [];
+    const counts = new Map();
+    for (const listing of listings) {
+      if (listing?.id == null) continue;
+      counts.set(String(listing.id), listing.actionableApplicantsCount ?? null);
+    }
+    return counts;
+  }
+
+  // Titles from the cache, counts from the query, joined on the id. A listing
+  // the counts query said nothing about keeps whatever the cache had, which for
+  // a job the recruiter has never opened is null.
+  function mergeCounts(jobs, counts) {
+    return jobs.map((job) =>
+      counts.has(job.jobId) ? { ...job, actionableCount: counts.get(job.jobId) } : job,
+    );
+  }
+
+  // Ask for the counts rather than wait for them. Same technique fetchPage
+  // uses: find the page's own live query by name, reuse its document and its
+  // variables, and force the network so the answer is this moment's rather than
+  // whatever the cache was left holding.
+  async function fetchCounts() {
+    const q = liveQuery(COUNTS_OP);
+    const result = await client().query({
+      query: q.options.query,
+      // Deep-copied because the object belongs to the live query and Apollo is
+      // still reading it. Nothing is overridden: the page's own variables are
+      // the ones that answer for this recruiter.
+      variables: JSON.parse(JSON.stringify(q.options.variables ?? {})),
+      fetchPolicy: 'network-only',
+    });
+    if (result.errors?.length) throw new Error(result.errors[0].message);
+    return countsFrom(result.data);
+  }
+
+  async function listJobs() {
+    const jobs = listJobsFrom(client().cache.extract());
+    try {
+      return mergeCounts(jobs, await fetchCounts());
+    } catch {
+      // The counts query is only registered in the applicants area, and it can
+      // fail like anything else. A role with no count is still a role the panel
+      // can list and the run can walk, so the list is never thrown away for it.
+      return jobs;
+    }
   }
 
   // The UI's own variables with only the three this extension owns replaced.
@@ -137,6 +190,9 @@
   if (globalThis.__WFX_COLLECTOR__) {
     Object.assign(globalThis.__WFX_COLLECTOR__, {
       listJobsFrom,
+      countsFrom,
+      mergeCounts,
+      fetchCounts,
       mergeVariables,
       unwrapPage,
       listJobs,

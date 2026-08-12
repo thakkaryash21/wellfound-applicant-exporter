@@ -649,74 +649,47 @@ describe('listJobs hydration', () => {
     return page;
   }
 
-  // The second half of the owner's report, as it actually happened on a
-  // sixteen-role account: the panel navigated, the count for the role it
-  // navigated to arrived first - the applicants query is what the new document
-  // runs first - and every other count arrived later, from the job list query.
-  // A wait that ended on a count being present ended between the two, so the
-  // panel showed one count and fifteen roles reading "not loaded yet" while
-  // Wellfound's own sidebar showed them all.
+  // The measured shape of the page, and the reason three attempts at this bug
+  // all failed: the counts have a query of their own, it is registered only in
+  // the applicants area, and it answers long after the document is loaded. So
+  // outside that area every role reads null however long anything waits, and
+  // inside it one ask returns all sixteen.
   //
-  // The part that made this hard to see: Chrome reports the tab `complete` for
-  // the document being LEFT, so anything that asks "is this tab loaded" is
-  // answered yes while the new document is still on its way. Only the loading
-  // -> complete pair on the tab says the new one arrived, so this fake sends
-  // that pair on its own schedule rather than with the url change.
-  //
-  // `late` is how many reads after the document arrives the job list query
-  // takes to answer. Zero is the two queries landing together.
-  function slowLoad({ late = 0, roles = 3 } = {}) {
-    let navigated = false;
-    let arrived = false;
-    let reads = 0;
+  // `counted` is what the page answers with, and it depends on where the tab
+  // is - exactly as the real page does.
+  function countsOnlyInTheApplicantsArea({ roles = 3 } = {}) {
     const others = Array.from({ length: roles - 1 }, (_, i) => String(9100002 + i));
     setup({
       tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
       jobs: () => {
-        if (arrived) reads += 1;
+        const tab = fake.calls.updates.at(-1)?.url ?? 'https://wellfound.com/recruit/jobs/9100001';
+        const counted = tab.startsWith(APPLICANTS_URL);
         return [
-          // The role the panel navigates to. Counted by the applicants query,
-          // which the new document runs first.
-          { jobId: JOB, title: 'Platform Engineer', actionableCount: navigated ? 4 : null },
-          // Every other role, counted by the job list query when it answers.
+          { jobId: JOB, title: 'Platform Engineer', actionableCount: counted ? 4 : null },
           ...others.map((jobId, i) => ({
             jobId,
             title: `Data Scientist ${i + 1}`,
-            actionableCount: arrived && reads > late ? 7 : null,
+            actionableCount: counted ? 7 : null,
           })),
         ];
       },
     });
-    fake.chrome.tabs.update = async (tabId, props) => {
-      fake.calls.updates.push({ tabId, ...props });
-      navigated = true;
-      fake.setTabUrl(tabId, props.url);
-      // The tab keeps saying `complete` throughout, because the document being
-      // left is complete. This is the answer that used to be mistaken for the
-      // new page being there.
-      fake.chrome.tabs.onUpdated.emit(tabId, { status: 'loading' });
-      setTimeout(() => {
-        arrived = true;
-        fake.chrome.tabs.onUpdated.emit(tabId, { status: 'complete' });
-      }, 0);
-      return {};
-    };
   }
 
-  it('waits for the document to arrive before believing what the cache says', async () => {
-    slowLoad();
+  it('goes where the counts query lives and asks, rather than waiting', async () => {
+    countsOnlyInTheApplicantsArea();
+    const page = fake.chrome.tabs.sendMessage;
+    let reads = 0;
+    fake.chrome.tabs.sendMessage = async (tabId, message) => {
+      if (message.type === CX.LIST_JOBS) reads += 1;
+      return page(tabId, message);
+    };
     const controller = await controllerFor();
     const jobs = await controller.listJobs();
     expect(jobs.map((j) => j.actionableCount)).toEqual([4, 7, 7]);
-  });
-
-  // And the quiet window on top of it, for the gap between the two queries the
-  // arrived document then runs.
-  it('waits for the second query on a document that has already arrived', async () => {
-    slowLoad({ late: 3 });
-    const controller = await controllerFor();
-    const jobs = await controller.listJobs();
-    expect(jobs.map((j) => j.actionableCount)).toEqual([4, 7, 7]);
+    // The one that found nothing, and the one after the navigation that found
+    // everything. Nothing is read repeatedly in the hope of a better answer.
+    expect(reads).toBe(2);
   });
 
   // Nothing is written down about a role that came back without a count. The
@@ -746,10 +719,10 @@ describe('listJobs hydration', () => {
     expect((await controller.listJobs()).map((j) => j.actionableCount)).toEqual([4, 7]);
   });
 
-  // A role the page never counts must not hold the panel open to the bound, and
-  // it must not send the tab travelling again either: after the first trip the
-  // tab is already on that applicant list, so there is nowhere to go.
-  it('settles on a cache that has stopped filling, counts or no counts', async () => {
+  // A role the page never counts costs one ask and one trip, and never a
+  // second trip: after the first one the tab is already on that applicant list,
+  // so there is nowhere to go.
+  it('asks once more for a role the page does not count, and no more than that', async () => {
     setup({
       tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
       jobs: [
@@ -765,8 +738,8 @@ describe('listJobs hydration', () => {
     };
     const controller = await controllerFor();
     await controller.listJobs();
-    // The first read, then the four identical ones that say the page is done.
-    expect(reads).toBe(5);
+    // One read, then one more after the trip.
+    expect(reads).toBe(2);
     await controller.listJobs();
     expect(fake.calls.updates).toHaveLength(1);
   });

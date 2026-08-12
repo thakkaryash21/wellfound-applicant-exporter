@@ -6,7 +6,7 @@ import { CX } from '../lib/messages.js';
 import { createTrace, scrubVariables } from '../lib/trace.js';
 import { localDateStamp } from '../lib/local-time.js';
 import { consoleSink } from './verbose-console.js';
-import { createTabDriver, READY_POLL_MS } from './tab-driver.js';
+import { createTabDriver } from './tab-driver.js';
 import { createLedgerService } from './ledger-service.js';
 import { registerFilenameHandler, downloadResume, downloadBlobText } from './downloader.js';
 import { runAcceptPass } from './accept-pass.js';
@@ -40,40 +40,6 @@ const REVIEW_BUCKET = 'NEEDS_REVIEW';
 const QUEUE_CHECK_PAGE_SIZE = 10;
 const QUEUE_CHECK_PAGE_CAP = 40;
 
-// The wait for the counts to land in the page's Apollo cache, in re-reads
-// rather than in seconds. Counted in reads so the pace is the test's to set:
-// at the driver's poll cadence this is about twelve seconds of waiting at the
-// very worst, and about two on a page that has already answered.
-export const COUNTS_READS = 24;
-
-// How many identical reads in a row mean the cache has stopped filling.
-//
-// The counts do not arrive together. The role the panel navigates to is counted
-// by the applicants query, which the new document runs first; every other role
-// is counted by the job list query, which lands about three seconds later. So a
-// read taken between the two shows one count and fifteen blanks, and that is
-// exactly what the recruiter saw.
-//
-// Quiet alone cannot tell those two apart: a document still loading is quiet
-// between its own queries. So quiet is only ever measured on a document the
-// browser has said is loaded, and it is the second half of the wait rather than
-// the whole of it.
-export const SETTLED_READS = 4;
-
-// How long the document itself is given to arrive. Nothing waits on this when
-// the navigation lands, and reaching it is not fatal: the roles are still
-// listed, without whatever counts have not appeared.
-export const LOAD_TIMEOUT_MS = 30000;
-export const LOAD_NOT_OBSERVED = 'The Wellfound page did not finish loading';
-
-// The listings and the counts among them, as one comparable value. Two numbers
-// rather than the jobs themselves: what is being watched is the cache filling
-// up, and a title that changed under us is not that.
-export function countsSignature(jobs) {
-  const counted = jobs.filter((job) => job.actionableCount != null).length;
-  return `${jobs.length}:${counted}`;
-}
-
 // How long a reload is given to commit before the page is called dead. It is a
 // deadline, not a pause: nothing waits on it when the navigation arrives. The
 // figure is deliberately far beyond the worst load measured on the degraded
@@ -83,8 +49,8 @@ export function countsSignature(jobs) {
 export const RELOAD_TIMEOUT_MS = 60000;
 export const RELOAD_NOT_OBSERVED = 'The Wellfound page did not reload';
 
-// Watching a navigation instead of assuming one, which two callers now need:
-// the accept pass's reload, and the panel's wait for the counts.
+// Watching a navigation instead of assuming one, for the reload the accept
+// pass asks for.
 //
 // `chrome.tabs.reload` resolves when the reload has been REQUESTED, not when
 // the new document commits. Until Chrome flips the tab's status the PRE-reload
@@ -100,14 +66,11 @@ export const RELOAD_NOT_OBSERVED = 'The Wellfound page did not reload';
 // halves: `loading` says this navigation has begun, `complete` says the
 // document answering now is the one it brought. No sleep is involved - a sleep
 // would be the same assumption with a number on it.
-// A navigation in one tab, watched rather than assumed. The listener is in
-// place the moment this returns, so whatever asks the browser to navigate can
-// be called afterwards and no fast page can beat it.
 //
+// The listener is in place the moment this returns, so whatever asks the
+// browser to navigate is called afterwards and no fast page can beat it.
 // `arrived` resolves on the complete that followed this navigation's own
-// `loading`, and rejects at the deadline. `cancel` is for the caller who finds
-// out afterwards that no navigation was needed: it settles the watch quietly
-// rather than leaving a rejection nobody is waiting for.
+// `loading`, and rejects at the deadline.
 export function watchNavigation(tabId, { timeoutMs, notObserved }) {
   let sawLoading = false;
   let timer = null;
@@ -129,7 +92,7 @@ export function watchNavigation(tabId, { timeoutMs, notObserved }) {
   };
   chrome.tabs.onUpdated.addListener(listener);
   timer = setTimeout(() => finish(new Error(notObserved)), timeoutMs);
-  return { arrived, fail: (error) => finish(error), cancel: () => finish() };
+  return { arrived, fail: (error) => finish(error) };
 }
 
 // Reload the tab and do not come back until the NEW document is the one in it.
@@ -461,57 +424,25 @@ export function createController({
       // scripts are in it.
       let jobs = await tabs.askWhenListening(tab.id, { type: CX.LIST_JOBS });
 
-      // The job overview page caches every listing but populates
-      // actionableApplicantsCount only for the one being viewed. One trip to an
-      // applicant list fills in the rest, and the counts are the whole point of
-      // the list: without them the panel cannot say how many are new.
-      // Nothing is remembered between passes about which roles have no count.
-      // It was, and one early read wrote fifteen real roles off for the life of
-      // the panel: the tab was then parked on that applicant list, so the trip
-      // is not made again anyway, and an extra navigation is a far smaller
-      // price than a role the panel has decided to stop asking about.
+      // The counts come from a query of their own, which the page registers
+      // only in the applicants area. Everywhere else the cache holds every
+      // title and no counts at all, and no amount of waiting changes that -
+      // three attempts at this bug were three ways of waiting for an answer
+      // nobody had asked for. So a missing count means one thing now: go where
+      // the query lives and ask again.
+      //
+      // Nothing is remembered between passes. A role that comes back uncounted
+      // is asked about next time, and after the first trip the tab is already
+      // on the applicant list, so there is usually nowhere to go.
       const blank = jobs.find((job) => job.actionableCount == null);
       if (blank && !controller) {
         onHydrating?.();
-        // In place before anything navigates. `focusJob` returns when the
-        // applicants query is REGISTERED, which is the right answer for a fetch
-        // and is mid-load here, so the document's own arrival is watched
-        // separately rather than inferred from it.
-        const navigation = watchNavigation(tab.id, {
-          timeoutMs: LOAD_TIMEOUT_MS,
-          notObserved: LOAD_NOT_OBSERVED,
-        });
         try {
-          const { navigated } = await tabs.focusJob(tab.id, blank.jobId);
-          // A tab already on the applicant list is not navigating, so there is
-          // no transition coming and nothing to wait for.
-          if (navigated) await navigation.arrived;
-          else navigation.cancel();
+          await tabs.focusJob(tab.id, blank.jobId);
+          jobs = await tabs.ask(tab.id, { type: CX.LIST_JOBS });
         } catch {
-          // Either the navigation failed or the document never arrived. The
-          // roles already read are still worth showing, and the counts below
-          // are still worth asking for.
-          navigation.cancel();
-        }
-        try {
-          // Only now, on a document the browser has called loaded: re-read the
-          // page's own cache until it stops filling. Nothing here touches the
-          // network, so waiting costs Wellfound nothing and costs the panel a
-          // second it spends saying what it is doing.
-          let signature = null;
-          let quiet = 0;
-          for (let read = 1; read <= COUNTS_READS; read += 1) {
-            const seen = await tabs.ask(tab.id, { type: CX.LIST_JOBS });
-            jobs = seen;
-            const shape = countsSignature(seen);
-            quiet = shape === signature ? quiet + 1 : 0;
-            signature = shape;
-            if (quiet + 1 >= SETTLED_READS) break;
-            await sleep(READY_POLL_MS);
-          }
-        } catch {
-          // The list is still usable without counts, and a page that stopped
-          // answering is not worth throwing away the jobs we already have.
+          // The list is still usable without counts, and a navigation that
+          // failed is not worth throwing away the jobs we already have.
         }
       }
 
