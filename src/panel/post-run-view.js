@@ -38,6 +38,12 @@ export function reportText(summary) {
   // clock, and the report's own filename is already on that clock.
   if (summary.at) lines.push(`Run at: ${localDateTimeText(summary.at)}`);
   lines.push('');
+  // What the run was ASKED to do, before what it did. Captured at the start, so
+  // a run that dies halfway still says what it was attempting - the operator
+  // should never have to remember which boxes were ticked to read their own
+  // report weeks later.
+  for (const line of summary.configLines ?? []) lines.push(line);
+  if (summary.configLines?.length) lines.push('');
   if (summary.error) lines.push(`Error: ${summary.error}`);
   if (summary.alert) lines.push(`Check this: ${summary.alert}`);
   if (summary.headline) lines.push(summary.headline);

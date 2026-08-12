@@ -159,3 +159,37 @@ describe('an accept that did not confirm', () => {
     expect(renderPostRun({ ...summary, alert: null })).not.toContain('run-alert');
   });
 });
+
+// The operator asked for this directly: "I hope you are storing the
+// configuration and the scope of the run so that in future I don't have to
+// tell you the config I had set when starting it." Capturing it is worthless
+// if the downloaded report does not carry it, and the capture lives in a
+// different module from the rendering - so this asserts the seam, not the
+// capture.
+describe('the report carries what the run was asked to do', () => {
+  it('prints the configuration above the outcome', () => {
+    const text = reportText({
+      at: '2026-08-12T12:39:22.000Z',
+      configLines: ['What this run was asked to do', 'Platform Engineer: everyone new'],
+      headline: '0 downloaded - 3 accepted',
+    });
+    const config = text.indexOf('What this run was asked to do');
+    const headline = text.indexOf('0 downloaded');
+    expect(config).toBeGreaterThan(-1);
+    expect(config).toBeLessThan(headline);
+  });
+
+  it('still prints the configuration when the run died partway', () => {
+    const text = reportText({
+      configLines: ['What this run was asked to do', 'Platform Engineer: everyone new'],
+      error: 'The Wellfound page lost its connection to the extension',
+    });
+    expect(text).toContain('What this run was asked to do');
+    expect(text.indexOf('What this run was asked to do')).toBeLessThan(text.indexOf('Error:'));
+  });
+
+  it('adds no blank run of lines when there is no configuration to show', () => {
+    const text = reportText({ headline: 'nothing to do' });
+    expect(text).not.toMatch(/\n\n\n/);
+  });
+});
