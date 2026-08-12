@@ -17,7 +17,7 @@ import { setVerbose, isVerbose } from './verbose-console.js';
 import { HOME_IDS, DEFAULT_LIMIT, sanitizeLimit, homeModel, renderHome } from './home-view.js';
 import { CONFIRM_IDS, confirmModel, renderConfirm } from './accept-confirm.js';
 import { DEFAULT_MESSAGE } from '../lib/accept-message.js';
-import { PAGE_DISCONNECTED } from './tab-driver.js';
+import { PAGE_DISCONNECTED, watchTabs } from './tab-driver.js';
 import { sleep } from '../lib/jitter.js';
 import {
   RUN_IDS,
@@ -64,6 +64,10 @@ const state = {
   // panel can put right by reloading the tab. The tab comes off the error, so
   // the remedy does not have to go looking for one.
   disconnectedTabId: null,
+  // The load failed and the panel is listening for the tab to change so it can
+  // try again. The user's own remedy - close it, open it again - is this, done
+  // for them.
+  waiting: false,
   hydrating: false,
   // Said out loud when a hydration pass ran and some counts are still missing.
   // Silence there left roles blank with nothing to explain them.
@@ -252,6 +256,27 @@ function currentHomeModel() {
     canReconnect: state.disconnectedTabId != null,
     hydrating: state.hydrating,
     hydrationNote: state.hydrationNote,
+    waiting: state.waiting,
+  });
+}
+
+// The retry the owner has been doing by hand. A load that failed on the page -
+// no recruiter tab yet, a tab still arriving, a document that has not been
+// connected yet - is not a final answer, so the panel listens for the tab to
+// change and asks again. One listener at a time, dropped the moment it fires:
+// the load it starts puts a fresh one back if it is still needed.
+let unwatch = null;
+
+function stopWatching() {
+  unwatch?.();
+  unwatch = null;
+}
+
+function watchForPage() {
+  if (unwatch) return;
+  unwatch = watchTabs(() => {
+    stopWatching();
+    load();
   });
 }
 
@@ -296,6 +321,10 @@ function renderRun() {
       const button = event.currentTarget;
       const tabId = state.disconnectedTabId;
       if (tabId == null) return;
+      // The panel is driving the tab now, so it must not also be reacting to
+      // it: the reload it is about to ask for would otherwise start a second
+      // load underneath this one.
+      stopWatching();
       button.disabled = true;
       button.textContent = 'Reloading\u2026';
       await reloadTab(tabId);
@@ -688,9 +717,13 @@ async function load() {
   // screen. The job list carries on loading behind it, ready for Done, and a
   // run still unread is what the Library's Back button returns to.
   if (state.summary && state.view !== 'post') showPostRun();
+  // Whatever brought this load about, it is the current attempt now. A listener
+  // left over from the last failure would run a second one on top of it.
+  stopWatching();
   state.loadError = null;
   state.disconnectedTabId = null;
   state.hydrationNote = null;
+  state.waiting = false;
   let hydrationRan = false;
   try {
     state.jobs = await controller.listJobs({
@@ -721,6 +754,12 @@ async function load() {
     // carries, and a screen that decided by reading the words would break the
     // day the words were improved.
     state.disconnectedTabId = error.code === PAGE_DISCONNECTED ? error.tabId : null;
+    // Every one of these failures is about the page, and every one of them is
+    // undone by the tab moving: opening Wellfound, navigating into the
+    // recruiter area, finishing a load, being reloaded. So the panel waits for
+    // that rather than for the user to close it and open it again.
+    state.waiting = true;
+    watchForPage();
   } finally {
     state.hydrating = false;
   }

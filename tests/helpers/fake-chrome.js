@@ -204,6 +204,22 @@ export function createFakeChrome(options = {}) {
       const tab = tabs.find((t) => t.id === tabId);
       if (tab) tab.url = url;
     },
+    // A tab arriving somewhere, as the browser reports it: the url changes and
+    // onUpdated says so. `setTabUrl` above moves a tab silently, which is the
+    // wrong tool for anything that listens.
+    navigateTab(tabId, url) {
+      const tab = tabs.find((t) => t.id === tabId);
+      if (!tab) return;
+      tab.url = url;
+      tab.status = 'complete';
+      onUpdated.emit(tabId, { status: 'complete', url }, { ...tab });
+    },
+    // A tab opening after the panel did. Chrome announces the load as an
+    // update, which is all the panel needs to know something changed.
+    openTab(tab) {
+      tabs.push({ status: 'complete', ...tab });
+      onUpdated.emit(tab.id, { status: 'complete', url: tab.url }, { ...tab });
+    },
     setTabStatus(tabId, status) {
       const tab = tabs.find((t) => t.id === tabId);
       if (tab) tab.status = status;

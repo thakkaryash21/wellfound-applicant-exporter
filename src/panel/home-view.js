@@ -43,6 +43,11 @@ export const SAMPLE_FIRST_NAME = 'Priya';
 // warranted, from the marker on the error rather than from its words.
 export const RECONNECT_LABEL = 'Reload the Wellfound tab';
 
+// Said under a load that failed, because the panel is going to try again by
+// itself. The owner's habit is to close the panel and open it again, and this
+// is the line that has to be worth more than that habit.
+export const WAITING_LINE = 'Waiting for the page. Leave this panel open.';
+
 // How many to get from one role, coerced once, where the number is captured.
 //
 // It used to be coerced twice by two different rules - the button did
@@ -157,6 +162,9 @@ export function homeModel({
   canReconnect = false,
   hydrating = false,
   hydrationNote = null,
+  // The load failed and the panel is listening for the tab to change so it can
+  // try again on its own.
+  waiting = false,
 } = {}) {
   // Nothing to run means nothing to configure. A settings form under a message
   // that says the run cannot happen is noise the user has to read past.
@@ -169,6 +177,9 @@ export function homeModel({
       hint: !(loadError || hydrating),
       // An error with a remedy shows the remedy instead of the generic hint.
       reconnect: Boolean(loadError) && canReconnect,
+      // Said alongside the reason, not instead of it: the sentence names what
+      // the user can do, this one says the panel is not stuck.
+      waiting: Boolean(loadError) && waiting,
     };
   }
 
@@ -277,6 +288,7 @@ function renderNoJobs(model) {
   const hint = model.hint
     ? '<p class="empty-hint">If your roles do not appear, open your jobs list on Wellfound.</p>'
     : '';
+  const waiting = model.waiting ? `<p class="empty-hint">${WAITING_LINE}</p>` : '';
   // Saying what went wrong is half the job. This is the half the user can press.
   const remedy = model.reconnect
     ? `<button class="secondary empty-remedy" id="${HOME_IDS.reconnect}" type="button">
@@ -286,6 +298,7 @@ function renderNoJobs(model) {
   return `
     <p class="empty">${escapeHtml(model.message)}</p>
     ${hint}
+    ${waiting}
     ${remedy}`;
 }
 

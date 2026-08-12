@@ -14,6 +14,7 @@ import {
   renderHome,
   HOME_IDS,
   RECONNECT_LABEL,
+  WAITING_LINE,
 } from '../src/panel/home-view.js';
 
 // The environment is node, with no DOM, which is the point of this module: the
@@ -283,6 +284,18 @@ describe('homeModel', () => {
 
   it('offers the hint only when nothing is loading and nothing has failed', () => {
     expect(model([]).hint).toBe(true);
+  });
+
+  // A failure the panel is going to retry by itself has to say so, or the user
+  // does what they have always done and closes the panel.
+  it('says it is waiting when the panel is listening for the page', () => {
+    const m = model([], {}, { loadError: 'Open Wellfound to get started', waiting: true });
+    expect(m.waiting).toBe(true);
+    expect(renderHome(m)).toContain(WAITING_LINE);
+  });
+
+  it('says nothing about waiting when nothing failed', () => {
+    expect(model([]).waiting).toBe(false);
   });
 
   // The remedy is a fact passed in, never inferred from the message: a screen

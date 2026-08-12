@@ -4,7 +4,7 @@ import { installFakeDom } from './helpers/fake-dom.js';
 import { SUMMARY_KEY, RUNNING_KEY } from '../src/panel/summary-store.js';
 import { RUN_IDS, DOT } from '../src/panel/running-view.js';
 import { POST_RUN_IDS } from '../src/panel/post-run-view.js';
-import { HOME_IDS, RECONNECT_LABEL } from '../src/panel/home-view.js';
+import { HOME_IDS, RECONNECT_LABEL, WAITING_LINE } from '../src/panel/home-view.js';
 import { pageDisconnectedError } from '../src/panel/tab-driver.js';
 import { CONFIRM_IDS } from '../src/panel/accept-confirm.js';
 import { DEFAULT_MESSAGE } from '../src/lib/accept-message.js';
@@ -308,6 +308,68 @@ describe('Home', () => {
         }),
       });
       expect(byId(HOME_IDS.reconnect)).toBe(null);
+    });
+  });
+
+  // The owner's own sequence: open Wellfound, open the panel, and the panel
+  // asks before the tab has arrived in the recruiter area. It used to answer
+  // once and stop, so the only way on was to close the panel and open it again.
+  describe('a page that is not ready yet', () => {
+    const NOT_THERE_YET = 'Open your hiring pages on Wellfound (wellfound.com/recruit) to see your jobs';
+
+    function readyOnTheSecondAsk() {
+      let asked = 0;
+      return stubController({
+        listJobs: vi.fn(async () => {
+          asked += 1;
+          if (asked === 1) throw new Error(NOT_THERE_YET);
+          return [job(JOB_A)];
+        }),
+      });
+    }
+
+    it('says it is waiting rather than looking finished', async () => {
+      const screen = await openPanel({
+        tabs: [{ id: 7, url: 'https://wellfound.com/' }],
+        stub: readyOnTheSecondAsk(),
+      });
+      expect(screen.innerHTML).toContain(NOT_THERE_YET);
+      expect(screen.innerHTML).toContain(WAITING_LINE);
+    });
+
+    it('shows the roles when the tab reaches the recruiter area, with the panel left open', async () => {
+      const screen = await openPanel({
+        tabs: [{ id: 7, url: 'https://wellfound.com/' }],
+        stub: readyOnTheSecondAsk(),
+      });
+      fake.navigateTab(7, 'https://wellfound.com/recruit/jobs');
+      await settle();
+      expect(controller.listJobs).toHaveBeenCalledTimes(2);
+      expect(screen.innerHTML).toContain('Platform Engineer');
+      expect(screen.innerHTML).not.toContain(WAITING_LINE);
+    });
+
+    // The user opens Wellfound after the panel. Nothing was there to navigate,
+    // so the tab arriving is the only event there is.
+    it('shows the roles when a Wellfound tab is opened afterwards', async () => {
+      const screen = await openPanel({ tabs: [], stub: readyOnTheSecondAsk() });
+      fake.openTab({ id: 7, url: 'https://wellfound.com/recruit/jobs' });
+      await settle();
+      expect(screen.innerHTML).toContain('Platform Engineer');
+    });
+
+    // A panel that kept listening would re-run the whole load every time the
+    // user moved around Wellfound.
+    it('stops listening once the roles are there', async () => {
+      await openPanel({
+        tabs: [{ id: 7, url: 'https://wellfound.com/' }],
+        stub: readyOnTheSecondAsk(),
+      });
+      fake.navigateTab(7, 'https://wellfound.com/recruit/jobs');
+      await settle();
+      fake.navigateTab(7, 'https://wellfound.com/recruit/applicants/jobs/9100001');
+      await settle();
+      expect(controller.listJobs).toHaveBeenCalledTimes(2);
     });
   });
 });
