@@ -171,6 +171,11 @@ export function createController({
     // hypothesis about why they happen is not yet a fact.
     else if (event.type === 'accept_unconfirmed')
       trace.record('accept_unconfirmed', { jobId, userId: event.userId, error: event.error });
+    // A message that demonstrably went out and could not be written down. The
+    // trace is the durable account of a run, and this is the one entry in it
+    // that says a real person was messaged with nothing left remembering it.
+    else if (event.type === 'accept_unrecorded')
+      trace.record('accept_unrecorded', { jobId, userId: event.userId, error: event.error });
     else if (event.type === 'accept_checked')
       trace.record('accept_checked', { jobId, userId: event.userId, outcome: event.verdict });
     else if (event.type === 'accept_reopen')
