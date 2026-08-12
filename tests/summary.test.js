@@ -259,57 +259,80 @@ describe('the accept pass, afterwards', () => {
     expect(notes).toContain('Platform Engineer: accepting stopped after 3 of 40');
   });
 
-  // The one outcome that needs the operator's hands. A message may or may not
-  // have gone out, nothing was retried, and nothing here can tell which - so it
-  // is lifted above the headline rather than left among the notes.
-  it('puts an unclear send above the headline, and names the remedy', () => {
+  // The one outcome that needs the operator's hands. The message may have gone
+  // out, nothing was retried, and nothing here can tell which - so it is lifted
+  // above the headline rather than left among the notes.
+  //
+  // Counted per role from the pass's own figure, not inferred from the stop
+  // reason: a role can now leave somebody unresolved and still have finished
+  // everybody else, which is the whole point of deferring them.
+  it('puts an unresolved send above the headline, and names the remedy', () => {
     const s = summarize(
       accepting({
         accepted: 3,
+        acceptUnresolved: 1,
         jobs: [
-          { jobId: '1', jobTitle: 'Platform Engineer', acceptStoppedBecause: 'unclear' },
+          { jobId: '1', jobTitle: 'Platform Engineer', acceptUnresolved: 1 },
         ],
       }),
     );
-    expect(s.alert).toContain('may or may not have gone out');
-    expect(s.alert).toContain('Nothing was retried');
-    expect(s.alert).toContain('Check that role in Wellfound');
+    expect(s.alert).toContain('1 accept in Platform Engineer could not be confirmed');
+    expect(s.alert).toContain('may have gone out');
+    expect(s.alert).toContain('nothing was retried');
+    expect(s.alert).toContain('Check them in Wellfound');
   });
 
-  // The contradiction the review found: the alert above said the message may or
-  // may not have gone out, and the notes below said "Nothing was sent to them"
+  // The promise that replaces the guess. The alert used to leave the operator
+  // with a person and no way to reason about them; the one thing this system
+  // can state outright is that nobody will be messaged twice.
+  it('promises the unresolved person will not be messaged again', () => {
+    const s = summarize(
+      accepting({
+        accepted: 3,
+        acceptUnresolved: 1,
+        jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptUnresolved: 1 }],
+      }),
+    );
+    expect(s.alert).toContain('no later run will message them again');
+  });
+
+  // The contradiction the review found: the alert said the message may or may
+  // not have gone out, and the notes below said "Nothing was sent to them"
   // about the same person. Whichever the operator read second, they discounted.
   it('never says nothing was sent about a send nobody can vouch for', () => {
     const s = summarize(
       accepting({
         accepted: 3,
-        acceptFailed: 1,
+        acceptUnresolved: 1,
         stoppedBecause: 'unclear',
-        jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptStoppedBecause: 'unclear' }],
+        jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptUnresolved: 1 }],
       }),
     );
     const notes = s.notes.join('\n');
     expect(notes).not.toContain('Nothing was sent to them');
-    expect(notes).toContain('did not confirm');
-    expect(notes).toContain('may or may not have gone out');
+    expect(notes).toContain('could not be confirmed');
+    expect(notes).toContain('may have gone out');
     // And the two surfaces agree, because they are now saying one thing.
-    expect(s.alert).toContain('may or may not have gone out');
+    expect(s.alert).toContain('may have gone out');
     // A run that stopped there does not open as though it finished.
     expect(s.headline).toContain('Stopped: an accept did not confirm');
   });
 
   // The certain failures still read as certain: they are the ones the driver
   // refused before the click, and "nothing was sent to them" is true of those.
-  it('keeps a certain failure apart from the unclear one in the same run', () => {
+  // They are now their own count all the way back from the pass, so the note no
+  // longer has to subtract one number from another to know which is which.
+  it('keeps a certain failure apart from the unresolved one in the same run', () => {
     const notes = summarize(
       accepting({
         accepted: 3,
-        acceptFailed: 3,
-        jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptStoppedBecause: 'unclear' }],
+        acceptFailed: 2,
+        acceptUnresolved: 1,
+        jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptUnresolved: 1 }],
       }),
     ).notes.join('\n');
     expect(notes).toContain('2 could not be accepted. Nothing was sent to them.');
-    expect(notes).toContain('1 accept did not confirm');
+    expect(notes).toContain('1 accept could not be confirmed');
   });
 
   // A message that went out and could not be written down. Neither of the two

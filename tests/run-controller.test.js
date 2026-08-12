@@ -1545,18 +1545,34 @@ describe('the accept pass', () => {
     describe('when the queue still shows them', () => {
       // The counterpart, and the reason the check is worth making at all: it
       // has to be capable of the other answer. Nothing was established, so the
-      // outcome is exactly what it was before - unclear, stop, go and look.
-      it('stops, says unclear, and never sends a second message', async () => {
+      // person is deferred: unresolved, recorded, and never sent to again.
+      it('records them, says unclear, and never sends a second message', async () => {
         await runWith({ userId: '7700003', landed: false });
 
         const done = events.find((e) => e.type === 'done');
-        expect(done).toMatchObject({ accepted: 2, acceptFailed: 1 });
+        // Neither accepted nor failed. "Nothing was sent to them" is exactly
+        // what nobody can say about this person.
+        expect(done).toMatchObject({ accepted: 2, acceptFailed: 0, acceptUnresolved: 1 });
         expect(done.jobs[0].acceptStoppedBecause).toBe('unclear');
-        // Booked as neither accepted nor safe to retry.
-        expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(['7700001', '7700002']);
+        // The durable trace, and the whole of what it is for: the next run
+        // reads this and does not reach them.
+        expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(ROSTER);
         const csv = await objectUrls[0].text();
-        expect(csv).toContain('failed: Could not confirm the accept for 7700003');
+        expect(csv).toContain('unresolved: Could not confirm the accept for 7700003');
+        expect(csv).not.toContain('failed: Could not confirm');
         expect(sendsTo('7700003')).toBe(1);
+      });
+
+      // The report the operator actually read last time: "0 accepted" beside an
+      // alert saying the message may or may not have gone out. It said nothing
+      // was confirmed about somebody who had in fact been messaged.
+      it('never tells the operator nothing went out', async () => {
+        await runWith({ userId: '7700003', landed: false });
+        const done = events.find((e) => e.type === 'done');
+        const report = summarize(done);
+        expect(report.alert).toContain('could not be confirmed');
+        expect(report.alert).toContain('no later run will message them again');
+        expect(report.notes.join(' ')).not.toContain('Nothing was sent to them');
       });
     });
   });
@@ -1766,7 +1782,7 @@ describe('the accept pass', () => {
     });
   });
 
-  it('keeps the CSV when the accept pass stops on an unclear send', async () => {
+  it('keeps the CSV when the accept pass stops on an unresolved send', async () => {
     const roster = ['7700001', '7700002'];
     setup({
       people: roster.map((id) => person(id)),
@@ -1781,15 +1797,18 @@ describe('the accept pass', () => {
     await acceptRun(controller);
 
     const done = events.find((e) => e.type === 'done');
-    // The run stops on it, not just the role: a message may have gone out and
-    // nobody can vouch for it.
-    expect(done).toMatchObject({ accepted: 0, acceptFailed: 1, stoppedBecause: 'unclear' });
+    // Every send on this page is unconfirmed, so the pass defers the first,
+    // reloads, defers the second and stops there. The run stops with it, not
+    // just the role: messages may have gone out and nobody can vouch for them.
+    expect(done).toMatchObject({ accepted: 0, acceptUnresolved: 2, stoppedBecause: 'unclear' });
     // The run itself is unharmed: the resumes are on disk, the ledger has them,
     // and the file that is now the only record of these people was written.
     expect(done.jobs[0].wroteCsv).toBe(true);
     const csv = await objectUrls[0].text();
-    expect(csv).toContain('failed: Could not confirm the accept');
-    expect(csv).toContain('not attempted: the run stopped first');
+    expect(csv.match(/unresolved: Could not confirm the accept/g)).toHaveLength(2);
+    // Both of them in the ledger, which is what stops the next run reaching
+    // either of them a second time.
+    expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(roster);
     expect(trace_hasAcceptStop(controller)).toBe(true);
   });
 
@@ -1858,7 +1877,7 @@ describe('the accept pass', () => {
       expect(done.jobs[0].wroteCsv).toBe(true);
       // The alert the operator has to act on is still the accept pass's own.
       expect(summarize(done, controller.trace.entries()).alert).toContain(
-        'may or may not have gone out',
+        'may have gone out',
       );
     });
   });
@@ -1915,22 +1934,31 @@ describe('what the queue check costs', () => {
   // that pass 1 made.
   const settleFetches = (page) => page.calls.fetches.length - PAGES;
 
+  // Three looks in the settle window, then four more in the sweep the pass
+  // makes once the role is done. Named here because both costs below are
+  // multiples of it, and because it is the number that decides whether asking
+  // again later is affordable - which is the whole reason the settle window
+  // could be shortened rather than lengthened again.
+  const LOOKS = 7;
+  // What one look costs when it has to walk the collection to the end.
+  const WALK = 7;
+
   // Finding somebody proves `queued` on the spot. A target on page one costs
-  // one fetch, not the six a complete walk would spend.
+  // one fetch, not the whole walk.
   it('stops at the page where the target is found', async () => {
     const page = await settleRun({ target: ROSTER[0], landed: false });
-    // Four looks, one page each: the target is on page one every time.
-    expect(settleFetches(page)).toBe(4);
+    expect(settleFetches(page)).toBe(LOOKS);
   });
 
-  // And when they are NOT on page one, the first look walks to them - but the
-  // three looks after it go straight back to the page that answered.
+  // And when they are NOT on page one, the first look walks to them - but every
+  // look after it goes straight back to the page that answered. That is what
+  // makes asking again later affordable at all: a repeat look costs one fetch.
   it('goes back to the page that answered rather than walking again', async () => {
     const page = await settleRun({ target: ROSTER[ROSTER.length - 1], landed: false });
-    // 6 to find them, then 1 each for the remaining three looks. Four complete
-    // walks would be 24, which is the shape that cost 44 fetches on the real
-    // run over a longer role.
-    expect(settleFetches(page)).toBe(PAGES + 3);
+    expect(settleFetches(page)).toBe(WALK + (LOOKS - 1));
+    // Seven complete walks would be 49, which is the shape that cost 44 fetches
+    // on the real run over a longer role.
+    expect(settleFetches(page)).toBeLessThan(WALK * LOOKS);
   });
 
   // The hint is a hint and never an authority. `gone` still comes only from a

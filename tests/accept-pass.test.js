@@ -478,8 +478,10 @@ describe('runAcceptPass', () => {
     expect(records[1].acceptStatus).toBe(ACCEPT_STATUS.NO_RESUME);
   });
 
-  // Rule 4. An unclear outcome stops everything: it is never retried, and the
-  // people behind it are left plainly unattempted rather than quietly missed.
+  // Rule 4. An unclear outcome is never retried, and with no way left to ask
+  // about it the pass stops rather than sending into a page it cannot read.
+  // What it does NOT do any more is forget the person: they go into the ledger
+  // first, which is the only thing that stops the next attempt reaching them.
   it('stops on an unclear send, retries nothing, and touches nobody after it', async () => {
     const records = [captured('1'), captured('2')];
     const { run, reviewer, ledger, events } = harness({
@@ -491,11 +493,12 @@ describe('runAcceptPass', () => {
 
     expect(result.stoppedBecause).toBe('unclear');
     expect(result.accepted).toBe(0);
-    expect(result.failed).toBe(1);
+    expect(result.unresolved).toBe(1);
+    expect(result.failed).toBe(0);
     expect(reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
     expect(typesOf(reviewer.log)).not.toContain(CX.SKIP_CANDIDATE);
-    expect(ledger).toEqual([]);
-    expect(records[0].acceptStatus).toMatch(/^failed: /);
+    expect(ledger.map((e) => e.userId)).toEqual(['1']);
+    expect(records[0].acceptStatus).toMatch(/^unresolved: /);
     expect(records[1].acceptStatus).toBe(ACCEPT_STATUS.NOT_REACHED);
     expect(events.at(-1)).toMatchObject({ type: 'accept_done', stoppedBecause: 'unclear' });
   });
@@ -953,12 +956,16 @@ describe('an unconfirmed send', () => {
     expect(types[reopened + 2]).toBe(CX.READ_CANDIDATE);
   });
 
+  // The two answers that are not `gone` are not the same answer, and the pass
+  // no longer treats them as one. `queued` is what a page that is merely slow
+  // looks like: the candidate is exactly where a send in flight leaves them,
+  // and the API answered, so both instruments still work. Everything else means
+  // the pass has lost the only instrument it had left.
   for (const [name, answer] of [
-    ['still shows them', () => 'queued'],
     ['cannot answer', () => 'unknown'],
     ['fails outright', () => Promise.reject(new Error('Page did not respond in time'))],
   ]) {
-    it(`stays unclear and stops when the queue ${name}`, async () => {
+    it(`stops on the spot when the queue ${name}`, async () => {
       const h = harness({
         people: three,
         records: rowsFor(three),
@@ -966,32 +973,20 @@ describe('an unconfirmed send', () => {
         checkQueue: answer,
       });
       const result = await h.run();
-      expect(result).toMatchObject({ accepted: 0, failed: 1, stoppedBecause: 'unclear' });
-      expect(h.ledger).toEqual([]);
+      expect(result).toMatchObject({ accepted: 0, unresolved: 1, stoppedBecause: 'unclear' });
+      // Booked before anything else, even here. It is the entry that stops the
+      // next attempt reaching this person, and the pass being about to give up
+      // is not a reason to leave them unprotected.
+      expect(h.ledger.map((e) => e.userId)).toEqual(['1']);
       expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
     });
   }
 
-  // The check pages the whole collection, so it is by far the most expensive
-  // thing this pass can do. It settles the failure that was actually observed -
-  // one send - and a pass producing a second is a pass whose page state is
-  // beyond what this module can reason about.
-  it('asks at most once in a pass', async () => {
-    const h = harness({
-      people: three,
-      records: rowsFor(three),
-      failAccept: ['1', '2'],
-      landed: true,
-      checkQueue: () => 'gone',
-    });
-    const result = await h.run();
-    expect(h.asked).toEqual(['1']);
-    expect(result).toMatchObject({ accepted: 1, failed: 1, stoppedBecause: 'unclear' });
-  });
-
   // The other half of the driver's contract. A refusal raised before the click
   // is certain - nothing went out - and asking the queue about it could only
-  // produce a wrong answer, since the candidate is still in it either way.
+  // produce a wrong answer, since the candidate is still in it either way. It
+  // is also the one failure that leaves NO ledger entry: there is nothing to
+  // remember.
   it('never asks about a send the driver refused before clicking', async () => {
     const h = harness({
       people: three,
@@ -1002,14 +997,17 @@ describe('an unconfirmed send', () => {
     });
     const result = await h.run();
     expect(h.asked).toEqual([]);
-    expect(result.stoppedBecause).toBe('error');
+    expect(result).toMatchObject({ failed: 1, unresolved: 0, stoppedBecause: 'error' });
+    expect(h.ledger).toEqual([]);
   });
 
-  // A caller with no way to ask gets exactly the behaviour this pass had
-  // before the check existed.
-  it('is unclear, as before, when no queue check was given', async () => {
+  // A caller with no way to ask has no way to carry on either, so the pass
+  // stops exactly as it did before the check existed - but the person is
+  // written down, which is the part that did not exist before.
+  it('stops, and still records them, when no queue check was given', async () => {
     const h = harness({ people: three, records: rowsFor(three), failAccept: '1', landed: true });
-    expect(await h.run()).toMatchObject({ failed: 1, stoppedBecause: 'unclear' });
+    expect(await h.run()).toMatchObject({ unresolved: 1, stoppedBecause: 'unclear' });
+    expect(h.ledger.map((e) => e.userId)).toEqual(['1']);
   });
 });
 
@@ -1062,7 +1060,9 @@ describe('settling an unconfirmed send', () => {
   });
 
   // Geometric, so the common case - it landed a moment later - costs the
-  // operator five seconds, and only the genuinely stuck case spends the minute.
+  // operator five seconds. It is deliberately SHORTER than it was: the window
+  // no longer has to be right, because a send it cannot settle is deferred and
+  // asked about again once the role is done.
   it('waits longer before each look than before the last', async () => {
     const h = harness({
       people: three,
@@ -1071,10 +1071,11 @@ describe('settling an unconfirmed send', () => {
       checkQueue: () => 'queued',
     });
     await h.run();
-    expect(h.sleeps.filter((ms) => ms >= 5000)).toEqual([5000, 15000, 30000]);
+    const long = h.sleeps.filter((ms) => ms >= 5000);
+    expect(long.slice(0, 2)).toEqual([5000, 15000]);
   });
 
-  it('gives up only after the whole settle window, and stays unclear', async () => {
+  it('defers rather than concluding when the window runs out', async () => {
     const h = harness({
       people: three,
       records: rowsFor(three),
@@ -1082,13 +1083,20 @@ describe('settling an unconfirmed send', () => {
       checkQueue: () => 'queued',
     });
     const result = await h.run();
-    expect(h.asked).toHaveLength(4);
-    expect(result).toMatchObject({ accepted: 0, failed: 1, stoppedBecause: 'unclear' });
-    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
+    // Three looks on the spot, then the sweep asks again once the pass is over.
+    expect(h.asked.length).toBeGreaterThan(3);
+    // And it carries on: the two behind the deferral are accepted, which is
+    // exactly what the old settle window cost the operator.
+    expect(result).toMatchObject({ accepted: 2, failed: 0, unresolved: 1 });
+    // One click each, and never a second to the deferred one.
+    const sends = h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE);
+    expect(sends.map((e) => e.expectedUserId)).toEqual(three);
   });
 
-  // An operator who has pressed Stop is not waiting another minute to be told
-  // something the run will report as unclear either way.
+  // An operator who has pressed Stop is not waiting another two minutes. One
+  // look still happens on the way out: it is a single query, it cannot send
+  // anything, and if it comes back `gone` the run books a correct accept
+  // instead of leaving a person unresolved.
   it('stops looking when the operator presses stop', async () => {
     const controller = new AbortController();
     const h = harness({
@@ -1102,28 +1110,40 @@ describe('settling an unconfirmed send', () => {
       },
     });
     const result = await h.run();
-    expect(h.asked).toHaveLength(1);
+    expect(h.asked).toHaveLength(2);
     expect(result.stoppedBecause).toBe('unclear');
+    expect(h.sleeps.filter((ms) => ms >= 15000)).toEqual([]);
   });
 
-  // The wording. "Still queued after settling" is evidence and the operator can
-  // act on it; "could not be read" is the absence of evidence and leaves them
-  // where they were. The two used to read the same.
+  // The wording, and the sentence this whole change exists to stop printing.
+  // "Still queued" read as evidence the message never left. It was reasonable
+  // and it was wrong twice: this page commits an accept minutes after the
+  // click, and the candidate sits in the queue throughout looking exactly like
+  // somebody who was never messaged.
   describe('what the operator is told', () => {
     const original = 'Could not confirm the accept for 70000001.';
 
-    it('says what the queue showed, and what it cannot prove', () => {
+    it('says what the queue showed without reading it as evidence either way', () => {
       const told = unresolvedReason(original, { verdict: 'queued', looks: 4, waitedMs: 50000 });
       expect(told).toContain(original);
       expect(told).toContain('4 times over the following 50s');
-      expect(told).toContain('leans towards');
-      expect(told).toContain('cannot prove');
+      expect(told).toContain('not evidence the message never left');
+      expect(told).not.toContain('leans towards');
     });
 
     it('says plainly when nothing was learnt at all', () => {
       const told = unresolvedReason(original, { verdict: 'unknown', looks: 4 });
       expect(told).toContain('nothing was learnt');
-      expect(told).not.toContain('leans towards');
+    });
+
+    // The promise that replaces the guess. Whatever the queue said, the one
+    // thing this pass can state outright is that nobody will be messaged again.
+    it('always says they are recorded, whatever the queue answered', () => {
+      for (const verdict of ['queued', 'unknown', null]) {
+        expect(unresolvedReason(original, { verdict, looks: 1 })).toContain(
+          'ever message them again',
+        );
+      }
     });
 
     // The one word that sends the operator to Wellfound is decided from the
@@ -1144,9 +1164,176 @@ describe('settling an unconfirmed send', () => {
         failAccept: '1',
         checkQueue: () => 'queued',
       }).run();
-      expect(records[0].acceptStatus).toContain('leans towards');
-      expect(result.error).toContain('leans towards');
+      expect(records[0].acceptStatus).toMatch(/^unresolved: /);
+      expect(records[0].acceptStatus).toContain('ever message them again');
+      expect(result.error).toContain('ever message them again');
     });
+  });
+});
+
+// The run that made all of this necessary, at the level of the loop that has to
+// survive it.
+//
+// Accept-only over a 102-applicant role, 99 targets. The first send was clicked,
+// the relay gave up on it, the candidate was still in the review queue at every
+// look of the settle window - and the accept committed 111 s after the click.
+// The role reported 0 of 99 accepted, the person was recorded nowhere, and the
+// next attempt would have reached them first all over again.
+describe('the send that commits long after everybody stopped looking', () => {
+  const five = ['70000001', '70000002', '70000003', '70000004', '70000005'];
+  const rowsFor = (ids) => ids.map((id) => captured(id));
+
+  // Queued for every look the pass takes on the spot, gone by the time it asks
+  // again at the end. That is the shape of the real failure: not ambiguity,
+  // just a page finishing something minutes later.
+  const queuedThenGone = (looksBeforeItLands) => {
+    let seen = 0;
+    return () => (++seen > looksBeforeItLands ? 'gone' : 'queued');
+  };
+
+  it('finishes the role and books the slow accept when the queue settles it later', async () => {
+    const records = rowsFor(five);
+    const h = harness({
+      people: five,
+      records,
+      failAccept: five[0],
+      // The page never advanced, so this person is still sitting at the front
+      // of the reviewer's queue for the rest of the pass, exactly as observed.
+      landed: false,
+      checkQueue: queuedThenGone(3),
+    });
+    const result = await h.run();
+
+    // The whole role, not zero of it.
+    expect(result).toMatchObject({
+      accepted: 5,
+      unresolved: 0,
+      failed: 0,
+      stoppedBecause: 'finished',
+    });
+    expect(records.map((r) => r.acceptStatus)).toEqual(new Array(5).fill(ACCEPT_STATUS.ACCEPTED));
+    // THE RULE. One click per person, and the slow one is not among the
+    // clicks a second time.
+    const sends = h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE);
+    expect(sends.map((e) => e.expectedUserId)).toEqual(five);
+    // Everyone in the ledger, the slow one included, and written when the send
+    // was deferred rather than when it was settled.
+    expect(h.ledger.map((e) => e.userId).sort()).toEqual([...five].sort());
+    expect(h.ledger[0].userId).toBe(five[0]);
+  });
+
+  it('says deferred while it is unresolved, and accepted once it is not', async () => {
+    const h = harness({
+      people: five,
+      records: rowsFor(five),
+      failAccept: five[0],
+      checkQueue: queuedThenGone(3),
+    });
+    await h.run();
+    const about = h.events.filter((e) => e.type === 'accept_candidate' && e.userId === five[0]);
+    expect(about.map((e) => e.outcome)).toEqual(['deferred', 'accepted']);
+    expect(about[1]).toMatchObject({ confirmedBy: 'queue' });
+    // And never a second, milder account of the same person as merely skipped.
+    expect(about.some((e) => e.outcome === 'skipped')).toBe(false);
+    expect(h.events.find((e) => e.type === 'accept_settling')).toMatchObject({ count: 1 });
+  });
+
+  // The blocking problem, stated as the thing it actually was: the same person
+  // is reached first on every attempt, so a pass that cannot get past them can
+  // never get past them.
+  it('is not reached again by the next attempt, whichever way the send went', async () => {
+    const first = harness({
+      people: five,
+      records: rowsFor(five),
+      failAccept: five[0],
+      checkQueue: () => 'queued',
+    });
+    const firstResult = await first.run();
+    expect(firstResult.unresolved).toBe(1);
+
+    // The second attempt, given the ledger the first one left behind.
+    const records = rowsFor(five);
+    const second = harness({
+      people: five,
+      records,
+      alreadyAccepted: first.ledger.map((e) => e.userId),
+      checkQueue: () => 'gone',
+    });
+    const secondResult = await second.run();
+    const sends = second.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE);
+    expect(sends.map((e) => e.expectedUserId)).not.toContain(five[0]);
+    // Everyone: the first attempt got past the deferral and finished the role.
+    expect(secondResult.alreadyAccepted).toBe(5);
+    expect(records[0].acceptStatus).toBe(ACCEPT_STATUS.ALREADY);
+  });
+
+  // The page has just been demonstrably wrong about a send, so it is not asked
+  // for another one until it has been thrown away and reloaded.
+  it('reloads the page before it sends to anybody else', async () => {
+    const h = harness({
+      people: five,
+      records: rowsFor(five),
+      failAccept: five[0],
+      reloadPage: true,
+      checkQueue: queuedThenGone(3),
+    });
+    await h.run();
+    const types = typesOf(h.reviewer.log);
+    const deferredAt = types.indexOf(CX.ACCEPT_CANDIDATE);
+    const reloadedAt = types.indexOf('RELOAD');
+    const nextSendAt = types.indexOf(CX.ACCEPT_CANDIDATE, deferredAt + 1);
+    expect(reloadedAt).toBeGreaterThan(deferredAt);
+    expect(nextSendAt).toBeGreaterThan(reloadedAt);
+  });
+
+  // One is a slow page. Two is a page this module can no longer reason about,
+  // and it will not keep sending irreversible messages into one.
+  it('stops after a second deferral rather than piling them up', async () => {
+    const h = harness({
+      people: five,
+      records: rowsFor(five),
+      failAccept: [five[0], five[1]],
+      checkQueue: () => 'queued',
+    });
+    const result = await h.run();
+    expect(result).toMatchObject({ unresolved: 2, stoppedBecause: 'unclear' });
+    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(2);
+  });
+
+  // The report the operator reads must never be the one they got last time:
+  // "0 accepted" beside an alert saying the message may or may not have gone.
+  it('never tells the operator nothing was sent about a person who may have been', async () => {
+    const records = rowsFor(five);
+    const result = await harness({
+      people: five,
+      records,
+      failAccept: five[0],
+      checkQueue: () => 'queued',
+    }).run();
+    expect(result.unresolved).toBe(1);
+    expect(result.error).not.toContain('nothing was sent');
+    expect(records[0].acceptStatus).not.toContain('nothing was sent');
+    expect(records[0].acceptStatus).not.toMatch(/^failed: /);
+  });
+
+  // The ledger entry is the only thing standing between this person and a
+  // message from the next run, and on this path it is also the only thing that
+  // would remember the attempt at all.
+  it('stops and says so plainly when the ledger will not remember the deferral', async () => {
+    const h = harness({
+      people: five,
+      records: rowsFor(five),
+      failAccept: five[0],
+      ledgerFails: five[0],
+      checkQueue: () => 'queued',
+    });
+    const result = await h.run();
+    expect(result.stoppedBecause).toBe('unrecorded');
+    expect(result.error).toContain('never confirmed');
+    // It must not borrow the confirmed send's sentence, which opens by stating
+    // the message went out - the one thing nobody knows here.
+    expect(result.error).not.toContain('was sent, and writing it');
+    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
   });
 });
 

@@ -93,12 +93,19 @@ function skippedNote(counts) {
 // out of the notes and rendered above the headline.
 export function acceptAlert(jobs = []) {
   const lines = [];
-  const unclear = jobs.filter((job) => job.acceptStoppedBecause === 'unclear');
+  // Counted from the per-role figure rather than from the stop reason. A role
+  // can carry an unresolved send and still have finished everybody else, which
+  // is the whole point of deferring them - so "did this role leave somebody
+  // unresolved" and "did this role stop" are two different questions now.
+  const unclear = jobs.filter((job) => (job.acceptUnresolved ?? 0) > 0);
   if (unclear.length) {
+    const people = unclear.reduce((sum, job) => sum + job.acceptUnresolved, 0);
     lines.push(
-      `${listNames(unclear.map((job) => job.jobTitle))}: an accept did not confirm, so that ` +
-        'message may or may not have gone out. Nothing was retried. Check that role in ' +
-        'Wellfound before running it again.',
+      `${people} ${people === 1 ? 'accept' : 'accepts'} in ` +
+        `${listNames(unclear.map((job) => job.jobTitle))} could not be confirmed, even after ` +
+        'asking again at the end. The message may have gone out - this page has been seen ' +
+        'sending one minutes after the click - and nothing was retried. They are recorded, so ' +
+        'no later run will message them again. Check them in Wellfound.',
     );
   }
   // The other hands-on state, and the more definite of the two: the message
@@ -218,24 +225,26 @@ export function summarize(event, trace = []) {
     if (event.acceptAlready) {
       both(`${event.acceptAlready} were accepted on an earlier run, so nothing was sent again.`);
     }
-    // The unclear send is counted into acceptFailed like every other failure,
-    // and it is not like every other failure: "nothing was sent to them" is
-    // exactly what nobody can say about it. The report used to print that
+    // The unclear send used to be counted into acceptFailed alongside every
+    // other failure, and it is not like every other failure: "nothing was sent
+    // to them" is exactly what nobody can say about it. The report printed that
     // sentence about the same person the alert above sends the operator to
     // Wellfound to check, so one of the two was always lying and the operator
     // learnt to discount whichever they read second.
     //
-    // One pass ends on at most one unclear send - it stops there - so the count
-    // of roles that ended that way is the count of people it concerns.
-    const unclear = jobs.filter((j) => j.acceptStoppedBecause === 'unclear').length;
-    const certain = Math.max(0, (event.acceptFailed ?? 0) - unclear);
+    // They are now their own count, all the way back from the pass, so this
+    // note no longer has to subtract one number from another to work out which
+    // of its people it may say that about.
+    const certain = event.acceptFailed ?? 0;
     if (certain) {
       both(`${certain} could not be accepted. Nothing was sent to them.`);
     }
-    if (unclear) {
+    const unresolved = event.acceptUnresolved ?? 0;
+    if (unresolved) {
       both(
-        `${unclear} ${unclear === 1 ? 'accept' : 'accepts'} did not confirm: the message may ` +
-          'or may not have gone out, and nothing was retried.',
+        `${unresolved} ${unresolved === 1 ? 'accept' : 'accepts'} could not be confirmed. The ` +
+          'message may have gone out; nothing was retried, and nothing here will message them ' +
+          'again. Only Wellfound can say which it was.',
       );
     }
     // Sent, and not written down. Kept apart from both of the above because the
