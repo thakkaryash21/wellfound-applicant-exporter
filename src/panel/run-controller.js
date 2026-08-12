@@ -426,6 +426,15 @@ export function createController({
                 jobTitle,
                 records: result.records,
                 alreadyAccepted: await ledgerService.acceptedUserIdsFor(jobId),
+                // The same per-role number pass 1 was given, and the reason it
+                // has to be handed on: pass 1 counts it against NEW downloads,
+                // and an accepting run forces a full walk, so on a role that
+                // was already downloaded pass 1's counter never moves and its
+                // limit never fires - while `records` still holds every
+                // applicant, every one of them captured and acceptable. A
+                // limit of 3 sent 115 messages. Here it means what the
+                // operator reads it as: at most this many people are messaged.
+                limit,
                 template: acceptMessage,
                 signal,
               },

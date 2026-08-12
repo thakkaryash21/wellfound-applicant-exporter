@@ -1367,6 +1367,82 @@ describe('the accept pass', () => {
     expect(csv).toContain('already accepted');
   });
 
+  // The operator's own workflow, and the defect it hid. Accept-only over a role
+  // that was downloaded in full on an earlier run: every page is all-seen, so
+  // pass 1's `downloaded`/`previewed` counters never move and its limit never
+  // fires once; an accepting run forces a full walk, so `records` holds the
+  // whole role; and every row reads `already downloaded`, which the accept pass
+  // reads as captured and acceptable. The one control the operator has over an
+  // irreversible action did nothing at all - a limit of 3 sent a message to
+  // everybody.
+  describe('accept-only over a role that is already downloaded', () => {
+    const ROSTER = Array.from({ length: 12 }, (_, i) => String(7700001 + i));
+
+    async function retroactiveRun(limit) {
+      setup({
+        people: ROSTER.map((id) => person(id)),
+        bucketByJob: { [JOB]: ROSTER },
+        storage: {
+          [`job:${JOB}`]: {
+            jobId: JOB,
+            seenUserIds: [...ROSTER],
+            totalDownloaded: ROSTER.length,
+          },
+        },
+      });
+      for (const id of ROSTER) {
+        fake.addHistory({
+          filename: `resumes/Person ${id}-${id}-${JOB}.pdf`,
+          url: `https://wellfound.com/link/${id}/tok/resume_url`,
+          state: 'complete',
+          exists: true,
+        });
+      }
+      const controller = await controllerFor();
+      await controller.startRun({
+        jobs: [{ jobId: JOB, limit }],
+        folder: 'resumes',
+        pageSize: 10,
+        actions: { download: false, accept: true },
+      });
+      return controller;
+    }
+
+    const sentTo = () =>
+      fake.calls.sendMessage
+        .filter((call) => call.message.type === CX.ACCEPT_CANDIDATE)
+        .map((call) => String(call.message.payload.expectedUserId));
+
+    it('messages three people when the role is limited to three', async () => {
+      await retroactiveRun(3);
+
+      expect(sentTo()).toHaveLength(3);
+      expect(Object.keys(ledgerRecord().accepted ?? {})).toHaveLength(3);
+      const done = events.find((e) => e.type === 'done');
+      expect(done).toMatchObject({ accepted: 3 });
+      // The other nine are untouched and the CSV says which word applies to
+      // them: the run was accepting and stopped before it reached them.
+      const csv = await objectUrls[0].text();
+      expect(csv.match(/,accepted,/g)).toHaveLength(3);
+      expect(csv).toContain('not attempted: the run stopped first');
+    });
+
+    // Queue order, so the three taken are the three the reviewer opens on.
+    it('takes the three at the front of the queue', async () => {
+      await retroactiveRun(3);
+      expect(sentTo()).toEqual(ROSTER.slice(0, 3));
+    });
+
+    // The premise of the two above, asserted rather than assumed: unbounded,
+    // this same role messages all twelve. If it did not, a cap could look
+    // effective for the wrong reason.
+    it('messages the whole role when the role is set to everyone', async () => {
+      await retroactiveRun(Infinity);
+      expect(sentTo()).toHaveLength(ROSTER.length);
+      expect(events.find((e) => e.type === 'done')).toMatchObject({ accepted: ROSTER.length });
+    });
+  });
+
   // The five-failure stop exists because continuing would issue hundreds of
   // failing requests at human pacing - the most suspicious pattern this
   // extension can produce. Pass 2 does not merely continue: it drives
