@@ -54,6 +54,27 @@ export const READY_SETTLE_MS = 1500;
 export const READY_POLL_MS = 500;
 export const READY_TIMEOUT_MS = 15000;
 
+// How many times a first message to a freshly loaded page is worth repeating.
+// A tab can reach `complete` a moment before its content scripts are injected,
+// and that moment is the difference between a panel that shows the roles and
+// one the owner closes and opens again.
+export const LISTEN_TRIES = 6;
+
+// The browser saying a tab changed, rather than the panel asking whether one
+// has. `onUpdated` fires for every tab without the `tabs` permission, and the
+// listener reads nothing off the event - it only says "something moved, ask
+// again" - so no permission is needed and nothing is polled.
+export function watchTabs(listener) {
+  const onUpdated = (tabId, changeInfo) => {
+    // Status and url are the two that can turn a page this panel cannot use
+    // into one it can. Everything else - the title, the favicon, muting - is
+    // noise that would re-run the load for nothing.
+    if (changeInfo?.status || changeInfo?.url) listener();
+  };
+  chrome.tabs.onUpdated.addListener(onUpdated);
+  return () => chrome.tabs.onUpdated.removeListener(onUpdated);
+}
+
 // `sleep` and `now` are injected so a test can drive the readiness poll without
 // waiting fifteen real seconds for the timeout branch, and they default to the
 // real thing because the shipped extension always paces itself.
@@ -87,6 +108,27 @@ export function createTabDriver({ sleep = realSleep, now = () => Date.now(), tra
     }
     if (!response?.ok) throw new Error(response?.error ?? 'No response from the page');
     return response.data;
+  }
+
+  // The same question, asked again while the page is still arriving.
+  //
+  // Only PAGE_DISCONNECTED is repeated, and only that: it is the one failure
+  // that means "not yet" rather than "no". A page that is genuinely severed -
+  // the extension was reloaded under it - still ends here, with the reload the
+  // panel offers for it, a few seconds later.
+  //
+  // For first contact only. Nothing mid-run may retry itself: a run drives the
+  // reviewer, and repeating a message that sends is how somebody gets messaged
+  // twice.
+  async function askWhenListening(tabId, message, { tries = LISTEN_TRIES } = {}) {
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await ask(tabId, message);
+      } catch (error) {
+        if (error.code !== PAGE_DISCONNECTED || attempt >= tries) throw error;
+        await sleep(READY_POLL_MS);
+      }
+    }
   }
 
   // Has the browser finished putting the target document in this tab? A tab
@@ -159,5 +201,5 @@ export function createTabDriver({ sleep = realSleep, now = () => Date.now(), tra
     throw new Error('The Wellfound applicant list did not finish loading');
   }
 
-  return { workingTab, ask, focusJob };
+  return { workingTab, ask, askWhenListening, focusJob };
 }

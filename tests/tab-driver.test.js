@@ -2,8 +2,10 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { installFakeChrome } from './helpers/fake-chrome.js';
 import {
   createTabDriver,
+  watchTabs,
   APPLICANTS_URL,
   RECRUIT_URL,
+  LISTEN_TRIES,
   READY_TIMEOUT_MS,
   NO_WELLFOUND_TAB,
   NOT_IN_RECRUITER_AREA,
@@ -126,6 +128,82 @@ describe('ask', () => {
     const error = await driver.ask(7, {}).catch((e) => e);
     expect(error).toBe(thrown);
     expect(error.code).toBeUndefined();
+  });
+});
+
+// The tab is `complete` a beat before its content scripts are injected, so the
+// first message this panel sends can land on a page that is not listening yet.
+// That instant is the whole of "I have to close and open the extension twice".
+describe('askWhenListening', () => {
+  it('asks again while the page is still arriving', async () => {
+    let attempts = 0;
+    const { driver } = driverFor({
+      tabs: [{ id: 7, url: RECRUIT_URL }],
+      pages: {
+        7: async () => {
+          attempts += 1;
+          if (attempts < 3) throw new Error('Could not establish connection. Receiving end does not exist.');
+          return { ok: true, data: [{ jobId: '9100001' }] };
+        },
+      },
+    });
+    expect(await driver.askWhenListening(7, { type: CX.LIST_JOBS })).toEqual([{ jobId: '9100001' }]);
+    expect(attempts).toBe(3);
+  });
+
+  // A page that is genuinely severed still ends at the remedy the panel offers
+  // for it, a few seconds later rather than at once.
+  it('gives up with the disconnected failure the panel can act on', async () => {
+    const { driver } = driverFor({ tabs: [{ id: 7, url: RECRUIT_URL }] });
+    const error = await driver.askWhenListening(7, { type: CX.LIST_JOBS }).catch((e) => e);
+    expect(error.code).toBe(PAGE_DISCONNECTED);
+    expect(fake.calls.sendMessage).toHaveLength(LISTEN_TRIES);
+  });
+
+  // Only "not yet" is worth repeating. A page that answered with a refusal
+  // answered, and asking it again would be pretending that is not the case.
+  it('does not repeat any other failure', async () => {
+    const { driver } = driverFor({
+      pages: { 7: async () => ({ ok: false, error: 'RecruitJobListingApplicants is not active yet' }) },
+    });
+    await expect(driver.askWhenListening(7, {})).rejects.toThrow('is not active yet');
+    expect(fake.calls.sendMessage).toHaveLength(1);
+  });
+});
+
+describe('watchTabs', () => {
+  it('reports a tab that navigated or finished loading', async () => {
+    fake = installFakeChrome({ tabs: [{ id: 7, url: RECRUIT_URL }] });
+    let seen = 0;
+    watchTabs(() => {
+      seen += 1;
+    });
+    fake.chrome.tabs.onUpdated.emit(7, { status: 'complete' });
+    fake.chrome.tabs.onUpdated.emit(7, { url: `${RECRUIT_URL}jobs/9100001` });
+    expect(seen).toBe(2);
+  });
+
+  // A favicon is not a page becoming usable, and re-running the whole load for
+  // one would be the polling this design is avoiding.
+  it('ignores a change that cannot make the page usable', async () => {
+    fake = installFakeChrome({ tabs: [{ id: 7, url: RECRUIT_URL }] });
+    let seen = 0;
+    watchTabs(() => {
+      seen += 1;
+    });
+    fake.chrome.tabs.onUpdated.emit(7, { favIconUrl: 'https://wellfound.com/favicon.ico' });
+    expect(seen).toBe(0);
+  });
+
+  it('stops reporting once it is let go', async () => {
+    fake = installFakeChrome({ tabs: [{ id: 7, url: RECRUIT_URL }] });
+    let seen = 0;
+    const stop = watchTabs(() => {
+      seen += 1;
+    });
+    stop();
+    fake.chrome.tabs.onUpdated.emit(7, { status: 'complete' });
+    expect(seen).toBe(0);
   });
 });
 
