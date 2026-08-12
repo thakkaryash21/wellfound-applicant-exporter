@@ -18,6 +18,13 @@ export const NO_WELLFOUND_TAB = 'Open Wellfound to get started';
 export const NOT_IN_RECRUITER_AREA =
   'Open your hiring pages on Wellfound (wellfound.com/recruit) to see your jobs';
 
+// Markers, alongside the sentences above, so the panel can offer the actual
+// remedy - opening the recruiter area - without reading the words shown to
+// the user. Same reason PAGE_DISCONNECTED carries a code: a screen that
+// decided by matching prose would break the day the prose improved.
+export const NO_WELLFOUND_TAB_CODE = 'no-wellfound-tab';
+export const NOT_IN_RECRUITER_AREA_CODE = 'not-in-recruiter-area';
+
 // Reloading the extension severs the content scripts already running in open
 // tabs, and no new ones are injected until the page navigates. The panel then
 // messages a tab where nothing is listening, and Chrome's own words for that
@@ -92,7 +99,9 @@ export function createTabDriver({ sleep = realSleep, now = () => Date.now(), tra
     const [tab] = await chrome.tabs.query({ url: `${RECRUIT_URL}*` });
     if (tab) return tab;
     const [elsewhere] = await chrome.tabs.query({ url: `${WELLFOUND_URL}*` });
-    throw new Error(elsewhere ? NOT_IN_RECRUITER_AREA : NO_WELLFOUND_TAB);
+    const error = new Error(elsewhere ? NOT_IN_RECRUITER_AREA : NO_WELLFOUND_TAB);
+    error.code = elsewhere ? NOT_IN_RECRUITER_AREA_CODE : NO_WELLFOUND_TAB_CODE;
+    throw error;
   }
 
   async function ask(tabId, message) {

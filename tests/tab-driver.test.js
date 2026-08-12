@@ -9,6 +9,8 @@ import {
   READY_TIMEOUT_MS,
   NO_WELLFOUND_TAB,
   NOT_IN_RECRUITER_AREA,
+  NO_WELLFOUND_TAB_CODE,
+  NOT_IN_RECRUITER_AREA_CODE,
   PAGE_DISCONNECTED,
   PAGE_DISCONNECTED_MESSAGE,
 } from '../src/panel/tab-driver.js';
@@ -65,6 +67,18 @@ describe('workingTab', () => {
   it('names the recruiter area when the Wellfound tab is somewhere else', async () => {
     const { driver } = driverFor({ tabs: [{ id: 7, url: 'https://wellfound.com/jobs' }] });
     await expect(driver.workingTab()).rejects.toThrow(NOT_IN_RECRUITER_AREA);
+  });
+
+  // Each sentence carries its own marker, the same way PAGE_DISCONNECTED does,
+  // so the panel can offer the link without reading the words.
+  it('marks a missing tab distinctly from a tab in the wrong place', async () => {
+    const { driver: noTab } = driverFor({ tabs: [{ id: 7, url: 'https://example.com/' }] });
+    await expect(noTab.workingTab()).rejects.toMatchObject({ code: NO_WELLFOUND_TAB_CODE });
+
+    const { driver: wrongArea } = driverFor({ tabs: [{ id: 7, url: 'https://wellfound.com/jobs' }] });
+    await expect(wrongArea.workingTab()).rejects.toMatchObject({
+      code: NOT_IN_RECRUITER_AREA_CODE,
+    });
   });
 });
 
