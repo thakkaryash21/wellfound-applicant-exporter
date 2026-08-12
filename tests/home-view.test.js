@@ -385,3 +385,68 @@ describe('renderHome', () => {
     expect(html.match(/class="chevron"/g)).toHaveLength(1);
   });
 });
+
+// Accepting, on the screen. It is the only control here that changes what other
+// people receive rather than what this computer stores, so it is off by
+// default, it says what it costs where the decision is made, and it shows the
+// wording it will send rather than describing it.
+describe('the accept control', () => {
+  const on = { ...settings, accept: true };
+  const model = (over = {}) =>
+    homeModel({ jobs: [job()], settingFor: () => setting({ selected: true }), settings, ...over });
+
+  it('is off unless it has been turned on', () => {
+    expect(model().accept).toBe(false);
+    const html = renderHome(model());
+    expect(html).toContain(`id="${HOME_IDS.accept}" type="checkbox"  />`);
+    expect(html).not.toContain(`id="${HOME_IDS.acceptMessage}"`);
+    expect(renderHome(model({ settings: on }))).toContain(
+      `id="${HOME_IDS.accept}" type="checkbox" checked />`,
+    );
+  });
+
+  it('opens the wording, and the wording is the operator\u2019s own', () => {
+    const html = renderHome(model({ settings: on }));
+    expect(html).toContain(`id="${HOME_IDS.acceptMessage}"`);
+    expect(html).toContain('Thanks so much for applying for the [role_name] role');
+  });
+
+  it('states what accepting costs beside the box, not only on the confirm screen', () => {
+    const html = renderHome(model({ settings: on }));
+    expect(html).toContain('cannot be undone');
+    expect(html).toContain('never fetch or re-download them again');
+  });
+
+  // The rule about tokens, shown rather than explained: the example is composed
+  // with a real role name, because that is what [role_name] is filled from.
+  it('shows the composed result for an example on a real role', () => {
+    const html = renderHome(model({ settings: on }));
+    expect(html).toContain('Hey Priya,');
+    expect(html).toContain('applying for the Platform Engineer role');
+    expect(html).toContain('No first name on');
+  });
+
+  it('composes the edited wording, not the default', () => {
+    const html = renderHome(
+      model({ settings: { ...on, acceptMessage: 'Hi [first_name], about [role_name].' } }),
+    );
+    expect(html).toContain('Hi Priya, about Platform Engineer.');
+  });
+
+  // A template with a token this grammar does not know would abort the run once
+  // per candidate. Saying so under the box is where it can still be fixed.
+  it('says so under the box when the wording could never be sent', () => {
+    const html = renderHome(model({ settings: { ...on, acceptMessage: 'Hey [frist_name],' } }));
+    expect(html).toContain('unresolved token');
+  });
+
+  // The button carries no number while accepting: `asked` counts downloads, and
+  // an accept-only run accepts the people already on disk and downloads nobody.
+  // Promising a figure this screen cannot stand behind is the bug it has had
+  // twice already, in the other direction.
+  it('sends the count to the confirm screen rather than onto the button', () => {
+    expect(model({ settings: on }).startLabel).toBe('Review who will be accepted');
+    expect(startLabel([], { accept: true })).toBe('Select a role');
+    expect(startLabel([3])).toBe('Download 3 resumes');
+  });
+});

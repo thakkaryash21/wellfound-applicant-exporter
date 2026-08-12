@@ -6,6 +6,8 @@ import { RUN_IDS } from '../src/panel/running-view.js';
 import { POST_RUN_IDS } from '../src/panel/post-run-view.js';
 import { HOME_IDS, RECONNECT_LABEL } from '../src/panel/home-view.js';
 import { pageDisconnectedError } from '../src/panel/tab-driver.js';
+import { CONFIRM_IDS } from '../src/panel/accept-confirm.js';
+import { DEFAULT_MESSAGE } from '../src/lib/accept-message.js';
 
 // panel.js is the wiring: what the screen shows, which listener each control
 // gets, and what a run event does to the DOM. None of it had a test, because the
@@ -213,6 +215,7 @@ describe('Home', () => {
       folder: 'my-resumes',
       pageSize: 20,
       actions: { download: false, accept: false },
+      acceptMessage: DEFAULT_MESSAGE,
     });
   });
 
@@ -493,5 +496,141 @@ describe('the Library', () => {
     await settle();
     expect(screen.innerHTML).toContain('Platform Engineer');
     expect(byId('start')).not.toBe(null);
+  });
+});
+
+// Accepting, wired up. The gate below is the one behaviour in this panel whose
+// failure cannot be undone: no run may reach startRun with `accept` on without
+// the operator having read the confirm screen and pressed the button on it.
+describe('accepting', () => {
+  async function homeWithAccept(over = {}) {
+    const screen = await openPanel({
+      stub: stubController({
+        listJobs: vi.fn(async () => [job(JOB_A)]),
+        startRun: vi.fn(() => new Promise(() => {})),
+        ...over,
+      }),
+    });
+    const pick = screen.querySelector('.job-pick');
+    pick.checked = true;
+    await pick.dispatch('change');
+    const accept = byId(HOME_IDS.accept);
+    accept.checked = true;
+    await accept.dispatch('change');
+    return screen;
+  }
+
+  it('opens the wording only once accepting is on', async () => {
+    const screen = await openPanel({
+      stub: stubController({ listJobs: vi.fn(async () => [job(JOB_A)]) }),
+    });
+    expect(byId(HOME_IDS.acceptMessage)).toBe(null);
+    const accept = byId(HOME_IDS.accept);
+    accept.checked = true;
+    await accept.dispatch('change');
+    expect(byId(HOME_IDS.acceptMessage).value).toContain('Thanks so much for applying');
+    expect(screen.innerHTML).toContain('Hey Priya,');
+  });
+
+  // The screen is rebuilt on every change, so anything typed has to be read
+  // back out of the DOM first or the rebuild eats it - and here the thing eaten
+  // would be the text a few hundred people receive.
+  it('keeps the edited wording across a re-render', async () => {
+    const screen = await homeWithAccept();
+    const box = byId(HOME_IDS.acceptMessage);
+    box.value = 'Hi [first_name], about [role_name].';
+    await box.dispatch('change');
+    expect(byId(HOME_IDS.acceptMessage).value).toBe('Hi [first_name], about [role_name].');
+    expect(screen.innerHTML).toContain('Hi Priya, about Platform Engineer.');
+  });
+
+  // The gate. Start does not start anything.
+  it('starts no run at all until the confirm screen is confirmed', async () => {
+    const screen = await homeWithAccept();
+    await byId('start').click();
+    await settle();
+    expect(controller.startRun).not.toHaveBeenCalled();
+    expect(screen.innerHTML).toContain('cannot be unsent');
+    expect(byId(CONFIRM_IDS.send)).not.toBe(null);
+    expect(byId(RUN_IDS.status)).toBe(null);
+  });
+
+  it('does not put the focus on the button that sends', async () => {
+    await homeWithAccept();
+    await byId('start').click();
+    await settle();
+    expect(dom.document.activeElement).toBe(byId(CONFIRM_IDS.back));
+  });
+
+  it('goes back to Home from the confirm screen, having sent nothing', async () => {
+    const screen = await homeWithAccept();
+    await byId('start').click();
+    await settle();
+    await byId(CONFIRM_IDS.back).click();
+    await settle();
+    expect(controller.startRun).not.toHaveBeenCalled();
+    expect(screen.innerHTML).toContain('Platform Engineer');
+    expect(byId(HOME_IDS.accept).checked).toBe(true);
+  });
+
+  // And the other half: the text that was shown is the text that is sent.
+  it('runs with the wording the confirm screen showed', async () => {
+    const screen = await homeWithAccept();
+    const box = byId(HOME_IDS.acceptMessage);
+    box.value = 'Hi [first_name], about [role_name].';
+    await box.dispatch('change');
+    await byId('start').click();
+    await settle();
+    expect(screen.innerHTML).toContain('Hi [first_name], about [role_name].');
+
+    byId(CONFIRM_IDS.send).click();
+    await settle();
+    expect(controller.startRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        actions: { download: true, accept: true },
+        acceptMessage: 'Hi [first_name], about [role_name].',
+      }),
+    );
+    expect(byId(RUN_IDS.status)).not.toBe(null);
+  });
+
+  // Progress is accepted out of intended. The reviewer's own total drains as
+  // the run proceeds, so it appears on the activity line as a position and
+  // never as a denominator for progress.
+  it('counts the accepts as they land, against what was intended', async () => {
+    const screen = await homeWithAccept();
+    await byId('start').click();
+    await settle();
+    byId(CONFIRM_IDS.send).click();
+    await settle();
+
+    emit({ type: 'accept_started', jobId: JOB_A, intended: 12, refusedNoResume: 4, alreadyAccepted: 1 });
+    expect(screen.innerHTML).toContain('0 of 12 accepted');
+    expect(screen.innerHTML).toContain('4 refused');
+
+    emit({ type: 'accept_considering', jobId: JOB_A, userId: '21527289', index: 1, total: 116 });
+    expect(byId(RUN_IDS.status).textContent).toBe('reading 1 of 116 in the review queue');
+
+    emit({ type: 'accept_candidate', jobId: JOB_A, outcome: 'accepted', accepted: 1, intended: 12 });
+    emit({ type: 'accept_candidate', jobId: JOB_A, outcome: 'skipped', accepted: 1, intended: 12 });
+    expect(screen.innerHTML).toContain('1 of 12 accepted');
+    expect(screen.innerHTML).toContain('1 passed over');
+    expect(byId(RUN_IDS.status).textContent).toContain('passed over');
+  });
+
+  it('says nothing about accepting on a run that does not accept', async () => {
+    const screen = await openPanel({
+      stub: stubController({
+        listJobs: vi.fn(async () => [job(JOB_A)]),
+        startRun: vi.fn(() => new Promise(() => {})),
+      }),
+    });
+    const pick = screen.querySelector('.job-pick');
+    pick.checked = true;
+    await pick.dispatch('change');
+    byId('start').click();
+    await settle();
+    expect(controller.startRun).toHaveBeenCalled();
+    expect(screen.innerHTML).not.toContain('accepted');
   });
 });

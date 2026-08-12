@@ -1,4 +1,5 @@
 import { escapeHtml } from './escape-html.js';
+import { DEFAULT_MESSAGE, composeMessage } from '../lib/accept-message.js';
 
 // The Home screen: the roles, what each one will fetch, the run-wide settings
 // and the Start button.
@@ -29,7 +30,14 @@ export const HOME_IDS = {
   limit: (jobId) => `limit-${jobId}`,
   reread: (jobId) => `reread-${jobId}`,
   reconnect: 'reconnect',
+  accept: 'accept',
+  acceptMessage: 'accept-message',
 };
+
+// The name the preview greets, so the operator reads a finished sentence rather
+// than a rule about brackets. It is stated as an example on screen: inventing a
+// real applicant's name here would be worse than owning that this one is made up.
+export const SAMPLE_FIRST_NAME = 'Priya';
 
 // The one remedy this screen can offer for itself. panel.js decides when it is
 // warranted, from the marker on the error rather than from its words.
@@ -88,12 +96,38 @@ export function jobSubtitle(job) {
 // The button used to promise the whole backlog under a limit that would refuse
 // most of it. A number on a button has to be the number it will actually fetch,
 // and where the count is unknown it must show no number at all.
-export function startLabel(asked) {
+export function startLabel(asked, { accept = false } = {}) {
   if (asked.length === 0) return 'Select a role';
+  // An accepting run carries no number here on purpose. `asked` counts the
+  // people this run would download, and that is not the number it would accept:
+  // an accept-only run accepts the ones already on disk and downloads nobody.
+  // The confirm screen counts each role properly before anything is sent, so
+  // the button says what pressing it opens rather than promising a figure this
+  // screen cannot stand behind.
+  if (accept) return 'Review who will be accepted';
   if (asked.some((n) => n == null)) return 'Download new resumes';
   const total = asked.reduce((sum, n) => sum + n, 0);
   if (total <= 0) return 'Check for new applicants';
   return `Download ${total} ${total === 1 ? 'resume' : 'resumes'}`;
+}
+
+// The wording an accepting run will send, and one worked example of it. The
+// operator edits a template; every candidate gets it with their own name in it,
+// so a rendered example is the only honest way to show what that means.
+//
+// The role in the example is a real one - the first role picked for this run,
+// or failing that the first on screen - because [role_name] is filled from the
+// job the run walks. The first name is a stated example: there is no applicant
+// on this screen to borrow one from.
+export function messagePreview({ template = DEFAULT_MESSAGE, roleName = '' } = {}) {
+  try {
+    return composeMessage({ template, firstName: SAMPLE_FIRST_NAME, roleName });
+  } catch (error) {
+    // A template carrying a token this grammar does not know would abort the
+    // run per candidate. Saying so here, under the box, is where it can still
+    // be fixed.
+    return String(error.message || error);
+  }
 }
 
 // The denominator for the whole run, across every selected role, or null when
@@ -153,13 +187,21 @@ export function homeModel({
 
   const chosen = rows.filter((row) => row.selected);
   const asked = chosen.map((row) => row.asked);
+  const accept = Boolean(settings?.accept);
+  const template = settings?.acceptMessage ?? DEFAULT_MESSAGE;
+  const sampleRole = (chosen[0] ?? rows[0])?.title ?? '';
 
   return {
     empty: false,
     note: hydrationNote,
     rows,
     selectedCount: chosen.length,
-    startLabel: startLabel(asked),
+    startLabel: startLabel(asked, { accept }),
+    accept,
+    acceptMessage: template,
+    // Only composed when it is on screen. The example is what the box is for.
+    acceptPreview: accept ? messagePreview({ template, roleName: sampleRole }) : '',
+    acceptPreviewRole: sampleRole,
     // The same sum the Start button promises, so the running screen's
     // denominator and the button's number cannot disagree.
     estimate: runEstimate(asked),
@@ -243,6 +285,44 @@ function renderNoJobs(model) {
     ${remedy}`;
 }
 
+// Accepting sits on the main screen rather than under Advanced, and it is the
+// only control here that changes what people receive rather than what this
+// computer stores. It is off unless it is ticked, the wording it will send is
+// open for editing under it, and what accepting costs is stated beside the box
+// rather than saved for the confirm screen: an operator deciding here is who
+// that fact is for.
+function renderAccept(model) {
+  const body = model.accept
+    ? `
+      <p class="accept-cost warn">
+        This cannot be undone. Each person gets this message under your Wellfound
+        account, and an accepted applicant leaves the review queue for good, so
+        this extension can never fetch or re-download them again.
+      </p>
+      <div class="accept-field">
+        <label class="label" for="${HOME_IDS.acceptMessage}">Message</label>
+        <textarea id="${HOME_IDS.acceptMessage}" rows="9" spellcheck="false"
+                  aria-describedby="accept-tokens">${escapeHtml(model.acceptMessage)}</textarea>
+      </div>
+      <p class="job-meta" id="accept-tokens">
+        [first_name] and [role_name] are filled in per person. No first name on
+        file gives "Hey,".
+      </p>
+      <div class="accept-field">
+        <p class="label">Example: ${escapeHtml(SAMPLE_FIRST_NAME)} on ${escapeHtml(model.acceptPreviewRole)}</p>
+        <pre class="accept-preview">${escapeHtml(model.acceptPreview)}</pre>
+      </div>`
+    : '';
+  return `
+    <section class="accept${model.accept ? ' is-on' : ''}" aria-labelledby="accept-label">
+      <label class="choice">
+        <input id="${HOME_IDS.accept}" type="checkbox" ${model.accept ? 'checked' : ''} />
+        <span id="accept-label">Accept these applicants and message them</span>
+      </label>
+      ${body}
+    </section>`;
+}
+
 export function renderHome(model) {
   if (model.empty) return renderNoJobs(model);
   const s = model.settings;
@@ -258,6 +338,7 @@ export function renderHome(model) {
         <input id="${HOME_IDS.folder}" name="folder" type="text" autocomplete="off" spellcheck="false"
                value="${escapeHtml(s.folder)}" /></div>
     </div>
+    ${renderAccept(model)}
     <details class="advanced" id="${HOME_IDS.advanced}" ${s.advancedOpen ? 'open' : ''}>
       <summary>Advanced</summary>
       <div class="advanced-body">

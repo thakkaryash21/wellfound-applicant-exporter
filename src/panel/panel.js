@@ -15,6 +15,8 @@ import {
 } from './summary-store.js';
 import { setVerbose, isVerbose } from './verbose-console.js';
 import { HOME_IDS, DEFAULT_LIMIT, sanitizeLimit, homeModel, renderHome } from './home-view.js';
+import { CONFIRM_IDS, confirmModel, renderConfirm } from './accept-confirm.js';
+import { DEFAULT_MESSAGE } from '../lib/accept-message.js';
 import { PAGE_DISCONNECTED } from './tab-driver.js';
 import { sleep } from '../lib/jitter.js';
 import {
@@ -23,9 +25,12 @@ import {
   renderRunBody,
   renderRunning as runningMarkup,
   emptyCounts,
+  acceptCounts,
   pauseLine,
   candidateLine,
   pageLine,
+  acceptConsideringLine,
+  acceptCandidateLine,
 } from './running-view.js';
 
 // The mount point, found by init(). Not read at import time: importing this
@@ -42,9 +47,12 @@ const state = {
   // The result of a run, and the only thing the post-run screen shows. Home
   // never reads it: what happened last time is not what you want to do now.
   summary: null,
-  // 'home', 'post' or 'library'. The job list keeps loading behind the post-run
-  // screen, so renderRun has to know not to paint over it - and the post-run
-  // screen must not be re-rendered under a user who has just clicked on it.
+  // 'home', 'confirm', 'post' or 'library'. The job list keeps loading behind
+  // the post-run screen, so renderRun has to know not to paint over it - and
+  // the post-run screen must not be re-rendered under a user who has just
+  // clicked on it. The confirm screen is guarded for a sharper reason: a job
+  // list finishing behind it would put Home back under a hand already moving
+  // towards the button that sends a few hundred messages.
   view: 'home',
   // A load failure is a note on Home, not a screen of its own.
   loadError: null,
@@ -57,6 +65,9 @@ const state = {
   // Silence there left roles blank with nothing to explain them.
   hydrationNote: null,
   counts: null,
+  // The accept pass, accumulated across every role in the run. Null until a
+  // pass starts, so a run that accepts nobody says nothing about accepting.
+  accept: null,
   estimate: null,
   // Which role the run is on, and when it started. The time remaining comes from
   // the run's own observed pace - breaks included - not from the pacing
@@ -66,7 +77,19 @@ const state = {
 };
 let lane = null;
 let restTimer = null;
-const settings = { folder: 'wellfound-resumes', fast: false, preview: false, advancedOpen: false };
+const settings = {
+  folder: 'wellfound-resumes',
+  fast: false,
+  preview: false,
+  advancedOpen: false,
+  // Off unless the operator says otherwise, on every panel, every time. This is
+  // the one setting whose default has to be the harmless one: it is the only
+  // thing here that sends anything to anybody.
+  accept: false,
+  // The wording that will be sent. Held here rather than read out of the box at
+  // send time so that the text on the confirm screen is the text that goes.
+  acceptMessage: DEFAULT_MESSAGE,
+};
 
 function jobSettings(jobId) {
   if (!state.jobSettings.has(jobId)) {
@@ -96,6 +119,11 @@ function captureSettings() {
   settings.fast = el(HOME_IDS.fast).checked;
   settings.preview = el(HOME_IDS.preview).checked;
   settings.advancedOpen = el(HOME_IDS.advanced).open;
+  settings.accept = el(HOME_IDS.accept).checked;
+  // Only present while accepting is on. Untick, retick, and the wording the
+  // operator edited is still here rather than reset to the default under them.
+  const message = el(HOME_IDS.acceptMessage);
+  if (message) settings.acceptMessage = message.value;
   // The console mirror is the one thing in this extension allowed to print, so
   // it is read straight back out of the checkbox and never remembered anywhere:
   // every panel opens with it off.
@@ -124,9 +152,10 @@ function globalSettings() {
   return {
     folder: settings.folder.trim() || 'wellfound-resumes',
     pageSize: settings.fast ? 20 : 10,
-    // Accepting is the other action a run can take. Nothing on this screen
-    // turns it on yet, so it is stated as off rather than left to a default.
-    actions: { download: !settings.preview, accept: false },
+    actions: { download: !settings.preview, accept: settings.accept },
+    // The exact text the confirm screen showed. Passed rather than reached for,
+    // so what was read is what is sent.
+    acceptMessage: settings.acceptMessage,
   };
 }
 
@@ -243,8 +272,9 @@ async function reloadTab(tabId) {
 
 function renderRun() {
   // The post-run screen owns the panel until Done. A background job load
-  // finishing must not replace the only account of the run that exists.
-  if (state.view === 'post') return;
+  // finishing must not replace the only account of the run that exists - nor
+  // put Home back under a hand already reaching for the confirm screen's send.
+  if (state.view === 'post' || state.view === 'confirm') return;
 
   const model = currentHomeModel();
   screen.innerHTML = renderHome(model);
@@ -330,40 +360,98 @@ function renderRun() {
     settings.advancedOpen = event.target.open;
   });
 
-  document.getElementById(HOME_IDS.start)?.addEventListener('click', async () => {
-    state.summary = null;
-    const options = globalSettings();
-    const jobs = requestedJobs();
-    // Stashed so the running screen can show a denominator. It is the same sum
-    // the Start button promises. One role whose count the page never gave us
-    // makes the whole total unknowable, and null is not zero: adding a silent
-    // zero for it would understate the run and hand the screen a denominator it
-    // would then overtake within minutes. Read after globalSettings(), which
-    // captures whatever the user last typed, so the denominator is the number
-    // the button was showing when it was pressed.
-    state.estimate = currentHomeModel().estimate;
-    renderRunning();
-    // The Library screen drives the same tab (re-download navigates it), so it
-    // must not be reachable while a run owns that tab.
-    setLibraryEnabled(false);
-    // Before the first request, so a panel closed one second in is still known
-    // to have been interrupted.
-    await markRunStarted();
-    try {
-      await controller.startRun({ jobs, ...options });
-    } catch (error) {
-      // The controller already emitted `done` carrying the totals and the error,
-      // so the summary screen is up. Only a failure that produced no summary at
-      // all needs the bare error screen.
-      if (!state.summary) {
-        // No `done` was emitted, so nothing cleared the marker and nothing will.
-        await clearRunMarker();
-        renderError(error.message);
-      }
-    } finally {
-      setLibraryEnabled(true);
-    }
+  // Ticking accept opens the wording under it, and unticking closes it. The
+  // Start button changes with it, so both need the re-render.
+  document.getElementById(HOME_IDS.accept)?.addEventListener('change', () => {
+    captureSettings();
+    renderRun();
   });
+
+  // On change rather than on input, for the same reason the limit box is: the
+  // screen is rebuilt wholesale, and rebuilding a textarea under a cursor
+  // mid-sentence would throw the caret away. Blur is when the example updates.
+  document.getElementById(HOME_IDS.acceptMessage)?.addEventListener('change', () => {
+    captureSettings();
+    renderRun();
+  });
+
+  document.getElementById(HOME_IDS.start)?.addEventListener('click', async () => {
+    const options = globalSettings();
+    // Nothing is sent from Home. A run that accepts goes through the confirm
+    // screen first, and that screen is the only place startRun is called from
+    // with `accept` on.
+    if (options.actions.accept) {
+      showConfirm(options);
+      return;
+    }
+    await beginRun(options);
+  });
+}
+
+// The last screen before anything leaves this computer. It is rendered from the
+// job list and the per-role settings rather than from anything the run has
+// done, because nothing has happened yet - that is the point of it.
+function showConfirm(options) {
+  state.view = 'confirm';
+  const chosen = selectedJobs();
+  screen.innerHTML = renderConfirm(
+    confirmModel({
+      jobs: chosen,
+      settingFor: jobSettings,
+      download: options.actions.download,
+      message: options.acceptMessage,
+    }),
+  );
+  // Back is what the focus lands on. The button that sends is reachable in one
+  // more key press and never in none.
+  const back = document.getElementById(CONFIRM_IDS.back);
+  back?.addEventListener('click', () => {
+    state.view = 'home';
+    renderRun();
+  });
+  back?.focus();
+  document.getElementById(CONFIRM_IDS.send)?.addEventListener('click', async () => {
+    state.view = 'home';
+    await beginRun(options);
+  });
+}
+
+// Everything from the first request onwards, and the only caller of startRun.
+// Split out of the Start button so that the confirm screen can reach it with
+// the very options that screen was rendered from: the run must not re-read the
+// controls after the operator has read the numbers back and agreed to them.
+async function beginRun(options) {
+  state.summary = null;
+  const jobs = requestedJobs();
+  // Stashed so the running screen can show a denominator. It is the same sum
+  // the Start button promises. One role whose count the page never gave us
+  // makes the whole total unknowable, and null is not zero: adding a silent
+  // zero for it would understate the run and hand the screen a denominator it
+  // would then overtake within minutes. Read after globalSettings(), which
+  // captures whatever the user last typed, so the denominator is the number
+  // the button was showing when it was pressed.
+  state.estimate = currentHomeModel().estimate;
+  renderRunning();
+  // The Library screen drives the same tab (re-download navigates it), so it
+  // must not be reachable while a run owns that tab.
+  setLibraryEnabled(false);
+  // Before the first request, so a panel closed one second in is still known
+  // to have been interrupted.
+  await markRunStarted();
+  try {
+    await controller.startRun({ jobs, ...options });
+  } catch (error) {
+    // The controller already emitted `done` carrying the totals and the error,
+    // so the summary screen is up. Only a failure that produced no summary at
+    // all needs the bare error screen.
+    if (!state.summary) {
+      // No `done` was emitted, so nothing cleared the marker and nothing will.
+      await clearRunMarker();
+      renderError(error.message);
+    }
+  } finally {
+    setLibraryEnabled(true);
+  }
 }
 
 function currentModel() {
@@ -374,11 +462,13 @@ function currentModel() {
     jobIndex: state.job?.index ?? null,
     jobTotal: state.job?.total ?? null,
     elapsedMs: state.runStartedAt ? Date.now() - state.runStartedAt : 0,
+    accept: state.accept,
   });
 }
 
 function renderRunning() {
   state.counts = emptyCounts();
+  state.accept = null;
   state.job = null;
   state.runStartedAt = Date.now();
   screen.innerHTML = runningMarkup(currentModel());
@@ -451,6 +541,33 @@ function handleRunEvent(event) {
     say(candidateLine(event.outcome, event.name));
     lane?.tick(event.outcome);
   }
+  // The accept pass. Accumulated across every role in the run rather than reset
+  // per job: the operator is watching one run, and `intended` is fixed before
+  // the first keystroke of each pass, so the sum only ever grows.
+  if (event.type === 'accept_started') {
+    const accept = state.accept ?? acceptCounts();
+    accept.intended += event.intended ?? 0;
+    accept.refused += event.refusedNoResume ?? 0;
+    accept.already += event.alreadyAccepted ?? 0;
+    state.accept = accept;
+    renderProgress();
+  }
+  if (event.type === 'accept_considering' && running) {
+    clearCountdown();
+    say(acceptConsideringLine(event));
+  }
+  if (event.type === 'accept_candidate') {
+    clearCountdown();
+    if (state.accept) {
+      if (event.outcome === 'accepted') state.accept.accepted += 1;
+      else if (event.outcome === 'failed') state.accept.failed += 1;
+      else if (event.outcome === 'skipped') state.accept.skipped += 1;
+    }
+    renderProgress();
+    say(acceptCandidateLine(event.outcome, event));
+    lane?.tick(event.outcome);
+  }
+
   if (event.type === 'resting') {
     countdown('rest', event.ms);
     lane?.rest(event.ms);
