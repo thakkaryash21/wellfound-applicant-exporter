@@ -78,7 +78,7 @@ const captured = (userId, name = `Person ${userId}`) => ({
 });
 
 // One row per person, in the shape pass 1 leaves behind.
-function harness({ people, records, failAccept = null, signal, template, rand } = {}) {
+function harness({ people, records, failAccept = null, signal, template, rand, limit } = {}) {
   const reviewer = fakeReviewer({ people, failAccept });
   const events = [];
   const ledger = [];
@@ -105,6 +105,7 @@ function harness({ people, records, failAccept = null, signal, template, rand } 
       alreadyAccepted: [],
       template,
       signal,
+      ...(limit === undefined ? {} : { limit }),
     });
   return { run, reviewer, events, ledger, sleeps };
 }
@@ -194,6 +195,113 @@ describe('planAccepts', () => {
     const rows = [{ userId: '7', resumeStatus: RESUME_STATUS.ANOTHER_ROW }];
     expect(planAccepts({ records: rows }).targets).toEqual([]);
     expect(rows[0].acceptStatus).toBe(ACCEPT_STATUS.NO_RESUME);
+  });
+});
+
+// The one control the operator has over how many strangers get a message. It
+// was read by pass 1 as "at most N new downloads" and by pass 2 as nothing at
+// all, and in the operator's own workflow pass 1's counter never moved: every
+// page was all-seen, so the limit never fired once, and the accept pass was
+// handed every applicant in the role with every one of them captured. A limit
+// of 3 on a 115-person role sent 115 messages.
+describe('the role s limit bounds who is messaged', () => {
+  // THE case. Accept-only over a role that was downloaded in full on an earlier
+  // run: every record captured, nobody accepted yet, limit 3.
+  it('messages three of a fully-downloaded role, not the whole role', async () => {
+    const ids = Array.from({ length: 115 }, (_, i) => String(70000001 + i));
+    const records = ids.map((id) => captured(id));
+    const { run, reviewer, ledger } = harness({ people: ids, records, limit: 3 });
+
+    const result = await run();
+
+    expect(result.accepted).toBe(3);
+    expect(result.intended).toBe(3);
+    expect(result.stoppedBecause).toBe('finished');
+    // What was actually sent, counted from the reviewer's own log rather than
+    // from the pass's report of itself.
+    const sent = reviewer.log.filter((entry) => entry.type === CX.ACCEPT_CANDIDATE);
+    expect(sent).toHaveLength(3);
+    expect(ledger.map((entry) => entry.userId)).toEqual(ids.slice(0, 3));
+    // And 112 people are still in the queue, unmessaged.
+    expect(reviewer.queue).toHaveLength(112);
+  });
+
+  // Queue order, carried through `records` and out again unchanged - not
+  // whatever order a Map or an object happens to yield. The three taken are the
+  // three at the front, which is where the reviewer already is, so a capped run
+  // never skips past anybody to reach its targets.
+  it('takes the first N in the order pass 1 handed them over', () => {
+    const rows = ['70000005', '70000001', '70000009', '70000003'].map((id) => captured(id));
+    expect(planAccepts({ records: rows, limit: 2 }).targets).toEqual(['70000005', '70000001']);
+  });
+
+  // Held back is not refused and not attempted. NOT_REACHED is already the word
+  // for "the run was accepting and stopped (a limit, an abort) before reaching
+  // this candidate", and that is exactly what happened to them.
+  it('leaves everyone over the limit reading not reached, and refuses nobody', () => {
+    const rows = ['70000001', '70000002', '70000003'].map((id) => captured(id));
+    const plan = planAccepts({ records: rows, limit: 1 });
+    expect(plan.refusedNoResume).toBe(0);
+    expect(rows.map((row) => row.acceptStatus)).toEqual([
+      ACCEPT_STATUS.NOT_REACHED,
+      ACCEPT_STATUS.NOT_REACHED,
+      ACCEPT_STATUS.NOT_REACHED,
+    ]);
+    expect(plan.targets).toEqual(['70000001']);
+  });
+
+  // A refusal is not a message, so it must not spend the number. Two people
+  // with no resume ahead of three with one still means three messages: a cap
+  // that counted refusals would let a limit of 3 send one.
+  it('spends the number on messages only, not on refusals', () => {
+    const rows = [
+      { userId: '70000001', resumeStatus: RESUME_STATUS.NO_RESUME },
+      { userId: '70000002', resumeStatus: RESUME_STATUS.PREVIEW },
+      captured('70000003'),
+      captured('70000004'),
+      captured('70000005'),
+    ];
+    const plan = planAccepts({ records: rows, limit: 3 });
+    expect(plan.targets).toEqual(['70000003', '70000004', '70000005']);
+    expect(plan.refusedNoResume).toBe(2);
+  });
+
+  // Nor does somebody messaged on an earlier run. They get nothing this time,
+  // so they cost nothing this time.
+  it('spends nothing on the people an earlier run already messaged', () => {
+    const rows = ['70000001', '70000002', '70000003', '70000004'].map((id) => captured(id));
+    const plan = planAccepts({ records: rows, alreadyAccepted: ['70000001'], limit: 2 });
+    expect(plan.targets).toEqual(['70000002', '70000003']);
+    expect(plan.alreadyAccepted).toBe(1);
+  });
+
+  // A role set to "everyone" keeps accepting everyone. panel.js passes Infinity
+  // for that mode, and an absent limit means the same thing.
+  it('keeps the unlimited case genuinely unlimited', async () => {
+    const ids = ['70000001', '70000002', '70000003', '70000004'];
+    const records = ids.map((id) => captured(id));
+    expect(planAccepts({ records, limit: Infinity }).targets).toEqual(ids);
+
+    const { run, reviewer } = harness({ people: ids, records, limit: Infinity });
+    expect((await run()).accepted).toBe(4);
+    expect(reviewer.queue).toHaveLength(0);
+  });
+
+  // The number the pass reports itself against is the capped one, so progress
+  // reads "1 of 3" rather than "1 of 115" on a run that will send three.
+  it('reports progress against the capped number', async () => {
+    const ids = ['70000001', '70000002', '70000003', '70000004', '70000005'];
+    const { run, events } = harness({
+      people: ids,
+      records: ids.map((id) => captured(id)),
+      limit: 2,
+    });
+    await run();
+    expect(events.find((event) => event.type === 'accept_started')).toMatchObject({ intended: 2 });
+    expect(events.find((event) => event.type === 'accept_done')).toMatchObject({
+      intended: 2,
+      accepted: 2,
+    });
   });
 });
 

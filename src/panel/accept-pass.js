@@ -96,7 +96,26 @@ export function resolveFirstName(record) {
 // keystroke, from the rows pass 1 built. Every row gets an Accept cell here, so
 // no row can reach the CSV with a blank one and leave the reader guessing
 // whether it was refused, missed, or never attempted.
-export function planAccepts({ records = [], alreadyAccepted = [] } = {}) {
+//
+// `limit` is the role's own number - the one the operator typed beside it on
+// Home - and here it means exactly one thing: at most this many people are
+// MESSAGED from this role. It is the same number pass 1 reads as "take at most
+// N new downloads from this role", and the two readings can diverge: a
+// download-and-accept run over a role that has been walked before may download
+// three new people and message three others who were already on disk. The
+// reading chosen is the one that cannot surprise: whatever else a run does,
+// somebody who typed 3 gets at most three messages sent under their name.
+//
+// It bounds the people messaged and nothing else. A refusal is not a message
+// and an already-accepted person is not a message, so neither spends the
+// number; counting them would let a role with three refusals send nothing and
+// still report the limit as honoured, which is the surprise in the other
+// direction.
+//
+// Everyone over the number keeps NOT_REACHED - already the word for "the run
+// was accepting and stopped (a limit, an abort) before reaching this
+// candidate", which is precisely what happened to them.
+export function planAccepts({ records = [], alreadyAccepted = [], limit = Infinity } = {}) {
   const already = new Set(alreadyAccepted.map(String));
   // Grouped before anything is decided, because the decision is about a PERSON
   // and the evidence is spread across their rows. Deciding row by row let one
@@ -153,7 +172,19 @@ export function planAccepts({ records = [], alreadyAccepted = [] } = {}) {
     for (const row of rows) row.acceptStatus = ACCEPT_STATUS.NOT_REACHED;
   }
 
-  return { targets, rowsById, refusedNoResume, alreadyAccepted: alreadyCount };
+  // Cut here, last, once every row has its cell. Order is the order pass 1
+  // handed the records over - Wellfound's own queue order, the order the API
+  // paginated them in - carried through `records`, then through this Map's
+  // insertion order, and out to `targets` unchanged. It is deliberately not
+  // whatever order a Map or an object happens to yield for a set of ids: the
+  // people a capped run takes are the ones at the front of the queue, which is
+  // also where the reviewer starts, so a small run skips past nobody.
+  //
+  // `Infinity` is the unlimited case and slices nothing: a role set to
+  // "everyone" still accepts everyone.
+  const capped = Number.isFinite(limit) ? targets.slice(0, Math.max(0, limit)) : targets;
+
+  return { targets: capped, rowsById, refusedNoResume, alreadyAccepted: alreadyCount };
 }
 
 // `review` is one call into the reviewer driver, `recordAccepted` is the
@@ -163,9 +194,20 @@ export function planAccepts({ records = [], alreadyAccepted = [] } = {}) {
 export async function runAcceptPass(deps, options) {
   const { review, recordAccepted, sleep, emit } = deps;
   const rand = deps.rand ?? Math.random;
-  const { jobId, jobTitle, records = [], alreadyAccepted = [], template, signal } = options;
+  const {
+    jobId,
+    jobTitle,
+    records = [],
+    alreadyAccepted = [],
+    template,
+    signal,
+    // The role's own number. Absent means unbounded, which is what a caller
+    // that has no opinion should get - but the run controller always has one,
+    // because every role on Home always carries either a number or Infinity.
+    limit = Infinity,
+  } = options;
 
-  const plan = planAccepts({ records, alreadyAccepted });
+  const plan = planAccepts({ records, alreadyAccepted, limit });
   const intended = plan.targets.length;
   const remaining = new Set(plan.targets);
   const totals = {
