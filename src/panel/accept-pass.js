@@ -50,10 +50,11 @@ export const NOTHING_SENT = 'nothing was sent';
 // stopping and leaving are two different moments: a stop arrives DURING an
 // accept and must touch nothing, and most teardowns follow no stop at all.
 //
-// Declared here rather than beside the other CX names purely because this pass
-// is the only sender; bridge.js carries the same literal in its table, exactly
-// as the message types are duplicated into it, and a test asserts the two agree.
-export const CX_CLOSE_REVIEWER = 'CX_CLOSE_REVIEWER';
+// Re-exported so this pass's own tests and callers can keep naming it here,
+// while the name itself lives with its siblings in messages.js. bridge.js
+// carries the same literal in its table, exactly as the other message types are
+// duplicated into it, and a test asserts the two agree.
+export const CX_CLOSE_REVIEWER = CX.CLOSE_REVIEWER;
 
 // Which of the two a failed accept was. Only certainty is recognised: an error
 // this extension did not write - a relay timeout, anything unforeseen - carries

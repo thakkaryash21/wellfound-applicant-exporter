@@ -24,4 +24,10 @@ export const CX = {
   // this is how a run in progress reaches an accept that is mid-pause: it
   // arrives on its own round trip and is felt inside the pause, not after it.
   STOP_REVIEWER: 'CX_STOP_REVIEWER',
+  // Leave the page as we found it. Separate from STOP on purpose: stop is a
+  // signal felt during an accept, this is an action taken after one, and most
+  // teardowns follow no stop at all. Sent on every exit from the accept pass,
+  // because a reviewer left open holds a composed message one click from a real
+  // send.
+  CLOSE_REVIEWER: 'CX_CLOSE_REVIEWER',
 };
