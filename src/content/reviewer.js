@@ -43,6 +43,33 @@
   // bracket in a stranger's inbox.
   const LEFTOVER_TOKEN = /\[[a-z_]+\]/i;
 
+  // This file distinguishes two classes of failure and the distinction is the
+  // whole of what the panel can tell the operator afterwards. A refusal raised
+  // BEFORE the send is clicked is certain: no message went anywhere. The single
+  // failure raised AFTER the click is not: the message may or may not have gone
+  // out, and only that one may raise the alarm that sends the operator to
+  // Wellfound to check.
+  //
+  // The wire between the two worlds carries a string and nothing else - the
+  // bridge relays `error` text - so the classification travels in the text. This
+  // phrase is the contract. It reads as English because it is the sentence the
+  // operator sees; it is appended verbatim rather than composed, because the
+  // panel matches on it. The panel holds the same constant (accept-pass.js) and
+  // a test asserts the two are identical, exactly as the message type strings
+  // above are duplicated from src/lib/messages.js and checked.
+  //
+  // The polarity is deliberate: only certainty is marked. An error this file
+  // never wrote - a relay timeout, an exception from somewhere unforeseen -
+  // carries no mark and is therefore treated as unclear, which is the safe
+  // reading of an outcome nobody can vouch for.
+  const NOTHING_SENT = 'nothing was sent';
+
+  // Every pre-click refusal goes through here, so none can be written without
+  // the phrase and none can drift in wording.
+  function refuse(what) {
+    return new Error(`${what}; ${NOTHING_SENT}`);
+  }
+
   // A pause is served in slices so a stop lands inside it rather than after it.
   const PAUSE_SLICE_MS = 100;
   const CONFIRM_TIMEOUT_MS = 15000;
@@ -304,8 +331,12 @@
   // by the panel from the same PACING the rest of the run uses and handed in;
   // this file owns no timings of its own, and treats a missing one as no pause
   // rather than inventing a number.
-  async function acceptCurrent({ expectedUserId, message, beforePasteMs, afterPasteMs } = {}) {
-    const expected = expectedUserId == null ? '' : String(expectedUserId);
+  // Everything that happens before the send is clicked: the guards, the
+  // composer, the paste and the identity re-read. It is a function of its own
+  // so that "nothing has gone out yet" is a structural property of a region
+  // rather than a claim repeated at each throw - every failure in here, named
+  // or unforeseen, is caught by the one handler below and marked certain.
+  async function prepareSend({ expected, message, beforePasteMs, afterPasteMs }) {
     if (!expected) throw new Error('Refusing to accept without an expected candidate id');
     if (typeof message !== 'string' || message.trim() === '') {
       throw new Error('Refusing to send an empty message');
@@ -333,14 +364,14 @@
 
     // A beat while the composer opens and the wording is gathered.
     await pause(beforePasteMs);
-    if (stopped) throw new Error('Stopped before the message was entered; nothing was sent');
+    if (stopped) throw new Error('Stopped before the message was entered');
     pasteMessage(composerBox(), message);
     // A beat to read it back, which is what the pause after a paste is.
     await pause(afterPasteMs);
     // After the pause and before the click, so a stop during either pause takes
     // effect while nothing has yet gone out. Past this point a send is
     // possible, and nothing here ever retries one.
-    if (stopped) throw new Error('Stopped before the message was sent; nothing was sent');
+    if (stopped) throw new Error('Stopped before the message was sent');
 
     const send = uniqueControl(dialogRoot(), SEND_LABEL, 'Accept application & send message');
     // Identity, re-read immediately before the click and nowhere else that
@@ -349,8 +380,25 @@
     // would message whoever slid into the slot.
     const atTheClick = readUserId(dialogRoot());
     if (atTheClick !== expected) {
-      throw new Error(`The reviewer moved to ${atTheClick} before the send; nothing was sent`);
+      throw new Error(`The reviewer moved to ${atTheClick} before the send`);
     }
+    return { before, send };
+  }
+
+  async function acceptCurrent({ expectedUserId, message, beforePasteMs, afterPasteMs } = {}) {
+    const expected = expectedUserId == null ? '' : String(expectedUserId);
+
+    let before;
+    let send;
+    try {
+      ({ before, send } = await prepareSend({ expected, message, beforePasteMs, afterPasteMs }));
+    } catch (error) {
+      // The click below has not happened, so this is the certain half of the
+      // contract. Marked here and only here: one site, guarding one region,
+      // rather than a phrase each throw has to remember to carry.
+      throw refuse(String(error.message || error));
+    }
+
     // Recorded before the click, not after. If the click throws or the page
     // dies mid-send, the message may still have gone out, and this document
     // must never be talked into sending it again.
@@ -494,6 +542,10 @@
       pause,
       handlers,
       sent,
+      // Exposed so a test can assert the panel's copy of it is the same string.
+      // A silent divergence here turns "stopped, nothing was sent" back into
+      // the alarm it exists to stop crying wolf with.
+      NOTHING_SENT,
     });
   }
 })();

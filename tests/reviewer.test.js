@@ -10,6 +10,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { loadClassicScript, createFakeWindow } from './helpers/classic-script.js';
 import { installFakeDom } from './helpers/fake-dom.js';
+// The panel's own copy of the phrase that crosses the world boundary. Imported
+// here so the two are compared rather than assumed equal.
+import { NOTHING_SENT } from '../src/panel/accept-pass.js';
 
 // What the page does, reduced to what was measured live and nothing more:
 //   - the applicant list carries ONE `View application` control per card -
@@ -107,7 +110,10 @@ function createPage(options = {}) {
     }
     document.getElementById('accept')?.addEventListener('click', () => {
       options.onAcceptClick?.(state);
-      state.composer = true;
+      // A page that takes the click and never brings the composer up: a slow
+      // render, a changed markup, an error inside their own handler. Nothing
+      // has been typed and nothing sent, and the driver has to say so.
+      state.composer = !options.composerNeverOpens;
       render();
     });
     document.getElementById('reject')?.addEventListener('click', () => {
@@ -361,6 +367,85 @@ describe('accepting', () => {
     start();
     await driver.openReviewer();
     await expect(driver.acceptCurrent({ message: MESSAGE })).rejects.toThrow(/expected candidate/i);
+  });
+});
+
+// --- the two classes of failure -----------------------------------------------
+
+// This driver knows something the panel cannot work out for itself: whether the
+// send was clicked. A refusal raised before that click is certain - nothing went
+// anywhere - and the panel says so plainly; the one failure raised after it is
+// genuinely ambiguous and raises the alarm that sends the operator to Wellfound
+// to check on a stranger. Flattening the two trained the operator to discount
+// the alarm on the run where it was real.
+//
+// The wire between the two worlds carries a string and nothing else, so the
+// classification travels in the text and this phrase is the contract.
+describe('saying whether anything was sent', () => {
+  const certainly = (message) => expect(message).toContain(driver.NOTHING_SENT);
+
+  it('agrees with the panel on the exact phrase', async () => {
+    start();
+    // Two copies, in two worlds, because a MAIN-world classic script cannot
+    // import - the same reason the message type strings are duplicated into it.
+    // A silent divergence turns every certain refusal back into the alarm.
+    expect(driver.NOTHING_SENT).toBe(NOTHING_SENT);
+  });
+
+  it('marks a composer that never opened, where nothing was even typed', async () => {
+    // The Accept button click does not bring up a composer. Measured tolerance
+    // is five seconds; a slow render is not an ambiguous send.
+    start({ composerNeverOpens: true });
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    const settled = pending.catch((error) => error);
+    await vi.advanceTimersByTimeAsync(5000);
+    const error = await settled;
+    expect(error.message).toMatch(/composer did not open/);
+    certainly(error.message);
+    expect(page.state.sentText).toBe(null);
+  });
+
+  it('marks an identity mismatch', async () => {
+    start();
+    await driver.openReviewer();
+    const error = await driver
+      .acceptCurrent({ expectedUserId: '21373701', message: MESSAGE })
+      .catch((e) => e);
+    certainly(error.message);
+  });
+
+  it('marks a message the composer kept nothing of', async () => {
+    start({ deafComposer: true });
+    await driver.openReviewer();
+    const error = await driver
+      .acceptCurrent({ expectedUserId: '21527289', message: MESSAGE })
+      .catch((e) => e);
+    expect(error.message).toMatch(/did not reach the composer/);
+    certainly(error.message);
+  });
+
+  it('marks a leftover token and an empty message', async () => {
+    start();
+    await driver.openReviewer();
+    for (const message of ['Hey [first_name],', '   ']) {
+      const error = await driver
+        .acceptCurrent({ expectedUserId: '21527289', message })
+        .catch((e) => e);
+      certainly(error.message);
+    }
+  });
+
+  // The whole point of the split: this one, and only this one, may raise it.
+  it('does NOT mark the send it could not confirm', async () => {
+    start({ onSendClick: () => {} });
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({ expectedUserId: '21527289', message: MESSAGE });
+    const settled = pending.catch((error) => error);
+    await vi.advanceTimersByTimeAsync(15000);
+    const error = await settled;
+    expect(error.message).toMatch(/may or may not have been sent/);
+    expect(error.message).not.toContain(driver.NOTHING_SENT);
   });
 });
 
