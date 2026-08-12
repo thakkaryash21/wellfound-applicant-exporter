@@ -1,0 +1,49 @@
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('../assets/fonts/InstrumentSans-Variable.woff2') format('woff2');
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  src: url('../assets/fonts/JetBrainsMono-Variable.woff2') format('woff2');
+  font-weight: 400 700;
+  font-display: swap;
+}
+
+:root {
+  /* Without this, Chrome renders the native checkboxes, the number input's
+     spinner and the scrollbars in its light theme against a near-black panel. */
+  color-scheme: dark;
+
+  --ground: #0e1219;
+  --surface: #161b24;
+  --surface-hi: #1d2430;
+  --hairline: #232a36;
+  --paper: #ede7dc;
+  --muted: #8a93a3;
+  --sand: #d9b382;
+  --sage: #9bb89a;
+  --rust: #c77b62;
+
+  --font-ui: 'Instrument Sans', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, monospace;
+
+  --ease: cubic-bezier(0.23, 1, 0.32, 1);
+  --dur-fast: 150ms;
+  --dur: 200ms;
+
+  /* One scale, so nothing is rounded by accident. Controls take md; the
+     surfaces they sit on take lg, which keeps corners concentric. */
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 12px;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+}

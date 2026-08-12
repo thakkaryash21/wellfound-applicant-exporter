@@ -1,0 +1,146 @@
+// The relay between the panel and the page. It ships as a classic content
+// script, so it is loaded the way Chrome loads it and driven from its two real
+// edges - chrome.runtime.onMessage on one side, window messages on the other.
+// It exposes nothing on purpose: it has no logic to reach into.
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { loadClassicScript, createFakeWindow } from './helpers/classic-script.js';
+
+function load() {
+  const fakeWindow = createFakeWindow();
+  const runtimeListeners = [];
+  const chrome = { runtime: { onMessage: { addListener: (fn) => runtimeListeners.push(fn) } } };
+  loadClassicScript('src/content/bridge.js', {
+    globals: { window: fakeWindow.window, chrome },
+  });
+  const listener = runtimeListeners[0];
+  return {
+    ...fakeWindow,
+    // What the panel sends. The returned value is the one Chrome reads to
+    // decide whether sendResponse may still be called.
+    send(message) {
+      let response;
+      const returned = listener(message, {}, (value) => {
+        response = value;
+      });
+      return { returned, read: () => response };
+    },
+    // What the MAIN world would post back.
+    reply(id, payload) {
+      fakeWindow.deliver({ source: 'wfx-page', id, ...payload });
+    },
+    // The last request the bridge forwarded to the page.
+    lastAsk: () => fakeWindow.posted[fakeWindow.posted.length - 1],
+  };
+}
+
+// Lets the .then(sendResponse) chain run.
+const flush = () => Promise.resolve().then(() => {});
+
+beforeEach(() => vi.useFakeTimers());
+afterEach(() => vi.useRealTimers());
+
+describe('the bridge', () => {
+  it('keeps sendResponse alive by returning true for every message it forwards', () => {
+    const bridge = load();
+    // The whole extension rests on this. Returning anything falsy from an
+    // onMessage listener closes the channel the moment it returns, so every
+    // answer arrives as undefined - and a suite that only checked the page side
+    // would still be green.
+    for (const type of ['CX_LIST_JOBS', 'CX_FETCH_PAGE', 'CX_QUERY_READY']) {
+      expect(bridge.send({ type }).returned).toBe(true);
+    }
+  });
+
+  it('forwards only the three types it is allowed to', () => {
+    const bridge = load();
+    const before = bridge.posted.length;
+    for (const message of [{ type: 'EVAL' }, { type: 'CX_ANYTHING' }, {}, null]) {
+      expect(bridge.send(message).returned).toBe(false);
+    }
+    // A relay that forwarded whatever it was handed would let anything with
+    // access to the extension run against the recruiter's own Apollo client.
+    expect(bridge.posted.length).toBe(before);
+  });
+
+  it('asks the page in the page own vocabulary, carrying the payload', () => {
+    const bridge = load();
+    bridge.send({ type: 'CX_FETCH_PAGE', payload: { jobId: '9100001', first: 50 } });
+    expect(bridge.lastAsk()).toMatchObject({
+      source: 'wfx-cs',
+      type: 'FETCH_PAGE',
+      payload: { jobId: '9100001', first: 50 },
+    });
+  });
+
+  it('gives every request its own id, so two in flight cannot cross', async () => {
+    const bridge = load();
+    const jobs = bridge.send({ type: 'CX_LIST_JOBS' });
+    const first = bridge.lastAsk().id;
+    const page = bridge.send({ type: 'CX_FETCH_PAGE', payload: {} });
+    const second = bridge.lastAsk().id;
+    expect(first).not.toBe(second);
+
+    bridge.reply(second, { ok: true, data: { edges: [] } });
+    bridge.reply(first, { ok: true, data: [{ jobId: '9100001' }] });
+    await flush();
+    expect(jobs.read()).toEqual({ ok: true, data: [{ jobId: '9100001' }] });
+    expect(page.read()).toEqual({ ok: true, data: { edges: [] } });
+  });
+
+  it('passes a page failure back as an answer, not as a rejection', async () => {
+    const bridge = load();
+    const sent = bridge.send({ type: 'CX_QUERY_READY' });
+    bridge.reply(bridge.lastAsk().id, { ok: false, error: 'RecruitJobListingApplicants is not active yet' });
+    await flush();
+    expect(sent.read()).toEqual({
+      ok: false,
+      error: 'RecruitJobListingApplicants is not active yet',
+    });
+  });
+
+  it('answers not-ok when the page goes quiet, rather than hanging the run forever', async () => {
+    const bridge = load();
+    const sent = bridge.send({ type: 'CX_LIST_JOBS' });
+    await vi.advanceTimersByTimeAsync(29999);
+    expect(sent.read()).toBe(undefined);
+    await vi.advanceTimersByTimeAsync(1);
+    await flush();
+    // A MAIN world script that never loaded answers nothing at all. Without
+    // this the panel waits on a promise that will never settle and the run
+    // parks with the stop button inert.
+    expect(sent.read()).toEqual({ ok: false, error: 'Page did not respond in time' });
+  });
+
+  it('drops the timeout the moment the page answers', async () => {
+    const bridge = load();
+    bridge.send({ type: 'CX_LIST_JOBS' });
+    expect(vi.getTimerCount()).toBe(1);
+    bridge.reply(bridge.lastAsk().id, { ok: true, data: [] });
+    await flush();
+    // The pending entry and its timer are both released; a run of a thousand
+    // pages would otherwise hold a thousand live timers.
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('ignores a second answer to a request it has already settled', async () => {
+    const bridge = load();
+    const sent = bridge.send({ type: 'CX_LIST_JOBS' });
+    const id = bridge.lastAsk().id;
+    bridge.reply(id, { ok: true, data: 'first' });
+    await flush();
+    expect(() => bridge.reply(id, { ok: false, error: 'second' })).not.toThrow();
+    await flush();
+    expect(sent.read()).toEqual({ ok: true, data: 'first' });
+  });
+
+  it('ignores traffic from other frames, other senders and unknown ids', async () => {
+    const bridge = load();
+    const sent = bridge.send({ type: 'CX_LIST_JOBS' });
+    const id = bridge.lastAsk().id;
+    bridge.deliver({ source: 'wfx-page', id, ok: true, data: 'elsewhere' }, { other: 'frame' });
+    bridge.deliver({ source: 'somebody-else', id, ok: true, data: 'spoofed' });
+    bridge.reply('wfx-999', { ok: true, data: 'nobody asked' });
+    await flush();
+    expect(sent.read()).toBe(undefined);
+  });
+});

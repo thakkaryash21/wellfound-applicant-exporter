@@ -1,0 +1,13 @@
+node_modules/
+.DS_Store
+*.zip
+
+# Scratch space for the agent workflow that built this: ledgers, briefs, review
+# packages. Local working notes, not part of the project.
+.superpowers/
+
+# Editor and tooling
+.vscode/
+.idea/
+*.swp
+coverage/

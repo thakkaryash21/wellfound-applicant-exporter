@@ -1,0 +1,732 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--paper);
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  touch-action: manipulation;
+  overflow-x: hidden;
+}
+
+/* A control, not a caption. It used to take .label - 11px grey uppercase with no
+   background, border or padding - and read as a heading for the thing beside it.
+   Bordered and filled to the same recipe as the other secondary buttons, kept
+   quieter than the primary action at the foot of the screen. */
+#nav-library {
+  flex: none;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  color: var(--paper);
+  padding: var(--space-1) var(--space-3);
+  min-height: 28px;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  transition: background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+#nav-library:hover:not(:disabled) {
+  background: var(--surface-hi);
+  border-color: var(--muted);
+}
+
+#nav-library:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--hairline);
+}
+
+/* The product's full name beside a button, in a 400px panel. Smaller rather than
+   truncated: "Applicant Exporter for Well..." is worse than a name that fits. */
+.topbar h1 {
+  margin: 0;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--sand);
+  outline-offset: 2px;
+}
+
+.jobs {
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-2);
+}
+
+/* Two questions on one card, and two targets for them. The checkbox is already a
+   precise, unambiguous target, so the card's surface goes to the larger, vaguer
+   intent: anywhere on the card opens or closes this role's settings. */
+.job-row {
+  background: var(--surface);
+  border: 1px solid transparent;
+  border-radius: var(--radius-lg);
+  padding: var(--space-3);
+  transition: background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.job-row:hover {
+  background: var(--surface-hi);
+  cursor: pointer;
+}
+
+.job-row:has(.job-pick:checked) {
+  background: var(--surface-hi);
+  border-color: var(--sand);
+}
+
+.job-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.job-title {
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-pick {
+  accent-color: var(--sand);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
+  cursor: pointer;
+}
+
+/* The disclosure, and a sibling of the checkbox rather than its ancestor. It
+   fills the rest of the head so the title and the count are part of the target;
+   panel.js hands it the clicks that land on the card's padding as well. */
+.job-open {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0;
+  background: none;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.job-open-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* One arrow in a square box, centred, turning through 180 degrees. The box is
+   what turns, so the arrow cannot drift off centre as it goes. */
+.chevron {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  transition: transform var(--dur) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.job-open:hover .chevron {
+  color: var(--paper);
+}
+
+.job-open[aria-expanded='true'] .chevron {
+  transform: rotate(180deg);
+}
+
+/* The row's own settings. Indented under the title so it reads as belonging to
+   this role and not to the run. */
+.job-options {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  display: grid;
+  gap: var(--space-3);
+  background: var(--ground);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  /* The card's pointer cursor stops at the settings: nothing in here toggles it. */
+  cursor: default;
+}
+
+.job-options[hidden] {
+  display: none;
+}
+
+.job-get {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: grid;
+  gap: var(--space-2);
+}
+
+.job-get legend {
+  padding: 0;
+  margin-bottom: var(--space-1);
+}
+
+.choice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.choice input[type='radio'],
+.choice input[type='checkbox'] {
+  accent-color: var(--sand);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  flex: none;
+  cursor: pointer;
+}
+
+.choice-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.first-n {
+  width: 72px;
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  color: var(--paper);
+  padding: var(--space-1) var(--space-2);
+  font: inherit;
+  min-height: 32px;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.first-n:hover {
+  border-color: var(--muted);
+}
+
+/* Closed by default. Nothing in here is needed for an ordinary run. */
+.advanced {
+  border-top: 1px solid var(--hairline);
+  padding: var(--space-3) var(--space-4);
+}
+
+.advanced summary {
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  padding: var(--space-1) var(--space-2);
+  margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1);
+  transition: color var(--dur-fast) var(--ease);
+  color: var(--muted);
+}
+
+.advanced summary:hover {
+  color: var(--paper);
+}
+
+.advanced-body {
+  display: grid;
+  gap: var(--space-3);
+  padding-top: var(--space-3);
+}
+
+/* The warning belongs to this control, in this control's own column. It used to
+   be a third child of a two-column grid, which folded it into the label column
+   and rendered it as a crushed block. */
+.advanced-item {
+  display: grid;
+  gap: var(--space-1);
+}
+
+.advanced-item .job-meta {
+  margin: 0;
+  padding-left: 24px;
+}
+
+.job-meta {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* The terminal summary. Several lines, not one: a truncated run has to be able
+   to say what it did, what it stopped on, and what to do about it. */
+.run-summary {
+  border-bottom: 1px solid var(--hairline);
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-2);
+}
+
+/* The post-run screen. One column: what happened, the steps that got there, and
+   the two things that can be done about it. */
+.post-run {
+  display: grid;
+  gap: var(--space-3);
+  padding-bottom: var(--space-4);
+}
+
+.post-run-title {
+  margin: 0;
+  padding: var(--space-4) var(--space-4) 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--paper);
+}
+
+.post-run .run-summary {
+  border-bottom: 0;
+  padding-bottom: 0;
+}
+
+.post-run .trace-body {
+  padding: 0 var(--space-4);
+}
+
+.post-run p {
+  margin: 0;
+}
+
+.run-headline {
+  color: var(--paper);
+}
+
+/* Done first and filled, the download under it and outlined: one is the way out
+   of this screen, the other is optional. Both sit above the trace, which is
+   bounded at 240px and would otherwise push them off the bottom of the panel. */
+.post-run-actions {
+  display: grid;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  padding-bottom: var(--space-2);
+}
+
+.post-run-actions .primary {
+  margin-bottom: 0;
+}
+
+.secondary {
+  width: calc(100% - var(--space-4) * 2);
+  margin: 0 var(--space-4);
+  min-height: 36px;
+  padding: var(--space-2) var(--space-4);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  color: var(--paper);
+  font: inherit;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease);
+}
+
+.secondary:hover {
+  background: var(--surface-hi);
+  border-color: var(--sand);
+}
+
+.settings {
+  border-top: 1px solid var(--hairline);
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+}
+
+.setting {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.setting input[type='text'],
+.setting input[type='number'] {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  color: var(--paper);
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  min-height: 36px;
+  min-width: 0;
+  transition: border-color var(--dur-fast) var(--ease);
+}
+
+.setting input[type='text']:hover,
+.setting input[type='number']:hover {
+  border-color: var(--muted);
+}
+
+.setting label {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  cursor: pointer;
+}
+
+.setting input[type='checkbox'] {
+  accent-color: var(--sand);
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  cursor: pointer;
+}
+
+.primary {
+  width: calc(100% - var(--space-4) * 2);
+  margin: 0 var(--space-4) var(--space-4);
+  min-height: 44px;
+  padding: var(--space-3) var(--space-4);
+  border: 0;
+  border-radius: var(--radius-md);
+  background: var(--sand);
+  color: var(--ground);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease),
+    background-color var(--dur-fast) var(--ease);
+}
+
+.primary:hover:not(:disabled) {
+  background: #e6c599;
+}
+
+.primary:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+/* A dimmed fill would drop below contrast. Swap the surface instead, so the
+   label stays readable while clearly reading as unavailable. */
+.primary:disabled {
+  background: var(--surface-hi);
+  color: var(--muted);
+  cursor: default;
+}
+
+.empty {
+  padding: var(--space-6) var(--space-4) var(--space-2);
+  color: var(--paper);
+}
+
+.empty-hint {
+  margin: 0;
+  padding: 0 var(--space-4) var(--space-6);
+  color: var(--muted);
+}
+
+/* Reduce movement, not feedback. Colour and background transitions tell the user
+   a control responded, so they stay; only motion is removed. The breath lane
+   stops animating in JS and reports its state as text instead. */
+@media (prefers-reduced-motion: reduce) {
+  .chevron {
+    transition: none;
+  }
+
+  .primary:active,
+  .lib-actions button:active {
+    transform: none;
+  }
+
+  .tick {
+    animation: none;
+  }
+}
+
+/* The running screen. One determinate bar for the whole run, with the role and
+   its position under it as text rather than as a second bar of equal weight. */
+.run {
+  padding: var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+}
+
+/* Two columns, and always exactly two children: the count and the time. When
+   there is not yet enough evidence for a time the second child is an empty
+   paragraph, because a third child in a two-column grid is what folded a line
+   into the wrong column the last time this screen was built. */
+.run-head {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: baseline;
+  gap: var(--space-3);
+}
+
+.run-count {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.run-eta {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.run-bar {
+  height: 6px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-hi);
+  overflow: hidden;
+}
+
+.run-fill {
+  height: 100%;
+  background: var(--sand);
+  border-radius: var(--radius-sm);
+  /* No transition: renderProgress replaces the whole of #run-body on every
+     candidate, so this element is destroyed and recreated rather than resized.
+     A transition here could never fire, and implying an animation that cannot
+     happen is worse than the honest jump. */
+}
+
+/* What stands in for the bar when there is nothing honest to draw it against. */
+.run-note {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* The role is the thing being exported, so it carries real emphasis. It used to
+   take the .label treatment, which rendered the most important item on screen as
+   a form caption. */
+.run-role {
+  margin: 0;
+  font-weight: 600;
+}
+
+.run-breakdown {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* The lane and the line that explains it, together, under the bar. */
+.run-lane {
+  display: grid;
+  gap: var(--space-2);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--hairline);
+}
+
+.run-status {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  min-height: 18px;
+}
+
+.lane {
+  position: relative;
+  height: 24px;
+  border-bottom: 1px solid var(--hairline);
+  overflow: hidden;
+}
+
+.lane-fill {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 1px;
+  background: var(--sand);
+  transform: scaleX(0);
+  transform-origin: left center;
+  opacity: 0.5;
+}
+
+.lane[data-mode='break'] .lane-fill {
+  opacity: 0.2;
+}
+
+.lane-ticks {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+}
+
+.tick {
+  width: 2px;
+  height: 10px;
+  background: var(--sand);
+  animation: tick-in 200ms var(--ease);
+}
+
+/* A landed file is a terminal state for that candidate, so it takes the
+   terminal colour. Sand stays reserved for what is still in motion: the
+   draining fill, and dry-run marks for files that were never fetched. */
+.tick-downloaded {
+  background: var(--sage);
+}
+
+.tick-skipped {
+  height: 5px;
+  background: var(--muted);
+}
+
+.tick-failed {
+  background: var(--rust);
+}
+
+/* Nothing was fetched for these, so they must not read as sand ticks that are
+   merely still in motion. A hollow half-height mark says "passed over". */
+.tick-no-id,
+.tick-masked,
+.tick-dry-run {
+  height: 7px;
+  background: transparent;
+  border-top: 2px solid var(--muted);
+  border-bottom: 2px solid var(--muted);
+}
+
+.tick-masked {
+  border-color: var(--sand);
+}
+
+@keyframes tick-in {
+  from {
+    opacity: 0;
+    transform: scaleY(0.4);
+  }
+  to {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+
+.back {
+  background: none;
+  border: 0;
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  cursor: pointer;
+  margin: var(--space-2) var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  transition: background-color var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+}
+
+.back:hover {
+  background: var(--surface);
+  color: var(--paper);
+}
+
+.lib-row {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--hairline);
+  display: grid;
+  gap: var(--space-1);
+}
+
+.lib-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.lib-actions button {
+  background: var(--surface);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-sm);
+  color: var(--paper);
+  padding: var(--space-2) var(--space-3);
+  min-height: 36px;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease),
+    border-color var(--dur-fast) var(--ease), transform var(--dur-fast) var(--ease);
+}
+
+.lib-actions button:hover:not(:disabled) {
+  background: var(--surface-hi);
+  border-color: var(--muted);
+}
+
+.lib-actions button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+
+.lib-actions button:disabled {
+  color: var(--muted);
+  cursor: default;
+}
+
+.danger {
+  margin-left: auto;
+  color: var(--rust);
+}
+
+.danger:hover:not(:disabled) {
+  border-color: var(--rust);
+}
+
+.warn {
+  color: var(--rust);
+}
+
+/* The trace, on the post-run screen and open. That screen exists to show what
+   happened, so the detail does not need hiding on it. */
+.trace-body {
+  display: grid;
+  gap: var(--space-2);
+}
+
+/* Monospaced and scrollable in both directions: the entries line up in columns,
+   and a 320px panel must not be widened by one long step name. */
+.trace-log {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  background: var(--ground);
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-md);
+  padding: var(--space-2);
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  white-space: pre;
+}

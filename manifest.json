@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Applicant Exporter for Wellfound",
+  "version": "0.1.0",
+  "description": "Export applicant resumes and a CSV from your own Wellfound job listings. Not affiliated with Wellfound.",
+  "minimum_chrome_version": "116",
+  "permissions": ["storage", "downloads", "sidePanel"],
+  "host_permissions": ["https://wellfound.com/*"],
+  "icons": {
+    "16": "src/assets/icons/icon-16.png",
+    "32": "src/assets/icons/icon-32.png",
+    "48": "src/assets/icons/icon-48.png",
+    "128": "src/assets/icons/icon-128.png"
+  },
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "src/panel/panel.html"
+  },
+  "action": {
+    "default_title": "Applicant Exporter for Wellfound",
+    "default_icon": {
+      "16": "src/assets/icons/icon-16.png",
+      "32": "src/assets/icons/icon-32.png",
+      "48": "src/assets/icons/icon-48.png",
+      "128": "src/assets/icons/icon-128.png"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://wellfound.com/recruit/*"],
+      "js": ["src/content/bridge.js"],
+      "world": "ISOLATED",
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://wellfound.com/recruit/*"],
+      "js": ["src/content/collector.js"],
+      "world": "MAIN",
+      "run_at": "document_idle"
+    }
+  ]
+}
