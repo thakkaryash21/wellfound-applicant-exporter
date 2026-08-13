@@ -186,6 +186,14 @@ export function createController({
     // that says a real person was messaged with nothing left remembering it.
     else if (event.type === 'accept_unrecorded')
       trace.record('accept_unrecorded', { jobId, userId: event.userId, error: event.error });
+    // A send the driver's fast path did not see land, which on a large role is
+    // ordinary rather than alarming. Recorded because the count of them is the
+    // one number that says "this role is slow" - the question every diagnosis
+    // of an accept run has opened with - and because it is the population the
+    // watch exists to serve. What the watch itself sees, look by look, stays in
+    // the live region: it is per-look noise, and the trace wants the fact.
+    else if (event.type === 'accept_pending')
+      trace.record('accept_pending', { jobId, userId: event.userId });
     // The pass asking again, after the role is done, about every send it could
     // not settle on the spot. Recorded so a later timing question can see that
     // the sweep ran and how much it had to do - a run whose deferrals all

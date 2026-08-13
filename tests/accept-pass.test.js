@@ -37,8 +37,23 @@ function fakeReviewer({
   // its contract and it carries the phrase; an unconfirmed send carries none.
   certain = false,
   closeFails = false,
+  // The shape the live 101-applicant role produced, and the one the fast path
+  // deliberately no longer tries to cover: the click lands, the driver's own
+  // window runs out, and the page catches up some looks later. The driver hands
+  // this back as `pending` rather than throwing, so `slowAccept` is NOT a
+  // failure - it is an ordinary slow accept, and the pass is expected to book
+  // it as one.
+  slowAccept = null,
+  // How many position reads happen before the page shows the send. Each read is
+  // one wait in the pass's watch, so 3 here is an accept that lands about 30s
+  // after the click and 6 is one that lands around 125s.
+  landsAfterLooks = 2,
 } = {}) {
   const failing = new Set([failAccept].flat().filter(Boolean).map(String));
+  const slow = new Set([slowAccept].flat().filter(Boolean).map(String));
+  // Sends the page has taken but not yet shown, and how many reads are left
+  // before it does.
+  const inFlight = new Map();
   const queue = people.map(String);
   const log = [];
   let index = 1;
@@ -67,7 +82,21 @@ function fakeReviewer({
       return { cancelled: false, closed: true, notes: [] };
     }
     if (!opened) throw new Error('The reviewer is not open');
-    if (message.type === CX.READ_CANDIDATE) return at();
+    if (message.type === CX.READ_CANDIDATE) {
+      // The page catching up, one read at a time. This is the only place a
+      // slow send becomes visible, which is what makes the pass's watch the
+      // thing under test rather than the fake's generosity.
+      for (const [id, left] of inFlight) {
+        if (left > 1) {
+          inFlight.set(id, left - 1);
+          continue;
+        }
+        inFlight.delete(id);
+        const spot = queue.indexOf(id);
+        if (spot !== -1) queue.splice(spot, 1);
+      }
+      return at();
+    }
     if (message.type === CX.SKIP_CANDIDATE) {
       index += 1;
       return at();
@@ -79,6 +108,20 @@ function fakeReviewer({
         throw new Error(`The reviewer is showing ${here.userId}`);
       }
       if (onSend) onSend();
+      if (slow.has(here.userId)) {
+        // Clicked, taken by the page, and not yet shown. Exactly what the
+        // driver returns when its fast path runs out.
+        inFlight.set(here.userId, landsAfterLooks);
+        return {
+          userId: here.userId,
+          accepted: false,
+          pending: true,
+          total: queue.length,
+          reason:
+            `Could not confirm the accept for ${here.userId}. It may or may not have been ` +
+            'sent - check the candidate in Wellfound before running again. Nothing was retried.',
+        };
+      }
       if (failing.has(here.userId)) {
         if (certain) throw new Error(`The reviewer is showing somebody else; ${NOTHING_SENT}`);
         if (landed) queue.splice(index - 1, 1);
@@ -104,6 +147,8 @@ function harness({
   people,
   records,
   failAccept = null,
+  slowAccept = null,
+  landsAfterLooks = 2,
   landed = false,
   certain = false,
   checkQueue = null,
@@ -130,17 +175,33 @@ function harness({
   rand,
   limit,
 } = {}) {
-  const reviewer = fakeReviewer({ people, failAccept, landed, certain, onSend });
+  const reviewer = fakeReviewer({
+    people,
+    failAccept,
+    slowAccept,
+    landsAfterLooks,
+    landed,
+    certain,
+    onSend,
+  });
   const events = [];
   const ledger = [];
   const sleeps = [];
   const asked = [];
+  // `'page'` is the honest fake: the API and the reviewer are two views of one
+  // collection, so the queue answers from the same list the modal is showing.
+  // A fixed answer is still available for the cases that are ABOUT disagreement
+  // between them.
+  const answerQueue =
+    checkQueue === 'page'
+      ? async (userId) => (reviewer.queue.includes(String(userId)) ? 'queued' : 'gone')
+      : checkQueue;
   const deps = {
-    ...(checkQueue
+    ...(answerQueue
       ? {
           checkQueue: async (userId) => {
             asked.push(userId);
-            return checkQueue(userId);
+            return answerQueue(userId);
           },
         }
       : {}),
@@ -1059,11 +1120,11 @@ describe('settling an unconfirmed send', () => {
     expect(records.map((r) => r.acceptStatus)).toEqual(new Array(3).fill(ACCEPT_STATUS.ACCEPTED));
   });
 
-  // Geometric, so the common case - it landed a moment later - costs the
-  // operator five seconds. It is deliberately SHORTER than it was: the window
-  // no longer has to be right, because a send it cannot settle is deferred and
-  // asked about again once the role is done.
-  it('waits longer before each look than before the last', async () => {
+  // Shorter than it was, twice over. By the time the queue is asked at all the
+  // pass has already watched the page for up to 125s, so there is nothing left
+  // for a settle window to wait out - the growing waits now live in the watch,
+  // where they cost no requests.
+  it('does not wait the page out twice', async () => {
     const h = harness({
       people: three,
       records: rowsFor(three),
@@ -1071,8 +1132,7 @@ describe('settling an unconfirmed send', () => {
       checkQueue: () => 'queued',
     });
     await h.run();
-    const long = h.sleeps.filter((ms) => ms >= 5000);
-    expect(long.slice(0, 2)).toEqual([5000, 15000]);
+    expect(h.sleeps.filter((ms) => ms >= 5000)).toEqual([15000, 15000, 45000, 90000]);
   });
 
   it('defers rather than concluding when the window runs out', async () => {
@@ -1168,6 +1228,124 @@ describe('settling an unconfirmed send', () => {
       expect(records[0].acceptStatus).toContain('ever message them again');
       expect(result.error).toContain('ever message them again');
     });
+  });
+});
+
+// The 101-applicant role, where every accept is slow and none of them is a
+// symptom of anything.
+//
+// 98 targets, accepts measured at 25-66s, and the slow ones happening on
+// documents reloaded seconds earlier - so it is not degradation and no reload
+// recovers it. Against a fast path that decided the outcome, a large fraction
+// of the role came back unconfirmed, each one spent a deferral, and two
+// deferrals ended the pass. The role could never finish; it stopped at 16 of
+// 98.
+//
+// What this describe asserts is that a role of nothing but slow accepts now
+// completes, and completes WITHOUT spending anything scarce on it: no
+// deferrals, no queue walks, no reloads asked for by the slowness.
+describe('a role where every accept is slow', () => {
+  const twelve = Array.from({ length: 12 }, (_, i) => String(70000001 + i));
+  const rowsFor = (ids) => ids.map((id) => captured(id));
+
+  // Every accept takes the fast path's window and then some, exactly as the
+  // real role did. `landsAfterLooks: 2` is a send the page shows on the second
+  // look, which the watch reaches after 15s of waiting.
+  const wholeSlowRole = (extra = {}) =>
+    harness({
+      people: twelve,
+      records: rowsFor(twelve),
+      slowAccept: twelve,
+      landsAfterLooks: 2,
+      checkQueue: 'page',
+      ...extra,
+    });
+
+  it('finishes the whole role', async () => {
+    const h = wholeSlowRole();
+    const result = await h.run();
+    expect(result).toMatchObject({
+      accepted: 12,
+      unresolved: 0,
+      failed: 0,
+      stoppedBecause: 'finished',
+    });
+    // One click each, twelve times over. The rule nothing may ever break.
+    const sends = h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE);
+    expect(sends.map((e) => e.expectedUserId)).toEqual(twelve);
+    expect(h.ledger.map((e) => e.userId)).toEqual(twelve);
+  });
+
+  it('books them as ordinary accepts, not as rescues', async () => {
+    const records = rowsFor(twelve);
+    const h = wholeSlowRole({ records });
+    await h.run();
+    expect(records.map((r) => r.acceptStatus)).toEqual(new Array(12).fill(ACCEPT_STATUS.ACCEPTED));
+    // Nobody was deferred, so nobody is in limbo and the operator is asked to
+    // check nothing.
+    expect(
+      h.events.filter((e) => e.type === 'accept_candidate' && e.outcome === 'deferred'),
+    ).toHaveLength(0);
+    // One send reached the queue rung - the last candidate, whom the page
+    // cannot show - and it resolved there. Eleven of the twelve never got
+    // further than the watch, which costs nothing.
+    expect(h.events.filter((e) => e.type === 'accept_unconfirmed')).toHaveLength(1);
+    expect(h.events.filter((e) => e.type === 'accept_pending')).toHaveLength(12);
+  });
+
+  // The cost, which is the whole argument for watching the page rather than
+  // asking Wellfound. A position read is a DOM read inside the page; it is not
+  // a request. Twelve slow accepts spend one question between them, and that
+  // one is not about slowness at all - see below.
+  it('spends one question on the wire for the whole role, not one per accept', async () => {
+    const h = wholeSlowRole();
+    await h.run();
+    expect(h.asked).toEqual([twelve[11]]);
+  });
+
+  // Why that one. The watch confirms a send by the candidate leaving the slot
+  // AND the denominator dropping - and on the LAST person of a role there is no
+  // next candidate to slide in, so there is nothing left for the modal to show.
+  // What the reviewer does at that moment has never been observed (accepting a
+  // hundred real people is the only way to find out), so the pass does not
+  // guess: it asks the collection, which can always answer.
+  //
+  // That makes the request cost of this design one question per ROLE rather
+  // than one per accept, and it falls on the one candidate the page cannot
+  // speak for.
+  it('asks the queue about the last candidate, whom the page cannot show', async () => {
+    const h = wholeSlowRole();
+    const result = await h.run();
+    expect(result.accepted).toBe(12);
+    const settled = h.events.find(
+      (e) => e.type === 'accept_candidate' && e.userId === twelve[11] && e.outcome === 'accepted',
+    );
+    expect(settled).toMatchObject({ confirmedBy: 'queue' });
+  });
+
+  // And the reload the old slowness trigger would have asked for on every one
+  // of these, on a page that had just been reloaded and was slow anyway.
+  it('does not ask for a reload on account of the slowness', async () => {
+    const h = wholeSlowRole({ reloadPage: true, rand: () => 0.99 });
+    await h.run();
+    expect(h.events.filter((e) => e.type === 'accept_slow')).toHaveLength(0);
+  });
+
+  // Patience has an end, and past it nothing has changed: the send is deferred,
+  // recorded so nobody can ever be messaged twice, and the queue is asked.
+  it('still defers one the page never shows at all', async () => {
+    const h = harness({
+      people: twelve,
+      records: rowsFor(twelve),
+      slowAccept: twelve[0],
+      // More looks than the watch has waits, so the page never catches up.
+      landsAfterLooks: 99,
+      checkQueue: () => 'queued',
+    });
+    const result = await h.run();
+    expect(result.unresolved).toBe(1);
+    expect(h.ledger[0].userId).toBe(twelve[0]);
+    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(12);
   });
 });
 
@@ -1872,13 +2050,13 @@ describe('a page that is slowing down', () => {
   }
 
   it('reloads after one slow accept rather than waiting for the counter', async () => {
-    const h = slowingRun([8300, 7100, 35900, 6000, 6000, 6000]);
+    const h = slowingRun([8300, 7100, 120000, 6000, 6000, 6000]);
     const result = await h.run();
     expect(result).toMatchObject({ accepted: 10, stoppedBecause: 'finished' });
 
     const slow = h.events.filter((e) => e.type === 'accept_slow');
     expect(slow).toHaveLength(1);
-    expect(slow[0].ms).toBe(35900);
+    expect(slow[0].ms).toBe(120000);
     // Immediately after that accept, and before the fourth was attempted. On
     // the real run the fourth accept is where the relay's budget expired.
     const order = h.events
@@ -1892,30 +2070,35 @@ describe('a page that is slowing down', () => {
     ]);
   });
 
-  // The threshold has to sit clear of both bounds it was chosen between: far
-  // enough above the healthy band not to fire on ordinary variation, and far
-  // enough below the relay's 45s budget to act a whole accept early.
-  it('ignores the healthy band, and fires well inside the relay budget', async () => {
-    // Six accepts, under a counted cadence of seven, so nothing but slowness
-    // could produce a reload here.
-    const healthy = slowingRun([9000, 9000, 9000, 9000, 9000, 9000], { people: ten.slice(0, 6) });
-    await healthy.run();
-    expect(healthy.events.filter((e) => e.type === 'accept_slow')).toHaveLength(0);
-    expect(healthy.events.filter((e) => e.type === 'accept_reload')).toHaveLength(0);
+  // What the threshold has to be clear of, and the reason it moved. It used to
+  // sit at 20s, above a healthy band of 5-9s - and then a 101-applicant role
+  // was measured taking 25s, 32s, 42s, 46s, 50s and 66s per accept ON FRESHLY
+  // RELOADED DOCUMENTS. At 20s the trigger fired on nearly every accept of that
+  // role and asked for a reload that recovered nothing, because there was
+  // nothing to recover: a large role is just slow.
+  it('ignores the band a large role simply has', async () => {
+    // Every duration here is one this project has measured on a page that was
+    // working. None of them is a page asking to be thrown away.
+    const large = slowingRun([25038, 31955, 41926, 45988, 50385, 66594], {
+      people: ten.slice(0, 6),
+    });
+    await large.run();
+    expect(large.events.filter((e) => e.type === 'accept_slow')).toHaveLength(0);
+    expect(large.events.filter((e) => e.type === 'accept_reload')).toHaveLength(0);
+  });
 
-    // 20s trips it; the relay gives up at 45s, so the reload happens with more
-    // than half the budget still unspent.
-    const slowing = slowingRun([9000, 20000, 6000, 6000, 6000, 6000, 6000, 6000, 6000, 6000]);
-    await slowing.run();
-    const slow = slowing.events.filter((e) => e.type === 'accept_slow');
+  it('still fires on an accept far outside even that', async () => {
+    const stuck = slowingRun([9000, 120000, 6000, 6000, 6000, 6000, 6000, 6000, 6000, 6000]);
+    await stuck.run();
+    const slow = stuck.events.filter((e) => e.type === 'accept_slow');
     expect(slow).toHaveLength(1);
-    expect(slow[0].ms).toBeLessThan(45000);
+    expect(slow[0].ms).toBe(120000);
   });
 
   // Everything the reload already promised still holds when slowness is what
   // asked for it.
   it('still reloads only between candidates, with the ledger already written', async () => {
-    const h = slowingRun([8300, 7100, 35900, 6000, 6000, 6000]);
+    const h = slowingRun([8300, 7100, 120000, 6000, 6000, 6000]);
     await h.run();
     const types = typesOf(h.reviewer.log);
     types.forEach((type, i) => {
@@ -1928,7 +2111,7 @@ describe('a page that is slowing down', () => {
   });
 
   it('messages everybody exactly once, and skips nobody, across a slow patch', async () => {
-    const h = slowingRun([8300, 7100, 35900, 40000, 6000, 6000]);
+    const h = slowingRun([8300, 7100, 120000, 130000, 6000, 6000]);
     await h.run();
     const sent = h.reviewer.log
       .filter((e) => e.type === CX.ACCEPT_CANDIDATE)

@@ -310,6 +310,33 @@ export function planAccepts({ records = [], alreadyAccepted = [], limit = Infini
   return { targets: capped, rowsById, refusedNoResume, alreadyAccepted: alreadyCount };
 }
 
+// How long the pass goes on watching the page for a send the driver's fast
+// path did not see land, as the waits BETWEEN successive looks.
+//
+// This is the rung that was missing, and the run that produced it measured the
+// gap exactly: on a 101-applicant role accepts took 25 s, 32 s, 42 s, 46 s,
+// 50 s and 66 s - and they took that long on FRESHLY RELOADED documents, so it
+// is not degradation and no reload recovers it. A large role is simply slow.
+// Against a 40 s deadline a large fraction of a role comes back unconfirmed,
+// each one spends a deferral, and two deferrals end the pass: 98 targets need
+// about a dozen, so the role could never finish.
+//
+// Nothing here is a new instrument. It re-applies the DRIVER'S OWN predicate -
+// the candidate has left the slot and the denominator has dropped - by reading
+// the position again. What changed is that the watching is no longer trapped
+// inside one message round trip that has to end. A confirmation this finds is
+// an ordinary accept, not a rescue.
+//
+// It costs NOTHING on the wire: READ_CANDIDATE is a DOM read in the page, not a
+// request to Wellfound. That is why patience here is cheap and why it is spent
+// before anything that costs a fetch.
+//
+// Cumulative 125 s, growing, over six looks. Sized past the 66 s measured here
+// and past the 111 s commit measured on the previous role - and unlike the
+// constants it replaces, being wrong about it is not an outcome: what follows
+// is the queue, then a deferral, both of which already exist.
+const WATCH_WAITS_MS = [5000, 10000, 15000, 20000, 30000, 45000];
+
 // How long the queue is given to settle ON THE SPOT, as the waits BETWEEN
 // successive looks. The first look happens immediately.
 //
@@ -325,10 +352,11 @@ export function planAccepts({ records = [], alreadyAccepted = [], limit = Infini
 // rest of the role has gone by. Being wrong on the spot now costs a few fetches
 // and a page reload rather than a person and a role.
 //
-// What remains is worth keeping for the one case it does win outright: the send
-// that lands a moment late. Two waits, 5 s then 15 s, three looks in all. The
-// growth is geometric so the common case costs the operator five seconds.
-const QUEUE_SETTLE_WAITS_MS = [5000, 15000];
+// Shorter again, now that the watch above runs first. By the time the queue is
+// asked at all, the pass has already spent up to 125 s looking at the page, so
+// there is nothing left for a settle window to wait out - one look, then one
+// more, and the sweep at the end of the pass is the real second chance.
+const QUEUE_SETTLE_WAITS_MS = [15000];
 
 // The other half, and the reason the window above could shrink: the same
 // question, asked again after the pass has done everything else it came to do.
@@ -370,7 +398,25 @@ const DEFERRED_SWEEP_WAITS_MS = [15000, 45000, 90000];
 // one forces a reload before the next send, one deferral is a slow page, and a
 // second is a pattern this module can no longer reason about - which is what
 // `unclear` has always meant and where the pass still stops.
-const UNCONFIRMED_SENDS_PER_PASS = 3;
+//
+// The two numbers measure different things and only one of them moved.
+//
+// UNCONFIRMED_SENDS_PER_PASS bounds COST: it is how many times a pass will walk
+// the collection, which is the most expensive thing it can do. It was 3 when
+// reaching the queue at all meant something had gone wrong. It no longer does -
+// the LAST candidate of every role reaches it as a matter of course, because
+// the watch confirms a send by the next person sliding into the slot and on the
+// last one there is nobody left to slide in. So one per role is now normal, and
+// 3 left almost no room above normal.
+//
+// DEFERRALS_PER_PASS bounds something else entirely, and it is not about the
+// page at all: it is how many real people this pass may leave in limbo for the
+// operator to check by hand. That cost is human and it does not get cheaper
+// because the mechanism got better. Two is already a chore; ten would not be
+// acceptable however healthy the page looked. It stays at 2, and what changed
+// is that reaching it now takes a send the page did not show for over two
+// minutes AND a queue that would not vouch for it - not merely a slow role.
+const UNCONFIRMED_SENDS_PER_PASS = 5;
 const DEFERRALS_PER_PASS = 2;
 
 // One accept taking this long is the page asking to be reloaded.
@@ -399,7 +445,21 @@ const DEFERRALS_PER_PASS = 2;
 //
 // Wrong in the cheap direction if it is wrong at all: the cost of firing early
 // is a page load, and the cost of firing late is a stalled run.
-const SLOW_ACCEPT_MS = 20000;
+//
+// 20000 was that reasoning applied to the evidence available, and the next run
+// showed the reasoning had the wrong subject. On a 101-applicant role the
+// trigger fired on nearly every accept - and it fired on accepts that had begun
+// on a document reloaded seconds earlier, one of them 46 s after
+// accept_reload_commit. A threshold that fires on a freshly loaded page is not
+// measuring degradation, it is measuring how big the role is, and the reload it
+// asks for recovers nothing because there was nothing to recover.
+//
+// So it is raised to sit above the band a large role simply has (25-66 s
+// measured) and left as a backstop for the thing it was named after: an accept
+// far outside even that. The mechanism that keeps a long pass alive is now the
+// watch above, which costs no requests, and the counted cadence in
+// PACING.reloadEvery, which was reloading every five to seven accepts anyway.
+const SLOW_ACCEPT_MS = 90000;
 
 // `review` is one call into the reviewer driver, `recordAccepted` is the
 // ledger write, and both are injected for the same reason the download walk
@@ -526,6 +586,45 @@ export async function runAcceptPass(deps, options) {
   const deferred = [];
   let unconfirmedSends = 0;
   let deferrals = 0;
+
+  // Keep watching the page for a send its fast path did not see land.
+  //
+  // The predicate is the driver's, exactly: the candidate has left the slot AND
+  // the denominator has dropped. One definition of "the send landed" in this
+  // extension, applied in two places that differ only in who is waiting.
+  //
+  // A read that fails is "not yet", never a failure of its own. The reviewer
+  // legitimately has nothing to show while it is mid-render, and on the last
+  // candidate of a role it may have nothing to show at all - which is
+  // UNVERIFIED behaviour this pass has never been able to produce deliberately.
+  // Either way the answer is to look again, and to fall through to the queue
+  // when the looking runs out.
+  //
+  // Nothing in here clicks, and nothing in here can send. It reads.
+  const watchForLanding = async (userId, beforeTotal) => {
+    for (const waitMs of WATCH_WAITS_MS) {
+      // A stop ends the watching where it stands. The send is already
+      // outstanding and nothing further goes out either way.
+      if (signal?.aborted) return false;
+      emit({ type: 'resting', jobId, ms: waitMs });
+      await sleep(waitMs, signal);
+      let at = null;
+      try {
+        at = await review({ type: CX.READ_CANDIDATE });
+      } catch {
+        at = null;
+      }
+      emit({
+        type: 'accept_watching',
+        jobId,
+        userId,
+        index: at?.index ?? null,
+        total: at?.total ?? null,
+      });
+      if (at && String(at.userId) !== userId && Number(at.total) < Number(beforeTotal)) return true;
+    }
+    return false;
+  };
 
   // One question to the API, with its failure treated as an answer rather than
   // an exception: a check that could not reach the API has learnt nothing,
@@ -905,7 +1004,7 @@ export async function runAcceptPass(deps, options) {
       unresolvedSend = userId;
       const sendStartedAt = now();
       try {
-        await review({
+        const sent = await review({
           type: CX.ACCEPT_CANDIDATE,
           // Sampled here, per candidate, from the same PACING every other pause
           // in the run draws from. The driver is a classic content script with
@@ -920,6 +1019,20 @@ export async function runAcceptPass(deps, options) {
             afterPasteMs: sample(PACING.afterPasteMs[0], PACING.afterPasteMs[1], rand),
           },
         });
+        // The driver's fast path did not see it land, which on a large role is
+        // an ordinary result rather than an alarm. The pass keeps watching the
+        // same two signals, for as long as it takes and without a message round
+        // trip holding them open. Nothing is retried and nothing is clicked.
+        //
+        // Only when the watching runs out too does this become the failure the
+        // handler below is for, and it is raised in the DRIVER'S OWN words: the
+        // sentence describes what happened at the click, which is the driver's
+        // to tell, and it carries no certainty phrase - so it reads as unclear,
+        // exactly as the same outcome always has.
+        if (sent?.pending) {
+          emit({ type: 'accept_pending', jobId, userId });
+          if (!(await watchForLanding(userId, sent.total))) throw new Error(sent.reason);
+        }
       } catch (sendError) {
         // Nothing is ever retried here. The whole of what follows is about
         // LEARNING what happened, never about trying again: the send has either

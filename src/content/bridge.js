@@ -40,11 +40,18 @@
   //   composer wait  5000  (COMPOSER_TIMEOUT_MS)
   //   before paste   5000  (clamped, PACING.beforePasteMs upper bound)
   //   after paste    3000  (clamped, PACING.afterPasteMs upper bound)
-  //   confirm wait  40000  (CONFIRM_TIMEOUT_MS)
+  //   confirm wait  12000  (CONFIRM_TIMEOUT_MS)
   //   slack          2000  (poll granularity, click dispatch, re-render)
   //                 -----
-  //                 55000
-  const DRIVER_WORST_CASE_MS = 55000;
+  //                 27000
+  //
+  // Smaller than it was, and that is the point rather than a concession. The
+  // confirmation no longer happens inside this round trip: the driver reports
+  // `pending` when the page has not caught up and the panel goes on watching
+  // without holding the wire. So this budget covers the driver's fast path,
+  // which is a thing with a measured size, instead of covering however long
+  // Wellfound might take, which is not.
+  const DRIVER_WORST_CASE_MS = 27000;
   // The margin, and what it is actually an allowance FOR. This used to be
   // described as "half as much again", which is a size and not a reason.
   //
@@ -60,9 +67,11 @@
   // not a claim that one exists. It is the point past which waiting stops being
   // the best instrument available: the panel now books an unconfirmed send
   // durably and settles it against the API, so a relay expiry no longer loses a
-  // person or ends a role. 35000 is the measured starvation on top of a 30 s
-  // budget, rounded up, applied to the larger one.
-  const MARGIN_MS = 35000;
+  // person or ends a role. The measured starvation was more than half again on
+  // top of a 30 s budget (a 47 s accept), so it is applied as that proportion
+  // of this one rather than carried over as a constant from a budget that no
+  // longer exists.
+  const MARGIN_MS = 18000;
   const TIMEOUT_MS = DRIVER_WORST_CASE_MS + MARGIN_MS;
   const pending = new Map();
   let counter = 0;

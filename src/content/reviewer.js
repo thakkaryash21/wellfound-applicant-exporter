@@ -95,23 +95,25 @@
 
   // A pause is served in slices so a stop lands inside it rather than after it.
   const PAUSE_SLICE_MS = 100;
-  // How long the page is given to show that a send landed.
+  // How long the page is given to show that a send landed, INSIDE this round
+  // trip. It is the fast path and it is no longer the deadline for anything.
   //
-  // It was 15000, and 15000 was a figure taken from a 20-applicant role where an
-  // accept resolved in 5-9 s. On a 111-applicant role the same operation was
-  // measured at 35.9 s, and on a 102-applicant one the commit arrived more than
-  // 111 s after the click. A window that ends at 15 s therefore turns an
-  // ordinary-for-a-large-role commit into a send nobody can vouch for, which is
-  // the most expensive outcome this extension has.
+  // It was 15000, then 40000, and both were wrong in the same way: each was one
+  // worst case behind the page. 15000 came from a 20-applicant role resolving in
+  // 5-9 s; a 111-applicant role then measured 35.9 s; and a 101-applicant role
+  // has since been measured at 25-66 s per accept ON FRESHLY RELOADED
+  // DOCUMENTS - so it is not degradation, a large role is simply slow from the
+  // first accept, and no constant here can be sized against that.
   //
-  // 40000 covers the whole of the degraded band that has actually been measured
-  // (35.9 s) with a few seconds to spare, and it is deliberately NOT sized
-  // against the 111 s case. Waiting is the cheap instrument and it has a
-  // ceiling; past this point the panel has a strictly better one - it asks the
-  // API whether the candidate has left the review queue, and it may keep asking
-  // for the rest of the pass. So this number buys the cases waiting can win and
-  // hands the rest to something that does not depend on the page at all.
-  const CONFIRM_TIMEOUT_MS = 40000;
+  // The mistake was not the number, it was that the number decided an outcome.
+  // Running out now means `pending`, the panel keeps watching the same two
+  // signals with no message round trip holding them open, and a 66 s accept is
+  // booked as an ordinary accept.
+  //
+  // So this reverts to what the healthy band actually is: 5-9 s measured, 12000
+  // to cover it with room. Being wrong here costs one panel-side look and no
+  // requests at all, which is the whole point of it not being load-bearing.
+  const CONFIRM_TIMEOUT_MS = 12000;
   const CONFIRM_POLL_MS = 250;
   const COMPOSER_TIMEOUT_MS = 5000;
   const COMPOSER_POLL_MS = 100;
@@ -144,7 +146,7 @@
   // click dispatch, and the page's own re-render. Not measured, deliberately
   // generous, and inside the figure below rather than outside it.
   const ACCEPT_SLACK_MS = 2000;
-  // 5000 + 5000 + 3000 + 40000 + 2000 = 55000. Read by bridge.js's budget, and
+  // 5000 + 5000 + 3000 + 12000 + 2000 = 27000. Read by bridge.js's budget, and
   // by a test that fails if the two ever stop agreeing.
   const ACCEPT_WORST_CASE_MS =
     COMPOSER_TIMEOUT_MS +
@@ -594,19 +596,45 @@
     // the bucket drained by one. Accepting removes them, so the next person
     // slides into the same position - which also means the caller must NOT
     // advance afterwards, or it skips somebody.
-    const next = await waitFor(
-      () => {
-        const now = readCurrentOrNull();
-        return now && now.userId !== expected && now.total < before.total ? now : null;
-      },
-      {
+    //
+    // This wait is now the FAST PATH and nothing more. It used to be the whole
+    // confirmation, and its expiry was raised to the panel as a send nobody
+    // could vouch for - which is why the number was revised twice, each time
+    // one worst case behind the page. It is not a bet on how long Wellfound
+    // takes any more: running out is an ordinary result on a large role, it is
+    // reported as `pending` rather than thrown, and the panel goes on watching
+    // the same two signals without a message round trip holding them.
+    //
+    // So the predicate below is the ONE definition of "the send landed" in this
+    // extension, and the panel re-applies exactly it. What differs between the
+    // two is only who is waiting and for how long.
+    const landed = () => {
+      const now = readCurrentOrNull();
+      return now && now.userId !== expected && now.total < before.total ? now : null;
+    };
+    let next = null;
+    try {
+      next = await waitFor(landed, {
         timeoutMs: CONFIRM_TIMEOUT_MS,
         pollMs: CONFIRM_POLL_MS,
-        what:
+        what: 'pending',
+      });
+    } catch {
+      // Not an error and deliberately not thrown. `total` is what the panel
+      // needs to keep watching - the denominator before the click - and
+      // `reason` is the sentence to use if the watching runs out too, kept here
+      // because this is the account of what happened AT the click and the panel
+      // does not compose those.
+      return {
+        userId: expected,
+        accepted: false,
+        pending: true,
+        total: before.total,
+        reason:
           `Could not confirm the accept for ${expected}. It may or may not have been sent - ` +
           'check the candidate in Wellfound before running again. Nothing was retried.',
-      },
-    );
+      };
+    }
     return { userId: expected, accepted: true, next };
   }
 

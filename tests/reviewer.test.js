@@ -503,11 +503,18 @@ describe('saying whether anything was sent', () => {
     start({ onSendClick: () => {} });
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
-    const settled = pending.catch((error) => error);
-    await vi.advanceTimersByTimeAsync(41000);
-    const error = await settled;
-    expect(error.message).toMatch(/may or may not have been sent/);
-    expect(error.message).not.toContain(driver.NOTHING_SENT);
+    await vi.advanceTimersByTimeAsync(13000);
+    const result = await pending;
+    // Not thrown. On a large role the fast path running out is ordinary rather
+    // than an alarm, and the panel goes on watching. The sentence it hands over
+    // is unchanged, and it still carries no certainty phrase - so if the
+    // watching runs out too, it still reads as unclear.
+    expect(result).toMatchObject({ accepted: false, pending: true });
+    expect(result.reason).toMatch(/may or may not have been sent/);
+    expect(result.reason).not.toContain(driver.NOTHING_SENT);
+    // The denominator before the click, which is what the panel needs to go on
+    // applying the same predicate this file just applied.
+    expect(result.total).toBe(3);
   });
 });
 
@@ -897,9 +904,8 @@ describe('the never-retry guard', () => {
     start({ onSendClick: () => {} });
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
-    const settled = expect(pending).rejects.toThrow(/Could not confirm the accept for 70000001/);
-    await vi.advanceTimersByTimeAsync(41000);
-    await settled;
+    await vi.advanceTimersByTimeAsync(13000);
+    await expect(pending).resolves.toMatchObject({ pending: true });
     await expect(
       driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
     ).rejects.toThrow(/Already sent an accept/);
@@ -921,9 +927,10 @@ describe('confirming the send', () => {
     });
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
-    const settled = expect(pending).rejects.toThrow(/may or may not have been sent/);
-    await vi.advanceTimersByTimeAsync(41000);
-    await settled;
+    // Reported as pending rather than landed: the fast path refuses to call
+    // a half-signal a send, exactly as it refused to before.
+    await vi.advanceTimersByTimeAsync(13000);
+    await expect(pending).resolves.toMatchObject({ accepted: false, pending: true });
   });
 
   it('does not accept a drained bucket alone as proof - the candidate must change', async () => {
@@ -935,9 +942,10 @@ describe('confirming the send', () => {
     });
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
-    const settled = expect(pending).rejects.toThrow(/Nothing was retried/);
-    await vi.advanceTimersByTimeAsync(41000);
-    await settled;
+    // Reported as pending rather than landed: the fast path refuses to call
+    // a half-signal a send, exactly as it refused to before.
+    await vi.advanceTimersByTimeAsync(13000);
+    await expect(pending).resolves.toMatchObject({ accepted: false, pending: true });
   });
 
   it('waits for a send that lands late rather than failing early', async () => {
@@ -1275,14 +1283,12 @@ describe('the accept round trip fitting inside the relay budget', () => {
     // Named here rather than derived, so a change to any of them has to be a
     // change to this number too - which is what the relay's budget is checked
     // against in tests/bridge.test.js.
-    expect(driver.ACCEPT_WORST_CASE_MS).toBe(55000);
+    expect(driver.ACCEPT_WORST_CASE_MS).toBe(27000);
   });
 
-  // The measurement the confirm window is sized against, asserted as behaviour
-  // rather than as a constant: the slowest accept ever seen on a healthy-enough
-  // page took 35.9 s, and a window that ends before it turns an ordinary commit
-  // on a large role into a send nobody can vouch for.
-  it('still confirms a send that lands 36s after the click', async () => {
+  // What the fast path is for: the healthy band, measured at 5-9 s, answered
+  // inside the round trip with nothing else involved.
+  const landsAfter = (ms) => {
     let rerender;
     start({
       onSendClick: (state) => {
@@ -1290,14 +1296,33 @@ describe('the accept round trip fitting inside the relay budget', () => {
         setTimeout(() => {
           state.queue.shift();
           rerender();
-        }, 35900);
+        }, ms);
       },
     });
     rerender = page.render;
+  };
+
+  it('confirms a send in the healthy band without anybody else being asked', async () => {
+    landsAfter(9000);
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
-    await vi.advanceTimersByTimeAsync(36500);
+    await vi.advanceTimersByTimeAsync(9500);
     await expect(pending).resolves.toMatchObject({ accepted: true });
+  });
+
+  // And what it deliberately no longer tries to do. A 46 s accept is ordinary
+  // on a 101-applicant role - measured on freshly reloaded documents, so no
+  // constant here could cover it - and the driver says `pending` rather than
+  // spending the alarm on it. The panel keeps watching; see the accept pass.
+  it('hands a slower one back as pending rather than failing it', async () => {
+    landsAfter(46000);
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
+    await vi.advanceTimersByTimeAsync(13000);
+    const result = await pending;
+    expect(result).toMatchObject({ accepted: false, pending: true, total: 3 });
+    // And it has not clicked anything a second time on the way to saying so.
+    expect(page.state.clicks.filter((c) => c.startsWith('Accept application')).length).toBe(1);
   });
 });
 

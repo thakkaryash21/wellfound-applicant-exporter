@@ -103,7 +103,7 @@ describe('the bridge', () => {
   it('answers not-ok when the page goes quiet, rather than hanging the run forever', async () => {
     const bridge = load();
     const sent = bridge.send({ type: 'CX_LIST_JOBS' });
-    await vi.advanceTimersByTimeAsync(89999);
+    await vi.advanceTimersByTimeAsync(44999);
     expect(sent.read()).toBe(undefined);
     await vi.advanceTimersByTimeAsync(1);
     await flush();

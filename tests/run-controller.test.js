@@ -1974,12 +1974,13 @@ describe('what the queue check costs', () => {
   // that pass 1 made.
   const settleFetches = (page) => page.calls.fetches.length - PAGES;
 
-  // Three looks in the settle window, then four more in the sweep the pass
-  // makes once the role is done. Named here because both costs below are
-  // multiples of it, and because it is the number that decides whether asking
-  // again later is affordable - which is the whole reason the settle window
-  // could be shortened rather than lengthened again.
-  const LOOKS = 7;
+  // Two looks in the settle window, then four more in the sweep the pass makes
+  // once the role is done. Named here because both costs below are multiples of
+  // it, and because it is the number that decides whether asking again later is
+  // affordable - which is the whole reason the settle window could be shortened
+  // rather than lengthened again. It shrank twice: the waiting the window used
+  // to do now happens in the pass's own watch, which costs no requests at all.
+  const LOOKS = 6;
   // What one look costs when it has to walk the collection to the end.
   const WALK = 7;
 
