@@ -1260,6 +1260,140 @@ Home can retry after the operator opens Wellfound, or so a reload can be proved
 to have committed. Closing the panel does end the run, because the loop lives in
 the panel document.
 
+## Observed operational limit: accepts are gated by Turnstile
+
+This is the reason the accept feature is reliable at small volume and unreliable
+at large. That boundary is a design fact rather than an item on a backlog, and
+the section is long because the finding was cheap and the six wrong fixes before
+it were not. **Read this before moving any bound on the accept path.**
+
+Nothing here is about circumventing the gate. It is a diagnosis and a boundary.
+
+### The symptom, over nine live runs
+
+Two roles on a real recruiter account. One with about twenty applicants in its
+review queue, one with about a hundred and eleven.
+
+```
+20-applicant role:   2 accepted then stalled
+                     9 accepted then stalled
+                    20 of 20, clean
+111-applicant role:  3 accepted then stalled
+                     0 accepted - the FIRST accept hung
+                    16 accepted then stopped
+                     5 accepted then stopped
+                    10 of 74 then stopped
+                     4 of 63, six sends unconfirmed, five never landed
+```
+
+The small role completed. The large role never did, in five attempts.
+
+### What was tried, and why every attempt failed
+
+Every stall looked like a timing problem, and every one was met by moving a
+bound:
+
+- DOM confirmation window: 15 s, then 40 s, then 125 s
+- relay budget: 30 s, then 45 s, then 90 s
+- slow-accept trigger: 20 s, then 90 s
+- the settle window after an unconfirmed send: lengthened, then shortened with
+  an end-of-role sweep instead
+- deferral bound: two per pass, then three in a row
+- a ceiling on unconfirmed sends per pass, added and later deleted
+
+Each was tolerance for a symptom. Each new number was calibrated on the last
+worst case observed, and each was beaten by the next run. **The treadmill is the
+thing to recognise, not the individual numbers.** If a bound has been raised
+three times and the failure has moved rather than gone, the bound is not the
+problem.
+
+Some of those constants are still in the file. They are worth keeping — a slow
+page is a real thing and the pass has to survive one — but they were chosen
+before anybody knew what they were tolerating, so read them as historical rather
+than as tuned against a known cause.
+
+### What was measured, ruling out the obvious causes
+
+On the 111-applicant role, live:
+
+- advancing the reviewer to the next candidate: **44-135 ms**
+- opening the response composer: **13-996 ms**
+- running the extension's own pass-1 walk first, which takes the page's Apollo
+  cache from **368 to 1382 entries**, then repeating both measurements: **no
+  measurable difference**
+
+So the reviewer is fast, the composer is fast, and this extension's own cache
+pressure — the leading hypothesis at the time, and the one that would have been
+our fault — has no effect at all. The only slow step is the send itself, and it
+is server-bound.
+
+### The decisive observation
+
+One accept was performed **by hand** with the network captured, on the same page,
+the same session and the same role.
+
+- It completed immediately. The queue counter went from `4 of 63` to `4 of 62`,
+  the composer closed, the reviewer advanced.
+- At the moment of the send, the capture showed:
+
+```
+challenges.cloudflare.com/turnstile/v0/api.js?onload=turnstileLoad   200
+challenges.cloudflare.com/turnstile/v0/g/<id>/api.js                 pending
+```
+
+- Afterwards `window.turnstile` was present on the page, with **no visible
+  challenge and no iframe** — an invisible or managed challenge, not a puzzle.
+
+### The conclusion, and its confidence
+
+The accept mutation is gated by Cloudflare Turnstile. The challenge runs on every
+send, a human one included, and the mutation needs what it issues.
+
+For the human send it resolved instantly. For automated sends it evidently
+resolves slowly or not at all, and that one explanation covers every symptom at
+once:
+
+- early accepts in a session succeed quickly
+- the same accepts take 45 to 90 seconds later in the same session
+- some never land at all, and those people stay in the review queue indefinitely
+- a fresh page reload does not help, so it is not page state
+- the small role finishes because it never performs enough accepts in one
+  session to matter
+
+Confidence, stated honestly: the Turnstile load is directly observed, the human
+send completing instantly is directly observed, and the causal link to the
+automated failures is a strong inference consistent with all nine runs rather
+than something proven by isolating a token.
+
+### What follows for the design
+
+- **Budget small runs.** The feature works. It works at twenty. It does not work
+  at a hundred in one session, and no constant in this repository changes that.
+- **Read a timeout on the accept path as "the page slowed down", not as a bug.**
+  That is why an unconfirmed send is a question resolved by asking the queue,
+  why `error` is reserved for sends that certainly did not happen, and why the
+  ledger holds a provisional map at all. Those mechanisms are the design
+  accommodating this limit rather than fighting it.
+- **The reload cadence and the settle window predate the finding.** They were
+  built in response to the slowdowns, before anyone knew the cause. They are kept
+  because they demonstrably keep a long pass alive, not because they were
+  measured against Turnstile.
+
+### The transferable lesson
+
+Worth stating plainly, because it generalises well past this feature:
+
+**When an operation is bimodal — fast, or never — and its failure rate rises
+with how many times you have performed it in a session, suspect a challenge or a
+rate limit before you touch a timeout.** Check the network for challenge scripts.
+A latency you can tune is a distribution. A gate is a decision about you, and no
+amount of waiting changes a decision.
+
+Read this alongside the counts finding earlier in this document, where four
+waiting heuristics failed because the data came from a query nobody was asking.
+They are the same error in different clothes: inferring from timing what could
+have been established by looking.
+
 ## Error handling
 
 | Failure | Behavior |
