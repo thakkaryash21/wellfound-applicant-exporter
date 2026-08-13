@@ -194,8 +194,8 @@ export function createController({
     // the live region: it is per-look noise, and the trace wants the fact.
     else if (event.type === 'accept_pending')
       trace.record('accept_pending', { jobId, userId: event.userId });
-    else if (event.type === 'accept_awaiting_enter')
-      trace.record('accept_awaiting_enter', { jobId, userId: event.userId });
+    else if (event.type === 'accept_submitting')
+      trace.record('accept_submitting', { jobId, userId: event.userId });
     // The pass asking again, after the role is done, about every send it could
     // not settle on the spot. Recorded so a later timing question can see that
     // the sweep ran and how much it had to do - a run whose deferrals all

@@ -178,8 +178,8 @@ describe('the whole screen', () => {
     const html = renderConfirm(model());
     expect(html.indexOf(CONFIRM_IDS.back)).toBeLessThan(html.indexOf(CONFIRM_IDS.send));
     expect(html).toContain('class="primary" id="confirm-back"');
-    expect(html).toContain('Start assisted accept for 45');
-    expect(html).toMatch(/you press\s+Enter once for each candidate/);
+    expect(html).toContain('Accept and message 45');
+    expect(html).toContain('clicks Accept application &amp; send message');
     expect(html).toContain('Go back');
   });
 });

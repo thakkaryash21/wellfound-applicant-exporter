@@ -102,8 +102,8 @@ export function acceptConsideringLine({ index = null, total = null } = {}) {
   return `reading ${index} of ${total} in the review queue`;
 }
 
-export function acceptAwaitingEnterLine() {
-  return 'preparing the message on Wellfound; wait until Send is visibly focused before Enter';
+export function acceptSubmittingLine() {
+  return 'typing and sending the message on Wellfound';
 }
 
 export function acceptCandidateLine(outcome, { accepted = 0, intended = 0, error } = {}) {

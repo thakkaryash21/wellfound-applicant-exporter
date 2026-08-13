@@ -30,13 +30,13 @@ These are the code's reason for existing. Know which is which before you refacto
 near them.
 
 - **Identity interlock.** `reviewer.js` reads the candidate's userId out of the
-  DOM (`/link/{userId}/{token}/resume_url`), re-reads it before arming and again
-  inside a capture-phase guard on the operator's trusted Enter. It blocks the
-  submission if either identity or message changed. There is no name-based
-  fallback anywhere and there must never be one. The reviewer is positional: a
-  blind Accept messages whoever happens to be on screen.
-- **Ledger before arming.** `accept-pass.js` writes a provisional entry before
-  `reviewer.js` is allowed to focus Send, and clears it only once the person is
+  DOM (`/link/{userId}/{token}/resume_url`), then synchronously re-reads that id
+  and the exact textarea value at the Send-click boundary. It blocks submission
+  if either changed. There is no name-based fallback anywhere and there must
+  never be one. The reviewer is positional: a blind Accept messages whoever
+  happens to be on screen.
+- **Ledger before dispatch.** `accept-pass.js` writes a provisional entry before
+  `reviewer.js` is allowed to dispatch the Send click, and clears it only once the person is
   durably confirmed or a certain pre-send refusal releases it. Inside that
   window a real message may exist and nothing may reload the page.
   `guardReload` throws if a reload is requested there. Moving the ledger write
@@ -77,11 +77,11 @@ near them.
   returns 404. The panel drives the page's own Apollo client, copying the live
   query's variables and overriding only cursor and page size, rather than forging
   requests. Every request is genuinely the site's own client.
-- **The reviewer never submits.** It clicks to open the reviewer and composer,
-  visibly types through the textarea setter with a yield between characters,
-  then focuses the unique Send control explicitly. Synthetic Tab events cannot
-  traverse browser focus and must never be described as real Tab presses. Only
-  the operator's physical Enter submits the message; synthetic Enter is blocked.
+- **The reviewer submits by exact click.** It clicks to open the reviewer and
+  composer, visibly types through the textarea setter with a yield between
+  characters, re-reads the exact userId and message, then clicks the one unique,
+  usable `Accept application & send message` control. It never uses keyboard
+  events for submission and never retries an uncertain click.
 - **The pass owns when a reload happens; the run controller owns how.** The tab
   is the controller's business.
 
@@ -106,9 +106,9 @@ Treat them as measurements, and re-measure rather than infer if you doubt them.
   Waiting on the cache for them was a bug that told users to reopen the panel for
   a number that was never coming.
 - **Synthetic keyboard events do not perform page actions.** `keydown` +
-  `keyup` with `key: 'ArrowRight'` left the position unchanged. The assisted
-  accept path emits two Tab pairs as requested, verifies that they did not move
-  focus, and explicitly focuses Send. It never synthesizes Enter.
+  `keyup` with `key: 'ArrowRight'` left the position unchanged. The accept path
+  therefore uses no synthetic Tab or Enter events; submission is an exact,
+  guarded click on the unique Send control.
 - **Text alone is not a safe selector.** `/^accept$/i` matched 2 elements with 1
   usable; unanchored `/accept/i` matched 4 with 3 usable, picking up a
   candidate's own name and an "Ideal next opportunity" block. The opener
@@ -130,10 +130,10 @@ by hand completes immediately. Automated sends slow sharply as a session
 accumulates volume, and some never complete at all, leaving that person in the
 review queue indefinitely.
 
-The current assisted path was introduced after those measurements: it prepares
-and focuses Send, while the operator presses physical Enter. Do not claim that
-this changes the Turnstile boundary until a live run measures it. The old nine
-runs remain evidence about the former automatic-click path.
+The current path visibly types before clicking the exact Send control. Do not
+claim that visible incremental entry changes the Turnstile boundary until a live
+run measures it. The old nine runs remain evidence about the former paste-like
+automatic-click path.
 
 That boundary is a design fact, not a backlog item: the feature is reliable at
 small volume and unreliable at large.

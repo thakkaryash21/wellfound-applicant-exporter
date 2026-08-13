@@ -103,7 +103,7 @@ describe('the bridge', () => {
   it('answers not-ok when the page goes quiet, rather than hanging the run forever', async () => {
     const bridge = load();
     const sent = bridge.send({ type: 'CX_LIST_JOBS' });
-    await vi.advanceTimersByTimeAsync(44999);
+    await vi.advanceTimersByTimeAsync(bridge.budget.TIMEOUT_MS - 1);
     expect(sent.read()).toBe(undefined);
     await vi.advanceTimersByTimeAsync(1);
     await flush();
@@ -111,14 +111,6 @@ describe('the bridge', () => {
     // this the panel waits on a promise that will never settle and the run
     // parks with the stop button inert.
     expect(sent.read()).toEqual({ ok: false, error: 'Page did not respond in time' });
-  });
-
-  it('does not time out an accept while the operator is still waiting to press Enter', async () => {
-    const bridge = load();
-    const sent = bridge.send({ type: 'CX_ACCEPT_CANDIDATE', payload: {} });
-    await vi.advanceTimersByTimeAsync(45_000);
-    expect(sent.read()).toBe(undefined);
-    expect(bridge.budget.ACCEPT_TIMEOUT_MS).toBe(10 * 60 * 1000);
   });
 
   it('drops the timeout the moment the page answers', async () => {
@@ -202,5 +194,14 @@ describe('the budget against the driver it has to cover', () => {
     // add. Below that the relay gives up first and hands the panel an outcome
     // the driver could have named.
     expect(budget.MARGIN_MS).toBeGreaterThanOrEqual(budget.DRIVER_WORST_CASE_MS / 2);
+  });
+
+  it('adds the visible typing duration to an accept request timeout', () => {
+    const { budget } = load();
+    const short = budget.timeoutFor('ACCEPT_CANDIDATE', { message: 'Hi' });
+    const long = budget.timeoutFor('ACCEPT_CANDIDATE', { message: 'Hello world' });
+    expect(short).toBeGreaterThan(budget.TIMEOUT_MS);
+    expect(long).toBeGreaterThan(short);
+    expect(budget.timeoutFor('READ_CANDIDATE', {})).toBe(budget.TIMEOUT_MS);
   });
 });

@@ -56,7 +56,6 @@
   // Never clicked, whatever else matched.
   const REJECT_TEXT = /reject/i;
   // Never sent. `R` is Reject and `X` is Quick Reject, one key from `A`.
-  const FORBIDDEN_KEYS = /^(r|x)$/i;
   // The candidate's identity, as the modal carries it:
   // /link/{userId}/{token}/resume_url. The same id the ledger and the CSV key
   // on. There is no name-based fallback anywhere in this file, on purpose.
@@ -68,10 +67,9 @@
 
   // This file distinguishes two classes of failure and the distinction is the
   // whole of what the panel can tell the operator afterwards. A refusal raised
-  // BEFORE Send is armed is certain: no message went anywhere. A failure after
-  // focus reaches Send is not: the operator may or may not have pressed Enter,
-  // and only that one may raise the alarm that sends the operator to
-  // Wellfound to check.
+  // BEFORE Send is clicked is certain: no message went anywhere. Once the
+  // extension dispatches that click, whether Wellfound committed it can be
+  // ambiguous, and only that case may send the operator to Wellfound to check.
   //
   // The wire between the two worlds carries a string and nothing else - the
   // bridge relays `error` text - so the classification travels in the text. This
@@ -119,8 +117,6 @@
   const COMPOSER_POLL_MS = 100;
   const SEND_READY_TIMEOUT_MS = 5000;
   const SEND_READY_POLL_MS = 100;
-  const PAGE_FOCUS_TIMEOUT_MS = 8 * 60 * 1000;
-  const PAGE_FOCUS_POLL_MS = 100;
   // Teardown is not allowed to be slow. It runs after the pass has already
   // ended, so the operator is waiting on it with nothing left to watch, and a
   // control that does not respond in two seconds is reported rather than waited
@@ -150,12 +146,14 @@
   // click dispatch, and the page's own re-render. Not measured, deliberately
   // generous, and inside the figure below rather than outside it.
   const ACCEPT_SLACK_MS = 2000;
-  // 5000 + 5000 + 3000 + 12000 + 2000 = 27000. Read by bridge.js's budget, and
-  // by a test that fails if the two ever stop agreeing.
+  // 5000 + 5000 + 3000 + 5000 + 12000 + 2000 = 32000, plus the message-length
+  // dependent typing time. bridge.js adds that final term from the payload; a
+  // test fails if the fixed parts ever stop agreeing.
   const ACCEPT_WORST_CASE_MS =
     COMPOSER_TIMEOUT_MS +
     MAX_BEFORE_PASTE_MS +
     MAX_AFTER_PASTE_MS +
+    SEND_READY_TIMEOUT_MS +
     CONFIRM_TIMEOUT_MS +
     ACCEPT_SLACK_MS;
 
@@ -339,22 +337,6 @@
     clickSafely(el, name);
   }
 
-  // The one gate for the two synthetic Tab attempts used to put the operator at
-  // the send control. Scripted Tab does not perform browser focus traversal, so
-  // the destination is always checked and focused explicitly below. R and X
-  // remain forbidden at this point of action: Wellfound binds them to Reject
-  // and Quick Reject.
-  function sendKey(key) {
-    if (FORBIDDEN_KEYS.test(key)) {
-      throw new Error(`Refusing to send the ${key} key: it rejects the candidate`);
-    }
-    if (typeof KeyboardEvent !== 'function') {
-      throw new Error('Cannot send a key on this page');
-    }
-    document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
-    document.dispatchEvent(new KeyboardEvent('keyup', { key, bubbles: true }));
-  }
-
   function wait(ms) {
     return new Promise((resolve) => {
       setTimeout(resolve, ms);
@@ -495,41 +477,7 @@
   // a second call. A repeated accept is a second message to somebody who
   // already received one.
   const sent = new Set();
-  let armedKeyGuard = null;
-  let cancelArmedWait = null;
-  let markedSend = null;
-  let markedSendStyle = null;
   const TYPING_INTERVAL_MS = Number(globalThis.__WFX_TYPING_INTERVAL_MS__ ?? 20);
-
-  function clearSendReadyMark() {
-    if (!markedSend || !markedSendStyle) return;
-    markedSend.style.outline = markedSendStyle.outline;
-    markedSend.style.outlineOffset = markedSendStyle.outlineOffset;
-    markedSend = null;
-    markedSendStyle = null;
-  }
-
-  function markSendReady(send) {
-    clearSendReadyMark();
-    markedSend = send;
-    markedSendStyle = {
-      outline: send.style.outline ?? '',
-      outlineOffset: send.style.outlineOffset ?? '',
-    };
-    // Wellfound's :focus-visible styling is not applied to focus reached after
-    // a mouse click. Draw a temporary ring only after activeElement proves the
-    // irreversible control really owns DOM focus.
-    send.style.outline = '3px solid #d89b45';
-    send.style.outlineOffset = '3px';
-  }
-
-  function removeArmedKeyGuard() {
-    if (!armedKeyGuard) return;
-    document.removeEventListener('keydown', armedKeyGuard, true);
-    armedKeyGuard = null;
-    cancelArmedWait = null;
-    clearSendReadyMark();
-  }
 
   // React can render the uniquely labelled Send control before its layout and
   // enabled state catch up, especially immediately after the scheduled page
@@ -552,51 +500,6 @@
     }
   }
 
-  function guardPhysicalEnter({ expected, message, send }) {
-    removeArmedKeyGuard();
-    let trustedEnterAccepted = false;
-    let resolveSubmitted;
-    let rejectSubmitted;
-    const submitted = new Promise((resolve, reject) => {
-      resolveSubmitted = resolve;
-      rejectSubmitted = reject;
-    });
-    cancelArmedWait = (reason) => {
-      removeArmedKeyGuard();
-      rejectSubmitted(refuse(reason));
-    };
-    armedKeyGuard = (event) => {
-      if (event.key !== 'Enter' || document.activeElement !== send) return;
-      // Synthetic Enter must never activate the irreversible control. For the
-      // operator's trusted Enter, repeat both identity and message checks at
-      // the actual point of submission, after the potentially long pause.
-      let valid = false;
-      try {
-        const current = readUserId(dialogRoot());
-        const box = composerBox();
-        valid =
-          !trustedEnterAccepted &&
-          event.isTrusted === true &&
-          current === expected &&
-          box?.value === message;
-      } catch {
-        // An unreadable or ambiguous DOM is never permission to submit.
-        valid = false;
-      }
-      if (!valid) {
-        event.preventDefault?.();
-        event.stopImmediatePropagation?.();
-        return;
-      }
-      // Keep the guard installed until the observed transition or teardown. A
-      // second Enter in the gap is blocked rather than becoming a second send.
-      trustedEnterAccepted = true;
-      resolveSubmitted();
-    };
-    document.addEventListener('keydown', armedKeyGuard, true);
-    return submitted;
-  }
-
   // One round trip, deliberately, pauses and all. Splitting this into open /
   // type / arm would let a stopped or failed run leave a half-open composer
   // on the page, and - worse - would put a message boundary between the
@@ -604,26 +507,12 @@
   // by the panel from the same PACING the rest of the run uses and handed in;
   // this file owns no timings of its own, and treats a missing one as no pause
   // rather than inventing a number.
-  // Everything that happens before Send is armed: the guards, the
+  // Everything that happens before Send is clicked: the guards, the
   // composer, incremental entry and the identity re-read. It is a function of
   // its own so that "nothing has gone out yet" is a structural property of a region
   // rather than a claim repeated at each throw - every failure in here, named
   // or unforeseen, is caught by the one handler below and marked certain.
   async function prepareSend({ expected, message, beforePasteMs, afterPasteMs }) {
-    // Starting from the side panel leaves browser-level keyboard focus there.
-    // Page JavaScript cannot transfer that ownership. Wait for the operator's
-    // one click on Wellfound before opening or typing, otherwise physical Enter
-    // stays in the panel regardless of which page element receives DOM focus.
-    if (typeof document.hasFocus === 'function') {
-      const deadline = Date.now() + PAGE_FOCUS_TIMEOUT_MS;
-      while (!document.hasFocus()) {
-        if (stopped) throw new Error('Stopped before the Wellfound page received keyboard focus');
-        if (Date.now() >= deadline) {
-          throw new Error('The Wellfound page did not receive keyboard focus');
-        }
-        await wait(PAGE_FOCUS_POLL_MS);
-      }
-    }
     if (!expected) throw new Error('Refusing to accept without an expected candidate id');
     if (typeof message !== 'string' || message.trim() === '') {
       throw new Error('Refusing to send an empty message');
@@ -657,7 +546,7 @@
     await typeMessage(composerBox(), message);
     // A beat to read it back.
     await pause(clampPause(afterPasteMs, MAX_AFTER_PASTE_MS));
-    // After the pause and before arming, so a stop during either pause takes
+    // After the pause and before dispatch, so a stop during either pause takes
     // effect while nothing has yet gone out. Past this point a send is
     // possible, and nothing here ever retries one.
     if (stopped) throw new Error('Stopped before the message was sent');
@@ -667,37 +556,13 @@
       SEND_LABEL,
       'Accept application & send message',
     );
-    // Identity, re-read immediately before arming and nowhere else that
-    // matters. Everything above this line took time, and the reviewer is
-    // positional: if it moved while the composer was opening, the focused send
-    // would message whoever slid into the slot.
+    // Everything above this line took time. The actual click boundary below
+    // reacquires this control and re-reads both identity and message.
     const atTheClick = readUserId(dialogRoot());
     if (atTheClick !== expected) {
       throw new Error(`The reviewer moved to ${atTheClick} before the send`);
     }
-    // From this point the operator may press Enter. Mark this document before
-    // focus can reach the submit control, then attempt the requested two Tabs.
-    // Synthetic Tab has no default focus traversal in a browser, so explicit
-    // focus is the deterministic fallback. Nothing here activates the control.
-    sent.add(expected);
-    let submitted;
-    try {
-      submitted = guardPhysicalEnter({ expected, message, send });
-      sendKey('Tab');
-      sendKey('Tab');
-      if (document.activeElement !== send && typeof send.focus === 'function') send.focus();
-      if (document.activeElement !== send) {
-        throw new Error('Could not focus the Accept application & send message control');
-      }
-      markSendReady(send);
-    } catch (error) {
-      removeArmedKeyGuard();
-      sent.delete(expected);
-      const box = composerBox();
-      if (box && typeof box.focus === 'function') box.focus();
-      throw error;
-    }
-    return { before, submitted };
+    return { before };
   }
 
   // The wrapper exists for the flag and for nothing else: for as long as an
@@ -715,25 +580,54 @@
     const expected = expectedUserId == null ? '' : String(expectedUserId);
 
     let before;
-    let submitted;
     try {
-      ({ before, submitted } = await prepareSend({
+      ({ before } = await prepareSend({
         expected,
         message,
         beforePasteMs,
         afterPasteMs,
       }));
     } catch (error) {
-      // Send was never armed, so this is the certain half of the
+      // Send was never clicked, so this is the certain half of the
       // contract. Marked here and only here: one site, guarding one region,
       // rather than a phrase each throw has to remember to carry.
       throw refuse(String(error.message || error));
     }
 
-    // The extension stops acting here. The send control is focused and only a
-    // physical Enter from the operator may activate it. Everything below is an
-    // observation of whether Wellfound drained the queue.
-    await submitted;
+    // Reacquire rather than trusting an element retained across the async
+    // preparation boundary. React may have replaced the DOM while preserving
+    // the visible composer. Both identity and the exact message are checked in
+    // the same synchronous turn as the irreversible click.
+    let liveSend;
+    try {
+      const scope = dialogRoot();
+      liveSend = uniqueControl(scope, SEND_LABEL, 'Accept application & send message');
+      const { usable } = usableControls(scope, SEND_LABEL);
+      if (usable.length !== 1 || usable[0] !== liveSend) {
+        throw new Error('The Accept application & send message control is no longer uniquely usable');
+      }
+      const atDispatch = readUserId(scope);
+      if (atDispatch !== expected) {
+        throw new Error(`The reviewer moved to ${atDispatch} before the send`);
+      }
+      const liveBox = composerBox();
+      if (!liveBox || liveBox.value !== message) {
+        throw new Error('The response message changed before the send');
+      }
+    } catch (error) {
+      // This whole region is synchronously before sent.add/clickSafely. DOM
+      // churn here is therefore a certain refusal, not an ambiguous send.
+      throw refuse(String(error.message || error));
+    }
+
+    // Record before the irreversible click. If dispatch or the page dies after
+    // receiving it, this document must not attempt the candidate again and the
+    // outcome remains ambiguous rather than being called a certain refusal.
+    sent.add(expected);
+    clickSafely(liveSend, 'Accept application & send message');
+
+    // The extension has clicked the unique Send control. Everything below is
+    // observation of whether Wellfound drained the queue; nothing retries it.
 
     // The only honest confirmation: this candidate is gone from the slot AND
     // the bucket drained by one. Accepting removes them, so the next person
@@ -764,7 +658,7 @@
       });
     } catch {
       // Not an error and deliberately not thrown. `total` is what the panel
-      // needs to keep watching - the denominator before arming - and
+      // needs to keep watching - the denominator before dispatch - and
       // `reason` is the sentence to use if the watching runs out too, kept here
       // because this is the account of what happened after arming and the panel
       // does not compose those.
@@ -774,11 +668,10 @@
         pending: true,
         total: before.total,
         reason:
-          `Could not confirm the accept for ${expected}. The operator may or may not have sent it - ` +
+          `Could not confirm whether Wellfound committed the accept for ${expected} after the extension clicked Send - ` +
           'check the candidate in Wellfound before running again. Nothing was retried.',
       };
     }
-    removeArmedKeyGuard();
     return { userId: expected, accepted: true, next };
   }
 
@@ -887,7 +780,6 @@
       return report;
     }
     if (!reviewerRoot()) {
-      removeArmedKeyGuard();
       report.closed = true;
       return report;
     }
@@ -895,14 +787,12 @@
     const hadComposer = Boolean(composerBox());
     if (hadComposer) {
       await leave(CANCEL_LABEL, 'Cancel response', () => !composerBox(), report, 'cancelled');
-      if (report.cancelled) removeArmedKeyGuard();
     }
     if (reviewerRoot()) {
       await leave(EXIT_LABEL, 'Exit', () => !reviewerRoot(), report, 'closed');
     } else {
       report.closed = true;
     }
-    if (report.closed) removeArmedKeyGuard();
 
     // The sentence an operator would want, assembled once from what actually
     // happened rather than left for a reader to infer from two booleans and a
@@ -954,7 +844,6 @@
     // the flag is what the pause and the pre-send check read.
     STOP: async () => {
       stopped = true;
-      cancelArmedWait?.('Stopped before the operator submitted the message');
       return { stopped: true };
     },
     // Leaving, which is deliberately NOT part of the message above.
@@ -1013,7 +902,6 @@
       usableControls,
       reachableControls,
       clickSafely,
-      sendKey,
       typeMessage,
       pause,
       handlers,

@@ -35,7 +35,7 @@ import {
   candidateLine,
   pageLine,
   acceptConsideringLine,
-  acceptAwaitingEnterLine,
+  acceptSubmittingLine,
   acceptCandidateLine,
   acceptUnconfirmedLine,
   acceptCheckedLine,
@@ -626,10 +626,10 @@ function handleRunEvent(event) {
     state.settle = null;
     say(acceptConsideringLine(event));
   }
-  if (event.type === 'accept_awaiting_enter' && running) {
+  if (event.type === 'accept_submitting' && running) {
     clearCountdown();
     state.settle = null;
-    say(acceptAwaitingEnterLine());
+    say(acceptSubmittingLine());
   }
   // A send the page could not vouch for, and the looks at the review queue that
   // follow it. This is up to a minute of an irreversible operation being

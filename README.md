@@ -46,10 +46,9 @@ The panel names the applicant bucket it is about to export as soon as the first
 page arrives, before anything downloads, so you can stop if it is not the one
 you meant.
 
-Accepting is assisted rather than unattended. After starting an accepting run,
-click the Wellfound page once to keep keyboard focus there. The extension opens
-each composer, types and verifies the message, and focuses Send; you press Enter
-once per candidate.
+After starting an accepting run, the extension opens each composer, visibly
+types and verifies the message, then clicks `Accept application & send message`.
+It confirms the queue transition before continuing to the next candidate.
 
 ## How it works
 

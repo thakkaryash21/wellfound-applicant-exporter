@@ -271,7 +271,7 @@ exactly:
   rather than name-based. There is no fallback to the displayed name anywhere in
   the file; a modal whose id cannot be read, or that carries more than one,
   stops the run.
-- The id is re-read from the DOM immediately before Send is armed and after
+- The id and exact message are re-read from the DOM immediately before Send is clicked and after
   every pause, because the reviewer is positional — it shows whoever sits at the
   current index, and a blind accept messages whoever is on screen.
 - Selectors are anchored and counted. Wellfound's page carries two elements
@@ -293,14 +293,11 @@ exactly:
   and closing the modal are reported separately, so a teardown that half worked
   says so.
 
-Navigation and opening the composer remain clicks. Submission is operator
-confirmed: the driver visibly types with a yield between characters, explicitly
-focuses the one unique `Accept application & send message` control, and waits.
-Synthetic Tab events are not browser focus traversal and are not presented as
-real Tab presses. It never synthesizes Enter and never clicks Send. The operator
-clicks the Wellfound page once, waits for Send focus, and presses Enter once. A
-capture-phase guard accepts only trusted Enter and rechecks the exact candidate
-id and completed message at that moment.
+Navigation, opening the composer and submission are clicks. The driver visibly
+types with a yield between characters, rechecks the exact candidate id and
+completed message, then clicks the one unique, usable `Accept application & send
+message` control. It emits no Tab or Enter events and never retries an uncertain
+submission click.
 
 Filling the composer uses `HTMLTextAreaElement.prototype`'s own `value` setter
 one character at a time, with `beforeinput` and `input`, because assigning `element.value`
@@ -714,7 +711,7 @@ survives the message is not sent. The check runs on an intermediate form where
 token slots have been replaced by markers but candidate values have not yet been
 dropped in, so a candidate whose own name happens to read like a token cannot be
 re-substituted into. Two guards, one at compose time and one in the driver
-immediately before Send is armed, because the second is the last point at which a
+at the Send-click boundary, because the second is the last point at which a
 literal bracket can be stopped from reaching a stranger's inbox.
 
 ### Ledger
@@ -1183,13 +1180,12 @@ the screen fixes itself when the operator does the thing it asked for.
   before deciding is what a person does at that screen anyway, so the rhythm
   needs no new numbers.
 - **Two pauses around the message**, one while the composer opens and one to
-  read the completed text before arming. The driver enters text incrementally
+  read the completed text before dispatch. The driver enters text incrementally
   through input events without emitting character key events, so A, R and X in
   the message can never become reviewer shortcuts.
-- **Submission is physical Enter.** Synthetic Tab pairs do not perform browser
-  traversal; the driver verifies and explicitly focuses Send instead. The
-  extension never emits Enter or clicks the submit control. It blocks
-  synthetic Enter and revalidates identity and message on trusted Enter.
+- **Submission is an exact guarded click.** Immediately after revalidating the
+  candidate id and completed message, the driver clicks the one unique, usable
+  Send control. It emits no keyboard events and never retries an uncertain click.
 - **Default page size 10**, matching what the UI actually sends. The 20 ceiling
   is exposed as an opt-in "faster" toggle, with the panel stating that 20 is a
   value the real UI never sends.
@@ -1314,9 +1310,9 @@ than as tuned against a known cause.
 
 ### What was measured, ruling out the obvious causes
 
-These measurements predate the assisted physical-Enter path. They establish
-the behavior of the former automatic submit click; whether operator-confirmed
-submission changes the outcome must be measured live rather than inferred.
+These measurements predate visible incremental typing. They establish the
+behavior of the former paste-like automatic submit path; whether incremental
+entry changes the outcome must be measured live rather than inferred.
 
 On the 111-applicant role, live:
 
@@ -1418,7 +1414,7 @@ have been established by looking.
 | The composed message still holds a bracket token | Do not send. Mark the row failed with the reason, skip that candidate, carry on: the fault is in the wording, not in the page. |
 | The reviewer is showing somebody other than the expected candidate, or their id cannot be read | Stop the pass. No name-based fallback and no guess. Nothing was sent. |
 | The composer does not open, or a control does not resolve to exactly one match | Stop the pass and say so. This is a **certain** failure: nothing was clicked and nothing went out, and the panel says exactly that. |
-| A send that never confirmed | Watch the DOM, then ask the review queue, then sweep again at the end of the role. Gone from the queue books the accept and the pass carries on; still queued releases them only after teardown proves the armed composer was cancelled or closed, so they stay eligible; otherwise the provisional entry remains. No verdict also leaves a provisional entry for the next run and raises the one alert in this panel that asks the operator to go and check Wellfound. Never retried, because a retry is a second message to a real person. |
+| A send that never confirmed | Watch the DOM, then ask the review queue, then sweep again at the end of the role. Gone from the queue books the accept and the pass carries on; still queued releases them only after teardown proves no composed message remains, so they stay eligible; otherwise the provisional entry remains. No verdict also leaves a provisional entry for the next run and raises the one alert in this panel that asks the operator to go and check Wellfound. Never retried, because a retry is a second message to a real person. |
 | Three deferrals in a row, or a queue check with no verdict | End the pass `unclear`, and end the whole run rather than starting the next role in the same degraded session. The page has stopped vouching for anything, and the next role is the one that sends messages. |
 | The ledger write fails after a confirmed send | Its own outcome, `unrecorded`. Stop the run, name the person, write the CSV row anyway, and tell the operator to check that role before running it again. Neither "nothing was sent" nor "the click is in doubt". |
 | The reviewer will not close at the end of a pass | Reported, never thrown. A failure to tidy up must not become the reported outcome of a run that otherwise worked, and cancelling the composer and closing the modal are reported separately. |

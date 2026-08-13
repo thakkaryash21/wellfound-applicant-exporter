@@ -1989,7 +1989,7 @@ describe('the send that commits long after everybody stopped looking', () => {
   // The ledger entry is the only thing standing between this person and a
   // message from the next run, and on this path it is also the only thing that
   // would remember the attempt at all.
-  it('stops before arming when the ledger cannot remember the pending accept', async () => {
+  it('stops before dispatch when the ledger cannot remember the pending accept', async () => {
     const h = harness({
       people: five,
       records: rowsFor(five),

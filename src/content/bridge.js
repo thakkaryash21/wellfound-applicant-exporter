@@ -40,10 +40,11 @@
   //   composer wait  5000  (COMPOSER_TIMEOUT_MS)
   //   before paste   5000  (clamped, PACING.beforePasteMs upper bound)
   //   after paste    3000  (clamped, PACING.afterPasteMs upper bound)
+  //   send ready     5000  (SEND_READY_TIMEOUT_MS)
   //   confirm wait  12000  (CONFIRM_TIMEOUT_MS)
   //   slack          2000  (poll granularity, click dispatch, re-render)
   //                 -----
-  //                 27000
+  //                 32000 + 20 ms per message-character gap
   //
   // Smaller than it was, and that is the point rather than a concession. The
   // confirmation no longer happens inside this round trip: the driver reports
@@ -51,7 +52,8 @@
   // without holding the wire. So this budget covers the driver's fast path,
   // which is a thing with a measured size, instead of covering however long
   // Wellfound might take, which is not.
-  const DRIVER_WORST_CASE_MS = 27000;
+  const DRIVER_WORST_CASE_MS = 32000;
+  const TYPING_INTERVAL_MS = 20;
   // The margin, and what it is actually an allowance FOR. This used to be
   // described as "half as much again", which is a size and not a reason.
   //
@@ -73,10 +75,15 @@
   // longer exists.
   const MARGIN_MS = 18000;
   const TIMEOUT_MS = DRIVER_WORST_CASE_MS + MARGIN_MS;
-  // ACCEPT_CANDIDATE now waits for the operator's physical Enter before its
-  // confirmation clock starts. Do not turn a thoughtful pause into a relay
-  // timeout and the queue-check/rest loop the operator has not asked for.
-  const ACCEPT_TIMEOUT_MS = 10 * 60 * 1000;
+  function timeoutFor(type, payload) {
+    if (type !== 'ACCEPT_CANDIDATE') return TIMEOUT_MS;
+    const characters = [...String(payload?.message ?? '')].length;
+    const scheduled = DRIVER_WORST_CASE_MS + Math.max(0, characters - 1) * TYPING_INTERVAL_MS;
+    // Typing runs on the same page thread that produced the measured
+    // starvation. Scale the allowance with the full request instead of giving
+    // long messages only the fixed margin.
+    return scheduled + Math.max(MARGIN_MS, Math.ceil(scheduled / 2));
+  }
   const pending = new Map();
   let counter = 0;
 
@@ -98,7 +105,7 @@
       const timer = setTimeout(() => {
         pending.delete(id);
         resolve({ ok: false, error: 'Page did not respond in time' });
-      }, type === 'ACCEPT_CANDIDATE' ? ACCEPT_TIMEOUT_MS : TIMEOUT_MS);
+      }, timeoutFor(type, payload));
       pending.set(id, { resolve, timer });
       window.postMessage({ source: 'wfx-cs', id, type, payload }, '*');
     });
@@ -126,9 +133,9 @@
   if (globalThis.__WFX_BRIDGE__) {
     Object.assign(globalThis.__WFX_BRIDGE__, {
       TIMEOUT_MS,
-      ACCEPT_TIMEOUT_MS,
       DRIVER_WORST_CASE_MS,
       MARGIN_MS,
+      timeoutFor,
     });
   }
 

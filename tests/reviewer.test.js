@@ -223,13 +223,9 @@ function createPage(options = {}) {
           send.disabled = false;
         }, options.sendUsableAfterMs);
       }
-      send.focus = () => {
-        if (options.sendCannotFocus) return;
-        document.activeElement = send;
-        if (!options.manualEnter) pressPhysicalEnter();
-      };
     }
     send?.addEventListener('click', () => {
+      state.lastSendElement = send;
       const field = document.querySelector('textarea');
       state.sentText = field.value;
       // Which route the value took, captured while the composer still exists:
@@ -239,14 +235,6 @@ function createPage(options = {}) {
       (options.onSendClick ?? confirmSend)(state);
       render();
     });
-  }
-
-  function pressPhysicalEnter() {
-    const focused = document.activeElement;
-    const event = new FakeKeyboardEvent('keydown', { key: 'Enter', isTrusted: true });
-    document.dispatchEvent(event);
-    if (!event.defaultPrevented && focused?.tagName === 'BUTTON') focused.click();
-    return event;
   }
 
   // The bucket is a queue. Accepting removes that person; the index stays.
@@ -276,9 +264,6 @@ function createPage(options = {}) {
     state,
     render,
     currentId,
-    pressEnter() {
-      return pressPhysicalEnter();
-    },
   };
 }
 
@@ -420,49 +405,23 @@ describe('reporting who is shown', () => {
 });
 
 describe('accepting', () => {
-  it('does not enter confirmation or resting while it is still waiting for physical Enter', async () => {
-    start({ manualEnter: true });
-    await driver.openReviewer();
-    let settled = false;
-    const pending = driver
-      .acceptCurrent({ expectedUserId: '70000001', message: MESSAGE })
-      .finally(() => {
-        settled = true;
-      });
-
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(page.document.activeElement?.getAttribute('id')).toBe('send');
-    expect(page.state.sentText).toBe(null);
-    expect(settled).toBe(false);
-
-    page.pressEnter();
-    await vi.advanceTimersByTimeAsync(300);
-    await expect(pending).resolves.toMatchObject({ accepted: true });
-  });
-
-  it('types the message, arms the send control, and waits for the operator to press Enter', async () => {
-    start({ manualEnter: true });
+  it('types the message and clicks the unique Accept application & send message control', async () => {
+    start();
     await driver.openReviewer();
     const pending = driver.acceptCurrent({
       expectedUserId: '70000001',
       message: MESSAGE,
     });
 
-    await vi.advanceTimersByTimeAsync(100);
-    expect(page.state.sentText).toBe(null);
-    expect(page.state.clicks).toEqual(['View application', 'Accept']);
-    expect(page.state.keys).toEqual(['Tab', 'Tab', 'Tab', 'Tab']);
-    expect(page.document.activeElement?.getAttribute('id')).toBe('send');
-    expect(page.document.activeElement?.style.outline).toBe('3px solid #d89b45');
-
-    const syntheticEnter = new FakeKeyboardEvent('keydown', { key: 'Enter' });
-    page.document.dispatchEvent(syntheticEnter);
-    expect(syntheticEnter.defaultPrevented).toBe(true);
-    expect(page.state.sentText).toBe(null);
-
-    page.pressEnter();
     await vi.advanceTimersByTimeAsync(300);
     const result = await pending;
+    expect(page.state.sentText).toBe(MESSAGE);
+    expect(page.state.clicks).toEqual([
+      'View application',
+      'Accept',
+      'Accept application & send message',
+    ]);
+    expect(page.state.keys).toEqual([]);
     // Confirming auto-advances: the next person is already at index 1 and the
     // denominator dropped. A caller that pressed Next after this would skip
     // somebody, so the driver reports the new position rather than moving.
@@ -488,22 +447,12 @@ describe('accepting', () => {
     await expect(driver.acceptCurrent({ message: MESSAGE })).rejects.toThrow(/expected candidate/i);
   });
 
-  it('refuses without submitting when the send control cannot take focus', async () => {
-    start({ sendCannotFocus: true });
-    await driver.openReviewer();
-    await expect(
-      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
-    ).rejects.toThrow(/Could not focus.*nothing was sent/);
-    expect(page.state.sentText).toBe(null);
-    expect(page.state.clicks).toEqual(['View application', 'Accept']);
-    expect(driver.sent.has('70000001')).toBe(false);
-  });
 });
 
 // --- the two classes of failure -----------------------------------------------
 
 // This driver knows something the panel cannot work out for itself: whether the
-// Send control was armed. A refusal raised before arming is certain - nothing went
+// Send control was clicked. A refusal raised before dispatch is certain - nothing went
 // anywhere - and the panel says so plainly; a failure raised after it is
 // genuinely ambiguous and raises the alarm that sends the operator to Wellfound
 // to check on a stranger. Flattening the two trained the operator to discount
@@ -578,7 +527,7 @@ describe('saying whether anything was sent', () => {
     // is unchanged, and it still carries no certainty phrase - so if the
     // watching runs out too, it still reads as unclear.
     expect(result).toMatchObject({ accepted: false, pending: true });
-    expect(result.reason).toMatch(/operator may or may not have sent/);
+    expect(result.reason).toMatch(/extension clicked Send/);
     expect(result.reason).not.toContain(driver.NOTHING_SENT);
     // The denominator before the click, which is what the panel needs to go on
     // applying the same predicate this file just applied.
@@ -595,8 +544,49 @@ describe('saying whether anything was sent', () => {
 const RISKY_MESSAGE = 'Hey Amara,\n\nRegarding your excellent application - warm regards!';
 
 describe('entering the message', () => {
+  it('refuses if the composer changes during the final pause', async () => {
+    start();
+    await driver.openReviewer();
+    const pending = driver
+      .acceptCurrent({
+        expectedUserId: '70000001',
+        message: 'Hi',
+        afterPasteMs: 500,
+      })
+      .catch((error) => error);
+
+    await vi.advanceTimersByTimeAsync(100);
+    page.document.querySelector('textarea').value = 'changed';
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect((await pending).message).toMatch(/message changed.*nothing was sent/i);
+    expect(page.state.clicks).not.toContain('Accept application & send message');
+  });
+
+  it('reacquires Send if React replaces the composer DOM before dispatch', async () => {
+    start();
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({
+      expectedUserId: '70000001',
+      message: 'Hi',
+      afterPasteMs: 500,
+    });
+
+    await vi.advanceTimersByTimeAsync(100);
+    const oldSend = page.document.getElementById('send');
+    const message = page.document.querySelector('textarea').value;
+    page.render();
+    page.document.querySelector('textarea').value = message;
+    const newSend = page.document.getElementById('send');
+    expect(newSend).not.toBe(oldSend);
+
+    await vi.advanceTimersByTimeAsync(700);
+    await expect(pending).resolves.toMatchObject({ accepted: true });
+    expect(page.state.lastSendElement).toBe(newSend);
+  });
+
   it('visibly yields between characters instead of completing in one task', async () => {
-    start({ manualEnter: true }, { typingIntervalMs: 20 });
+    start(undefined, { typingIntervalMs: 20 });
     await driver.openReviewer();
     const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: 'Hello' });
 
@@ -606,7 +596,6 @@ describe('entering the message', () => {
     expect(page.state.inputValues.length).toBeGreaterThan(1);
 
     await vi.runAllTimersAsync();
-    page.pressEnter();
     await vi.advanceTimersByTimeAsync(300);
     await expect(pending).resolves.toMatchObject({ accepted: true });
   });
@@ -615,9 +604,8 @@ describe('entering the message', () => {
     start();
     await driver.openReviewer();
     await driver.acceptCurrent({ expectedUserId: '70000001', message: RISKY_MESSAGE });
-    // Only the two Tab attempts used to arm the operator's physical Enter.
-    // Message characters never become shortcut KeyboardEvents.
-    expect(page.state.keys.filter((key) => key === 'Tab')).toEqual(['Tab', 'Tab', 'Tab', 'Tab']);
+    // Message characters never become reviewer shortcut KeyboardEvents.
+    expect(page.state.keys).toEqual([]);
     expect(page.state.keys).not.toContain('a');
     expect(page.state.keys).not.toContain('r');
     expect(page.state.keys).not.toContain('x');
@@ -671,7 +659,7 @@ describe('entering the message', () => {
 describe('the pauses either side of entering the message', () => {
   const PAUSES = { beforePasteMs: 3000, afterPasteMs: 2000 };
 
-  it('waits before entering and again before arming, honouring what it was handed', async () => {
+  it('waits before entering and again before dispatch, honouring what it was handed', async () => {
     start();
     await driver.openReviewer();
     const pending = driver.acceptCurrent({
@@ -764,16 +752,6 @@ describe('the pauses either side of entering the message', () => {
 // --- guard: never reject ------------------------------------------------------
 
 describe('the never-reject guard', () => {
-  it('refuses to send the reject keys', async () => {
-    start();
-    await driver.openReviewer();
-    for (const key of ['r', 'R', 'x', 'X']) {
-      expect(() => driver.sendKey(key)).toThrow(/rejects the candidate/);
-    }
-    expect(page.state.keys).toEqual([]);
-    expect(page.state.rejected).toBe(false);
-  });
-
   it('refuses to click a reject control even when handed one directly', async () => {
     start();
     await driver.openReviewer();
@@ -814,34 +792,6 @@ describe('the identity interlock', () => {
     expect(page.state.clicks).not.toContain('Accept application & send message');
   });
 
-  it('blocks Enter when the positional reviewer moves after Send was focused', async () => {
-    start({ manualEnter: true });
-    await driver.openReviewer();
-    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
-    await vi.advanceTimersByTimeAsync(100);
-    expect(page.document.activeElement?.getAttribute('id')).toBe('send');
-
-    page.state.queue.push(page.state.queue.shift());
-    page.render();
-    page.pressEnter();
-    expect(page.state.sentText).toBe(null);
-    await driver.handlers.STOP();
-    await expect(pending).rejects.toThrow(/nothing was sent/);
-  });
-
-  it('fails closed when identity becomes unreadable at physical Enter', async () => {
-    start({ manualEnter: true });
-    await driver.openReviewer();
-    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
-    await vi.advanceTimersByTimeAsync(100);
-    page.document.querySelector('a').remove();
-
-    const enter = page.pressEnter();
-    expect(enter.defaultPrevented).toBe(true);
-    expect(page.state.sentText).toBe(null);
-    await driver.handlers.STOP();
-    await expect(pending).rejects.toThrow(/nothing was sent/);
-  });
 });
 
 // --- guard: exactly one match -------------------------------------------------
@@ -1407,7 +1357,7 @@ describe('the accept round trip fitting inside the relay budget', () => {
     // Named here rather than derived, so a change to any of them has to be a
     // change to this number too - which is what the relay's budget is checked
     // against in tests/bridge.test.js.
-    expect(driver.ACCEPT_WORST_CASE_MS).toBe(27000);
+    expect(driver.ACCEPT_WORST_CASE_MS).toBe(32000);
   });
 
   // What the fast path is for: the healthy band, measured at 5-9 s, answered

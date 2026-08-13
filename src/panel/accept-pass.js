@@ -573,7 +573,7 @@ export async function resolveHeldOver({
 // that cannot ask the API gets exactly the behaviour this pass had before it
 // existed. It answers 'gone', 'queued' or 'unknown' for one userId, and it is
 // never given the chance to answer anything about a send that was refused
-// before Send is armed.
+// before the Send click is dispatched.
 //
 // `reloadPage` is the fourth and is optional for the same reason: it reloads
 // the working tab and does not return until the page can answer for this job
@@ -928,9 +928,9 @@ export async function runAcceptPass(deps, options) {
         const closed = await review({ type: CX_CLOSE_REVIEWER });
         armedComposerDisarmed = Boolean(closed?.cancelled || closed?.closed);
       } catch {
-        // A missing answer does not prove the armed composer disappeared. Keep
-        // the provisional question so a late physical Enter cannot be followed
-        // by an automatic retry on the next run.
+        // A missing answer does not prove the clicked send disappeared. Keep
+        // the provisional question so an uncertain send cannot be followed by
+        // an automatic retry on the next run.
         armedComposerDisarmed = false;
       }
     }
@@ -1214,10 +1214,9 @@ export async function runAcceptPass(deps, options) {
         continue;
       }
 
-      // The interlock closes before the page is armed. Unlike the old automatic
-      // click, the operator may press Enter as soon as focus reaches Send, so
-      // the durable question must exist before this message crosses to the
-      // page. If this write fails, the composer is never opened.
+      // The interlock closes before the page is allowed to click Send. The
+      // durable question must exist before this message crosses to the page. If
+      // this write fails, the composer is never opened.
       unresolvedSend = userId;
       try {
         await recordProvisional(jobId, userId);
@@ -1231,7 +1230,7 @@ export async function runAcceptPass(deps, options) {
         emitCandidate(userId, 'failed', { error });
         break;
       }
-      emit({ type: 'accept_awaiting_enter', jobId, userId });
+      emit({ type: 'accept_submitting', jobId, userId });
       const sendStartedAt = now();
       try {
         const sent = await review({
@@ -1270,7 +1269,7 @@ export async function runAcceptPass(deps, options) {
         // to a real person.
         //
         // What differs is what the operator is told. The driver knows whether
-        // it refused before arming and says so; the panel used to flatten
+        // it refused before dispatch and says so; the panel used to flatten
         // both cases into the alarming one.
         const reason = String(sendError.message || sendError);
 
