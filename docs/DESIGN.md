@@ -196,13 +196,63 @@ Responsibilities:
   bare boolean. A document the browser is about to discard can truthfully answer
   "yes" and take a run down with it.
 - Read the job list out of the Apollo cache (`cache.extract()`), filtered to
-  `__typename === 'JobListing'`.
+  `__typename === 'JobListing'`. The cache is the source for **titles** only.
+- Run `RecruitApplicantCounts` through the same client for the applicant
+  counts, and join it onto those titles by `jobId`. See "The counts are asked
+  for, not waited for" below, which is the most transferable thing in this
+  document.
 
 It holds no state, does no pacing, and knows nothing about downloads or dedup.
 It is a classic script with no imports and no exports — MV3 will not run a module
 in the MAIN world — so the message-type literals are duplicated inline from
 `src/lib/messages.js` rather than imported, and the only test seam is a
 `__WFX_COLLECTOR__` container that nothing in the extension ever defines.
+
+#### The counts are asked for, not waited for
+
+The Home screen shows "281 applicants" per role. That number is not in the
+applicant list response — there is no `totalCount` — and it is not reliably in
+the Apollo cache either. The cache holds a `JobListing` entity per role, and
+`actionableApplicantsCount` on it is populated only for roles whose applicant
+list the recruiter has actually opened in that session. On a fresh tab the cache
+answers with sixteen titles and one count.
+
+Four attempts were made to solve this by waiting, and all four failed:
+
+1. Wait for the counts query to be registered on the client.
+2. Wait for the counts to appear in the cache.
+3. Wait for the cache to go quiet — hash the counts each read and stop once four
+   consecutive reads agree, capped at twenty-four reads.
+4. Wait for the document itself, anchoring on the tab's `loading` to `complete`
+   transition before reading at all.
+
+Each was a better heuristic than the last and each still produced the same
+defect: the panel told the operator to reopen the panel for a number that was
+never coming, because for a role nobody had opened there was nothing to wait
+for. No amount of patience makes absent data arrive.
+
+**Waiting was the wrong shape of answer.** A wait infers a fact from timing. It
+can only ever establish "it has not appeared yet", and it cannot distinguish
+that from "it is not going to". The counts were not slow, they were unasked
+for — and the page registers a query, `RecruitApplicantCounts`, whose entire
+job is to answer the question. So `collector.js` takes that live query's own
+document and variables, runs it `network-only` through the page's own client,
+and joins the result onto the titles by `jobId`. One request, a definite answer,
+no polling anywhere on the path.
+
+The generalisation is worth more than the fix: **when you find yourself tuning
+how long to wait for a value, check first whether anything is going to produce
+it.** A timing heuristic is what you reach for when you have decided the data is
+in flight, and that decision is the part that was never checked. The Turnstile
+section at the end of this document records the same error in the opposite
+direction, and between them they are the two most expensive days on this
+project.
+
+The query is registered only in the applicant area, so it is not always
+available. Failure is silent by design: the role list is still worth showing
+without a count, the row says the count is not loaded yet, and Home offers the
+one thing that does fix it — open that role's applicant list on Wellfound. A
+run does not need the number; it is an estimate on a screen.
 
 ### 2. `reviewer.js` — MAIN-world content script
 
@@ -234,6 +284,14 @@ exactly:
   is clicked. Two different intents, deliberately not one helper.
 - Reject is never clicked and `R`/`X` are never sent, guarded at the point of
   action rather than by convention.
+- It can be closed. `CLOSE_REVIEWER` cancels an open composer and closes the
+  modal, and the pass calls it on every way out, including the throwing one: a
+  run that ends leaving a half-filled composer on the recruiter's screen is a
+  state the operator did not choose. Teardown never throws, because a failure to
+  tidy up must not become the reported outcome of a run that otherwise worked,
+  and it refuses to act while an accept is in flight. Cancelling the composer
+  and closing the modal are reported separately, so a teardown that half worked
+  says so.
 
 **Every interaction is a click.** Synthetic `keydown`/`keyup` events do nothing:
 dispatching `ArrowRight` leaves the reviewer on the same candidate with the same
@@ -302,8 +360,21 @@ Four modules sit beside it, each with a boundary worth naming:
 
 - `tab-driver.js` — find or open a recruiter tab, navigate it to a job's
   applicant list, poll `QUERY_READY` until the page can answer (500 ms poll,
-  1500 ms settle after a navigation, 15 s timeout), and relay messages. It
-  touches the tab; nothing else does.
+  1500 ms settle after a navigation, 15 s timeout), watch for tab changes, and
+  relay messages. Everything that knows what a tab is lives here; the run
+  controller composes these and never reaches for `chrome.tabs` on its own.
+  Two of them are about proving a page arrived rather than assuming it:
+  - `watchTabs` registers a `chrome.tabs.onUpdated` listener that reads nothing
+    off the event and only says "something changed, look again". It is what
+    turns "Open Wellfound to get started" from a dead end into a screen that
+    notices when you do.
+  - `watchNavigation` is the same listener used as evidence. `chrome.tabs.
+    reload` resolves when the reload is *initiated*, not when the new document
+    commits, so the pre-reload document can still answer a readiness query and
+    prove nothing. The watcher is installed **before** the reload is asked for
+    and requires the `loading` then `complete` pair, with a 60 s deadline. Any
+    probe here has to state what it actually establishes; this one establishes
+    that a different document is answering.
 - `ledger-service.js` — everything the extension knows about who has been
   fetched and whether their file is still on disk. It owns the ledger outright,
   takes no lock, drives no tab and paces nothing, so the Library screen can call
@@ -312,10 +383,11 @@ Four modules sit beside it, each with a boundary worth naming:
   promise. Registration is idempotent, because two listeners over one pending
   map would hand filenames back to Chrome.
 - `accept-pass.js` — the second pass over a job: who may be accepted, in what
-  order, and what the CSV row says about each of them. It decides and books;
-  the DOM belongs to `reviewer.js` and the wording to `accept-message.js`. It
-  never composes a selector, never retries a send, and never accepts anybody
-  whose resume this extension does not already hold.
+  order, what is believed about each send, and what the CSV row says about them.
+  It decides and books; the DOM belongs to `reviewer.js` and the wording to
+  `accept-message.js`. It never composes a selector, never retries a send, and
+  never accepts anybody whose resume this extension does not already hold. It
+  owns *when* a reload happens; the run controller owns *how*.
 
 The view modules (`home-view.js`, `accept-confirm.js`, `running-view.js`,
 `post-run-view.js`, `library.js`, `summary.js`, `trace-view.js`) are markup and
@@ -359,9 +431,10 @@ For each selected job, sequentially, driven from the panel:
 7. It stops when `hasNextPage` is false, the per-role `limit` is reached, the
    early-stop rule fires, five downloads fail in a row, or the run is aborted.
 8. The ledger's run is closed out with the folder it wrote to.
-9. **Pass 2**, if the run is accepting: `accept-pass.js` opens the reviewer and
-   accepts the people pass 1 captured, recording each in the ledger before the
-   modal settles on the next person.
+9. **Pass 2**, if the run is accepting: `accept-pass.js` resolves any questions
+   an earlier run left behind, then opens the reviewer and accepts the people
+   pass 1 captured, **at most `limit` of them**, recording each in the ledger
+   before the modal settles on the next person.
 10. The CSV for that job is written, and the loop moves to the next job.
 
 Downloads interleave with paging rather than batching at the end, so an aborted
@@ -430,13 +503,17 @@ stand in for the other:
 | Skip | advances | holds |
 
 A send is confirmed by watching for that change, never by assuming the click
-worked or sleeping a fixed interval. It is the only evidence the message
-actually went. What an accept *failure* looks like, and what the reviewer does
-when the queue empties on the last candidate, could not be produced without
-accepting a hundred more real people — so both are unverified, and the driver
-treats "the id did not change within the timeout" as stop-and-report, never as
-success and never as a reason to retry. A retried accept is a second message to
-someone who already got one.
+worked or sleeping a fixed interval. It is the **first** of two kinds of
+evidence, and for a long time it was believed to be the only one; the section
+on unconfirmed sends below describes the second, which is absence from the
+review queue, and why the two are not interchangeable.
+
+What an accept *failure* looks like, and what the reviewer does when the queue
+empties on the last candidate, could not be produced without accepting a hundred
+more real people — so both are unverified, and the driver treats "the id did not
+change within the timeout" as a question rather than as an answer: never as
+success, never as failure, and never as a reason to retry. A retried accept is a
+second message to someone who already got one.
 
 Because the queue drains, progress is reported as **accepted so far out of
 intended**, never as a share of a total that is shrinking underneath it.
@@ -489,6 +566,13 @@ It is a pointer, so it is neither.
   button behind them. Offering a remedy for a state that has no remedy, or
   walking forty pages to arrive at a wrong answer, are both the pretending-to-work
   this extension does not do.
+- **Somebody with a provisional entry is a third state**, and the Library says
+  so in its own words. They are not accepted, because nothing established that,
+  and rendering them with the accepted wording would put an irreversible claim on
+  screen that no run ever made. They are not plainly missing either, because a
+  walk may find nobody. So they get their own count and their own line, and no
+  button: the thing that resolves them is the next accept run over that role, and
+  it is the only thing that can.
 - **The CSV and the downloaded file are the only surviving copy** of an accepted
   candidate's data, which is why the row is written before the accept and why an
   aborted run still flushes what it has.
@@ -498,6 +582,99 @@ It is a pointer, so it is neither.
 **What it buys:** a candidate who would otherwise expire in a few days, and be
 emailed that the company never responded, gets a reply instead. That is the point
 of the feature.
+
+### A send nobody can vouch for
+
+The reviewer does not always confirm. The click lands, the composer sits there,
+and the counter does not move within any budget worth waiting for. This is the
+single most common way a large accept run ends, and the Turnstile section
+explains why.
+
+It is not a failure. `error` in this codebase means **nothing was sent**, and
+reaching for it after a click has already happened is a lie the operator will
+act on. A timeout is not evidence of anything except that time passed.
+
+So an unconfirmed send is settled by asking, in three widening circles, none of
+which involves clicking anything again:
+
+1. **Watch the DOM.** Six waits totalling about two minutes, reading the
+   reviewer's own position and total. This costs nothing on the wire and it
+   catches the ordinary case: the page was slow, the accept landed, the counter
+   moved a minute after the click. That has been measured happening.
+2. **Ask the review queue.** A cursor-paged walk of `NEEDS_REVIEW` looking for
+   that one userId. Gone means the message landed. Still queued means it did
+   not, yet.
+3. **Sweep at the end of the role**, after the reviewer is closed, in three
+   waves out to about two and a half minutes. Time is the cheapest evidence
+   available and the end of the role is when spending it costs nothing.
+
+The queue answer is **one-directional**, and this is the part to understand
+before touching any of it. There is no `ACCEPTED` status to query. Nothing can
+positively confirm an accept; the only question the API can answer is whether
+the person has left the collection. Absence is exactly what a landed accept
+produces and it does not expire, so `gone` is strong. Presence is weaker: it
+means the message has not landed *yet*, and this page has been seen delivering
+one minutes after the click.
+
+**The ledger therefore holds a question as well as answers.** `accepted` means
+"a message reached this person and must never be sent again" — a claim, and one
+that may only be made when something vouched for it. `provisional` means "a send
+was clicked and nobody knows". They are separate maps and four separate verbs,
+not one map with a flag, because collapsing them was a real bug with a real
+cost: of two sends the page never confirmed, one had landed and one had not, and
+the pass wrote both into `accepted`. The person who was never messaged was
+permanently written off, and nothing would ever try them again.
+
+Recording a deferral as an accept is the worse of the two errors available, so
+it is the one the design refuses. The trade is stated plainly:
+
+- A wrong `accepted` costs somebody the reply they applied for, silently and
+  forever. Nothing revisits the accepted map.
+- A wrong `provisional` costs a later run one query. The question does not
+  expire, and asking it again is free.
+
+`confirmProvisional` is the only route from the question to a permanent accept,
+and it moves the entry in a single write so the person is never briefly in both
+maps or briefly in neither: the whole value of the entry is that it exists
+continuously from the click until the answer. It carries the original click's
+timestamp across rather than restamping, because the question the CSV column
+asks is when the message went out, not when we found out.
+
+`releaseProvisional` is the opposite, and it is the one place in this extension
+where a record that stops somebody being messaged is deliberately removed. It is
+safe because it removes only the provisional entry and can never reach
+`accepted`: it does not read that map, spread it or name it. A send anything ever
+vouched for stays final. Releasing is the owner's decision and it carries a real
+risk — if the queue was wrong, that person gets a second message — taken because
+the alternative is a candidate who applied, was messaged by nobody, and is
+recorded as handled.
+
+A pass that is cut short by the operator releases nobody. Stopping is not
+evidence.
+
+**Questions outlive the run that asked them.** A crash, a closed panel or a fatal
+error leaves provisional entries with nothing to resolve them. The next accept
+pass over that role reads them back and settles them **before** planning
+anything, so the plan is built on answers. Anything still unresolved keeps its
+entry and its `unresolved` CSV cell, and waits for the run after that. This is
+self-healing rather than permanent because the question does not go stale: the
+person is either in the queue or they are not, however long you leave it.
+
+**When the page stops answering at all, the pass stops.** Three deferrals in a
+row, or a queue check that cannot reach a verdict, and the pass ends `unclear` —
+and an `unclear` pass ends the whole run rather than moving on to the next role
+in the same degraded session. Two in a row is reachable by ordinary bad luck;
+three is a page that has stopped confirming anything, and a confirmed accept
+resets the count. What is worth stopping on is not how many sends were slow, it
+is whether anything is still vouching.
+
+**A message that went out and could not be recorded is its own outcome.** If the
+ledger write fails after a confirmed send — the extension reloaded mid-run,
+storage rejected the write — that is neither `error` (nothing was sent) nor
+`unclear` (the click is in doubt). It is `unrecorded`: the run stops there, the
+person is named on screen, and the operator is told to check that role before
+running it again, because nothing durable remembers the message. The CSV row is
+written anyway and is the only surviving record of it.
 
 ### Run modes
 
@@ -549,6 +726,18 @@ person and never batched, for a sharper version of the reason downloads are
 recorded early: an accept the ledger does not know about gets sent twice. The
 write is idempotent on its timestamp, so a repeat keeps the original moment.
 
+That ordering is structural, not a convention about where a call site sits. The
+pass names the person it is sending to before the click and clears the name only
+once they are durably recorded, and a reload requested inside that window
+throws. Moving the ledger write below the in-memory advance is the same defect by
+another road.
+
+The accept dimension is **two maps**, `accepted` and `provisional`, for the
+reason the section on unconfirmed sends gives: one holds answers and the other
+holds questions, and a question written into the answers map is unrecoverable.
+Both are maps rather than lists like `seenUserIds`, because these events are
+unrepeatable and the moment each happened matters.
+
 The queue also dedups on its own, since an accepted person never reappears in it.
 That is a convenience, not the mechanism.
 
@@ -563,8 +752,11 @@ Its number must never read higher than what will happen, which is why an
 accept-only run counts the people already on disk minus the ones already
 accepted — the download ledger keeps holding somebody after they are accepted,
 the review queue does not, and using the ledger's count alone double-counts that
-difference on the second run over a role. Where the exact figure is not knowable
-the screen says "up to" rather than guessing.
+difference on the second run over a role. The role's own limit is applied to that
+figure too, since it bounds how many people are messaged and not only how many
+are downloaded; a screen reading "Accept 100 people" above a run that will
+message 25 is the one thing this screen must not do. Where the exact figure is
+not knowable the screen says "up to" rather than guessing.
 
 It is not a scare screen. The operator asked for this feature and knows what
 accepting is. It is a place to read the number back before it becomes real.
@@ -625,16 +817,26 @@ Per-job record:
 ```
 job:{jobId} = {
   jobId, jobTitle, seenUserIds: string[], lastRunAt, totalDownloaded, folder,
-  accepted: { [userId]: localDateTimeText }
+  accepted:    { [userId]: localDateTimeText },
+  provisional: { [userId]: localDateTimeText }
 }
 ```
 
-`accepted` is a map rather than a list like `seenUserIds`, because an accept is
-unrepeatable and the moment it happened matters. It is stamped with local date
-and time text through `local-time.js`; a raw Unix timestamp in a cell a human
-reads has already been a reported defect on this project. The two dimensions are
-cleared by two separate operations — `forget` and `forgetAccepted` — so no
-caller can wire one button to both.
+`accepted` and `provisional` are maps rather than lists like `seenUserIds`,
+because an accept is unrepeatable and the moment it happened matters. Both are
+stamped with local date and time text through `local-time.js`; a raw Unix
+timestamp in a cell a human reads has already been a reported defect on this
+project. The download dimension and the accept dimension are cleared by two
+separate operations — `forget` and `forgetAccepted` — so no caller can wire one
+button to both.
+
+Every field name in the record stops inside `ledger.js`, behind a named reader.
+That is not tidiness. A rename that silently defaulted the seen set to empty
+would re-fetch hundreds of resumes at human pacing with no error anywhere; the
+same rename against the accepted map would re-send hundreds of messages; against
+the provisional map it would lose every question a crashed run left behind, and
+each of those people would be messaged again with nothing recording that they
+may already have been. Failing loudly in one place is worth the indirection.
 
 `seenUserIds` is the seen set, and that is its name everywhere: the stored field,
 the reader inside `ledger.js`, and the accessor callers use. The one place the
@@ -752,9 +954,13 @@ against an older export still finds every prior column exactly where it was.
   before this run began), `not attempted: this run was not accepting` (a mode the
   operator chose), `not attempted: the run stopped first` (a limit the run hit,
   worded to mirror the Resume column's equivalent), `refused: no resume on file,
-  accepting would lose them for good`, and `failed: {reason}` for an accept that
-  was attempted and could not be completed — the identity interlock aborting, the
-  composer never opening, a send that never confirmed.
+  accepting would lose them for good`, `unresolved: the message may have been
+  sent; never retried` for a send still waiting on an answer, and
+  `failed: {reason}` for an accept that was attempted and could not be
+  completed — the identity interlock aborting, the composer never opening, a send
+  the queue later said had not landed. `unresolved` and `failed` are the two
+  halves of what used to be one cell, split for the reason the ledger's two maps
+  are split: one of them is a question and the other is an answer.
 - **Accepted At** is written from the ledger's own stamp, so the CSV and the
   ledger cannot disagree about when a message went out.
 - **Applied At** is rendered `YYYY-MM-DD`. Wellfound sends Unix seconds, which
@@ -848,6 +1054,15 @@ as a dashboard, and this is a single task.
   to download. It is a separate screen because Home answers "what do you want to
   do now" and a summary answers "what happened last time", and one screen cannot
   honestly do both.
+
+  It opens with **what the run was asked to do**, above what it did: the mode,
+  each role and its limit, the page size, the folder, and for an accepting run
+  the exact message that went out, reproduced in full. That is captured before
+  the first request rather than reconstructed afterwards, so it is the intent and
+  not a summary of the outcome, and the two can be read against each other. The
+  message is there because the one thing a reader wants to know about an
+  irreversible message is what it said. The trace carries the ids and the numbers
+  and deliberately not the message text.
 - **Library** — per-job state and maintenance. It pushes in as a second view
   with a back affordance rather than as a tab.
 
@@ -894,11 +1109,16 @@ toggle. There is no per-run item cap and no pace control; the number of people t
 take is a per-role choice on the row itself.
 
 The **Library** screen lists each known job with: downloaded, known, last run
-date, the three reconciliation drifts, and anybody accepted whose file has since
-left the disk. That last group is reported as **accepted and can no longer be
-fetched**, not as missing, and no Re-download button is drawn for them. The
-distinction is made where the counts are read rather than inside the action, so
-the screen never offers a remedy it would refuse a moment later. Actions per job,
+date, the three reconciliation drifts, and two groups whose files have left the
+disk and cannot simply be fetched again. Anybody accepted is reported as
+**accepted and can no longer be fetched**, not as missing. Anybody whose send was
+never confirmed is reported as having an accept nobody could confirm, which the
+next run settles. Neither draws a Re-download button. Both distinctions are made
+where the counts are read rather than inside the action, so the screen never
+offers a remedy it would refuse a moment later. One phrasing per fact: the
+accepted wording is the same sentence the re-download result uses, because it is
+the same fact told at a different moment, and the unconfirmed wording is
+deliberately not that sentence because it is not that fact. Actions per job,
 and only these:
 **Re-download missing**, **Adopt N found files** (shown only when reconciliation
 found orphans), **Import CSV**, and **Forget this job** (confirmed, and visually
@@ -938,6 +1158,15 @@ pages on Wellfound (wellfound.com/recruit) to see your jobs", not "no matching
 tab". The pause is the moment a user decides the panel has hung, so it is the one
 line that explains itself rather than naming itself.
 
+The two errors that name a place to go are **links to that place**, opening in a
+new tab, with the remedy words themselves as the anchor rather than a bare URL or
+a trailing "click here". A sentence that tells somebody to open a page and then
+makes them find it is a dead end wearing an instruction. The panel matches on an
+error's code to decide this, never on its prose, so rewording a message can never
+silently remove its link. A page that has lost its content script gets a reload
+button on the same principle, and Home keeps watching for the tab either way, so
+the screen fixes itself when the operator does the thing it asked for.
+
 ## Rate limiting and detection avoidance
 
 - **Strictly serial.** Never more than one in-flight request, ever.
@@ -972,15 +1201,64 @@ line that explains itself rather than naming itself.
   (the default, and unbounded) or "first N", where N defaults to 25 once the user
   picks it. There is no global cap, and no run-wide default of 250: an earlier
   draft of this document described one that was never built.
+- **The limit bounds accepts as well as downloads**, and that is one number
+  rather than two on purpose. It used to bound pass 1 alone, and pass 1 counts
+  *new* downloads: on a role already fully downloaded its counter never moves, so
+  a limit of 3 sent 115 messages. It now also means "at most N people are
+  messaged", applied last, after every row has its cell, so queue order is
+  preserved and a refusal or an already-accepted person does not spend the
+  number. If the two ever have to differ they should be two named settings on
+  screen, not one number read two ways.
+- **The reload cadence** — see below. It is the one pacing constant argued from
+  what the page needs rather than from what a person does, and it is named here
+  so that asymmetry is not mistaken for an oversight.
 
 At default pacing a 281-applicant job takes roughly 12 minutes. That is the point.
 
-**Not built:** aborting when the user navigates the working tab away. There is no
-`tabs.onUpdated`, `tabs.onRemoved` or `visibilitychange` listener anywhere in the
-source. A run does stop when the tab leaves the applicant list, but only because
-the next message to the content script fails and the run reports that failure —
-which is a consequence, not a designed abort. Closing the panel does end the run,
-because the loop lives in the panel document.
+### What an accept pass costs on top of that
+
+Three things the download walk does not do, all of them added between live runs
+because the page degrades. They are the loudest traffic this extension produces
+and none of them is free:
+
+- **Reloading the applicant list every five to seven accepts**, plus once
+  whenever an accept took longer than ninety seconds or a send did not confirm.
+  On a hundred-person role that is roughly eighteen full navigations inside one
+  session. This is the honest weak point of the pacing story: every other number
+  here is argued from what a person does at that screen, and nobody reloads their
+  applicant list every sixth accept for an hour. It is jittered only within its
+  own range, so the shape (N accepts, reload, N accepts, reload) is more regular
+  than the behaviour it imitates. It is kept because without it a long pass
+  stalls outright, and the alternative on the table was a run that stops halfway.
+  It is a distinctive session fingerprint; it is not a known detection.
+- **The queue check**, up to forty pages of ten at download pacing per look, run
+  once or twice per unconfirmed send and up to three times more in the
+  end-of-role sweep. A cursor hint remembers which page answered last time and
+  goes straight back to it, which usually reduces a look to a handful of
+  requests, but the hint is dropped whenever a page cannot be read and the next
+  look then walks again. On a large role with a cold hint this is minutes, not
+  seconds. It asks for ten records a page, the same as an ordinary run, so its
+  requests are indistinguishable from one.
+- **The reload the pass asks for is never allowed to land inside an accept.**
+  The pass names the person it is sending to before the click, and a reload
+  requested while that name is set throws rather than proceeding. A reload that
+  committed mid-send would destroy the only witness to a message that may already
+  be in a stranger's inbox.
+
+The running screen shows all of this. A settle window that says nothing is
+several minutes in which the applicant counter is frozen, the tab reloads itself,
+and the panel is indistinguishable from ordinary pacing — while the most alarming
+state this software has is being investigated. The reloads, the slow accepts, the
+unconfirmed send and the queue checks each have words on screen.
+
+**Not built:** aborting when the user navigates the working tab away. A run does
+stop when the tab leaves the applicant list, but only because the next message to
+the content script fails and the run reports that failure — which is a
+consequence, not a designed abort. The `chrome.tabs.onUpdated` listeners that do
+exist are for the opposite purpose: noticing that a page has *arrived*, either so
+Home can retry after the operator opens Wellfound, or so a reload can be proved
+to have committed. Closing the panel does end the run, because the loop lives in
+the panel document.
 
 ## Error handling
 
@@ -1002,7 +1280,12 @@ because the loop lives in the panel document.
 | The composed message still holds a bracket token | Do not send. Mark the row failed with the reason, skip that candidate, carry on: the fault is in the wording, not in the page. |
 | The reviewer is showing somebody other than the expected candidate, or their id cannot be read | Stop the pass. No name-based fallback and no guess. Nothing was sent. |
 | The composer does not open, or a control does not resolve to exactly one match | Stop the pass and say so. This is a **certain** failure: nothing was clicked and nothing went out, and the panel says exactly that. |
-| A send that never confirmed | Stop the pass and raise the one alert in this panel that asks the operator to go and check Wellfound: the message may or may not have gone out, and nothing was retried. Never retried, because a retry is a second message to a real person. |
+| A send that never confirmed | Watch the DOM, then ask the review queue, then sweep again at the end of the role. Gone from the queue books the accept and the pass carries on; still queued releases them, so they stay eligible; no verdict leaves a provisional entry for the next run and raises the one alert in this panel that asks the operator to go and check Wellfound. Never retried, because a retry is a second message to a real person. |
+| Three deferrals in a row, or a queue check with no verdict | End the pass `unclear`, and end the whole run rather than starting the next role in the same degraded session. The page has stopped vouching for anything, and the next role is the one that sends messages. |
+| The ledger write fails after a confirmed send | Its own outcome, `unrecorded`. Stop the run, name the person, write the CSV row anyway, and tell the operator to check that role before running it again. Neither "nothing was sent" nor "the click is in doubt". |
+| The reviewer will not close at the end of a pass | Reported, never thrown. A failure to tidy up must not become the reported outcome of a run that otherwise worked, and cancelling the composer and closing the modal are reported separately. |
+| A reload that cannot be observed committing | Fail rather than proceed. `chrome.tabs.reload` resolving proves only that the reload was asked for, and the old document can answer a readiness query. |
+| `RecruitApplicantCounts` is not registered on the page | Show the roles without their counts, say the count is not loaded yet, and tell the operator which page produces one. Never a wait, and never a message promising a number that is not coming. |
 | Five downloads fail in a row on an accepting run | Hold pass 2 back entirely for that role, and say so. Nobody was accepted and nothing is lost. |
 | Stop pressed during an accept pass | An `AbortSignal` does not cross into a content script, so the stop is forwarded as its own message and is felt inside the pause rather than after it. The pause ends there and no send follows. |
 | Panel closed or extension reloaded mid-run | The run ends with it. A marker in `chrome.storage.local` lets the next panel open say the last run was interrupted; the ledger already holds everyone fetched before the interruption, so the next run resumes from there. |
@@ -1048,7 +1331,7 @@ downstream of a belief, it launders the belief into evidence.
 
 ## Testing
 
-`npm test` runs the whole suite under `vitest`: 29 files, upwards of seven
+`npm test` runs the whole suite under `vitest`: 29 files, upwards of nine
 hundred tests, green. The count is given as a floor rather than a figure on
 purpose. This document carried an exact one for long enough that it drifted by
 two hundred, and a reader who catches a document out on a number they can check
@@ -1078,8 +1361,15 @@ that a guard which matters is mutation-tested rather than trusted: point the Acc
 Reject and the guard must fire; loosen the anchor on the Accept pattern and the
 uniqueness check must catch it; take the accept knowledge out of the Library's
 counts and a test must fail on what the operator sees, not merely on an internal
-number. A test named after a risk proves nothing until it has been watched to
-fail.
+number; render a provisional person with the accepted wording and a test must
+fail on the sentence, because that sentence is the claim. A test named after a
+risk proves nothing until it has been watched to fail.
+
+This has caught real things twice. Unanchoring the Accept pattern once passed all
+660 tests. Deleting the reload interlock outright once passed all 791, because
+every test watching it observed the reviewer's message log, in which the ledger
+write's position is invisible — so they asserted exactly the convention they
+claimed not to be asserting. A guard defended only by a comment is a comment.
 
 **The fixture rule.** `tests/helpers/captured-shape.js` is the one fixture built
 from a live capture, and it must be carried across every seam by at least one
