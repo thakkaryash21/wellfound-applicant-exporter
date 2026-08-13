@@ -439,17 +439,25 @@ const DEFERRED_SWEEP_WAITS_MS = [15000, 45000, 90000];
 // second is a pattern this module can no longer reason about - which is what
 // `unclear` has always meant and where the pass still stops.
 //
-// The two numbers measure different things and only one of them moved.
+// There used to be a second number here, UNCONFIRMED_SENDS_PER_PASS, bounding
+// how many times a pass would ask the queue. It is gone, and what it got wrong
+// is worth keeping written down.
 //
-// UNCONFIRMED_SENDS_PER_PASS bounds COST: it is how many times a pass will walk
-// the collection, which is the most expensive thing it can do. It was 3 when
-// reaching the queue at all meant something had gone wrong. It no longer does -
-// the LAST candidate of every role reaches it as a matter of course, because
-// the watch confirms a send by the next person sliding into the slot and on the
-// last one there is nobody left to slide in. So one per role is now normal, and
-// 3 left almost no room above normal.
+// It counted every send the page failed to confirm, whether or not the queue
+// then resolved it. But a resolved one is a SUCCESS - the message went out, the
+// accept is booked, the pass carries on - and on a large role the last candidate
+// reaches the queue as a matter of course, because the watch confirms a send by
+// the next person sliding into the slot and on the last one nobody does. So the
+// bound was counting the mechanism working. Live, it stopped a 74-person role
+// after ten accepts: four sends settled by the queue, a fifth deferred, ceiling
+// reached.
 //
-// The other bound was DEFERRALS_PER_PASS = 2, sized as "how many real people
+// Cost is still real - a `gone` needs a complete walk - but it is paid at most
+// once per send on a pass already spending ninety seconds an accept, and the
+// page it was really aimed at, one that confirms nothing, is bounded below by
+// health rather than by arithmetic.
+//
+// The bound that remains was DEFERRALS_PER_PASS = 2, sized as "how many real people
 // this pass may leave for the operator to check by hand". That was right while
 // a deferral was permanent. It no longer is: the sweep resolves nearly all of
 // them, into an accept or into a release, and either way the operator is left
@@ -471,7 +479,6 @@ const DEFERRED_SWEEP_WAITS_MS = [15000, 45000, 90000];
 // It also bounds the total: a pass cannot accumulate deferrals without
 // confirming accepts in between, so the leftovers a crashed run can strand are
 // bounded by the work it actually did.
-const UNCONFIRMED_SENDS_PER_PASS = 5;
 const DEFERRALS_IN_A_ROW = 3;
 
 // One accept taking this long is the page asking to be reloaded.
@@ -1288,11 +1295,21 @@ export async function runAcceptPass(deps, options) {
 
         // The click happened and the DOM never confirmed it. From here on the
         // only question is what is KNOWN, never what to try again.
+        //
+        // The queue is asked every time, with no ceiling on how often. There was
+        // one, sized as a bound on cost, and it was the wrong shape twice over:
+        // it counted resolved sends alongside unresolved ones, and it spent
+        // itself on a role where the page is simply slow. The cost is real - a
+        // `gone` needs a complete walk of the collection - but it is paid at most
+        // once per send, on a pass that takes ninety seconds per accept anyway,
+        // and the pathological case it was reaching for is a page that confirms
+        // nothing, which DEFERRALS_IN_A_ROW bounds directly and by health rather
+        // than by arithmetic.
         unconfirmedSends += 1;
         let verdict = null;
         let looks = 0;
         let waitedMs = 0;
-        if (checkQueue && unconfirmedSends <= UNCONFIRMED_SENDS_PER_PASS) {
+        if (checkQueue) {
           emit({ type: 'accept_unconfirmed', jobId, userId, error: reason });
           // One look establishes only where the candidate was at that instant,
           // and a send still in flight puts them in the queue exactly as a send
@@ -1345,13 +1362,17 @@ export async function runAcceptPass(deps, options) {
           error = told;
           break;
         }
-        // Two of these is not a slow page any more, and neither is a fourth
-        // unconfirmed send. The pass stops with everybody it has messaged
-        // already written down.
-        if (
-          deferralsInARow >= DEFERRALS_IN_A_ROW ||
-          unconfirmedSends >= UNCONFIRMED_SENDS_PER_PASS
-        ) {
+        // Three in a row is not a slow page any more. The pass stops with
+        // everybody it has messaged already written down.
+        //
+        // This is now the ONLY count that ends a pass. It used to share the
+        // decision with a bound on how many sends the page had failed to
+        // confirm, and that bound stopped a 74-person role after ten accepts:
+        // five sends went unconfirmed, four of them were settled by the queue on
+        // the spot and were perfectly ordinary successes, and the fifth tripped
+        // a ceiling of five. Counting resolved sends towards a stop meant
+        // counting the mechanism working as evidence that it was not.
+        if (deferralsInARow >= DEFERRALS_IN_A_ROW) {
           stoppedBecause = 'unclear';
           error = told;
           break;

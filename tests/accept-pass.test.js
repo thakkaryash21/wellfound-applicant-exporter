@@ -1369,6 +1369,62 @@ describe('the two kinds of deferral', () => {
     expect(records[0].acceptStatus).toContain('nothing went out to them');
   });
 
+  // The run this changed. Ten of seventy-four accepted, and then the pass ended
+  // reporting `error` - because one deferral had been released.
+  //
+  // That is backwards. A release is the most recoverable state this system has:
+  // no message went out, no claim was made, the person is untouched and stays in
+  // the queue for the next run. The outcome that ends a pass is the one where
+  // somebody MAY have been messaged, and a release is precisely the outcome
+  // where nobody was.
+  it('finishes the role after releasing somebody, and attempts everyone behind them', async () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => String(70000001 + i));
+    const records = twelve.map((id) => captured(id));
+    const h = harness({
+      people: twelve,
+      records,
+      // The release lands on the FIRST candidate, so everybody who comes after
+      // them is only reached if the pass carried on.
+      failAccept: twelve[0],
+      checkQueue: () => 'queued',
+    });
+    const result = await h.run();
+
+    // The role finished. It did not stop, and nothing about it is an error.
+    expect(result.stoppedBecause).toBe('finished');
+    expect(result.stoppedBecause).not.toBe('error');
+    // Every remaining candidate was attempted, not abandoned behind the one
+    // that could not be confirmed.
+    const sends = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sends).toEqual(twelve);
+    expect(result).toMatchObject({ accepted: 11, failed: 1, unresolved: 0 });
+    // And the released person is eligible, not written off.
+    expect(h.released).toEqual([twelve[0]]);
+    expect(h.ledger.map((e) => e.userId)).not.toContain(twelve[0]);
+  });
+
+  // The bound that actually stopped that run, and why counting these was wrong:
+  // a send the queue settles is a SUCCESS. Four of the five unconfirmed sends on
+  // that role were resolved on the spot and booked as ordinary accepts; the
+  // ceiling counted them anyway and stopped the pass on the fifth.
+  it('does not stop because several sends needed the queue to settle them', async () => {
+    const twelve = Array.from({ length: 12 }, (_, i) => String(70000001 + i));
+    const h = harness({
+      people: twelve,
+      records: twelve.map((id) => captured(id)),
+      // Eight of twelve go unconfirmed at the page and are settled by the queue.
+      failAccept: [twelve[0], twelve[1], twelve[2], twelve[3], twelve[4], twelve[5], twelve[6],
+        twelve[7]],
+      landed: true,
+      checkQueue: () => 'gone',
+    });
+    const result = await h.run();
+    expect(result).toMatchObject({ accepted: 12, stoppedBecause: 'finished' });
+    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(12);
+  });
+
   // Both at once, which is the run as it actually happened.
   it('tells the two apart in the same pass', async () => {
     const records = rowsFor(four);

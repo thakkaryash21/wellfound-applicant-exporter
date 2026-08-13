@@ -1632,6 +1632,25 @@ describe('the accept pass', () => {
         expect(report.notes.join(' ')).toContain('1 could not be accepted');
         expect(report.notes.join(' ')).toContain('running this role again will try them');
       });
+
+      // The role finished. It used to report `error` and open with "accepting
+      // stopped after 10 of 74", which read as a truncated role to an operator
+      // whose role had in fact been walked to the end.
+      it('reports a finished role, not a stopped one', async () => {
+        // The release lands on the FIRST candidate, so the two behind them are
+        // only reached if the pass carried on past it.
+        await runWith({ userId: '7700001', landed: false });
+
+        const done = events.find((e) => e.type === 'done');
+        expect(done.jobs[0].acceptStoppedBecause).toBe('finished');
+        expect(done.stoppedBecause).toBe('finished');
+        expect(sendsTo('7700002')).toBe(1);
+        expect(sendsTo('7700003')).toBe(1);
+        // And the report never describes the role as having stopped short.
+        const report = summarize(done);
+        expect(report.notes.join(' ')).not.toContain('The rest were not attempted');
+        expect(report.headline).not.toContain('Stopped');
+      });
     });
 
     // The third answer, and the only one that now leaves anybody unresolved.
