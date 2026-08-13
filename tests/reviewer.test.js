@@ -453,6 +453,7 @@ describe('accepting', () => {
     expect(page.state.clicks).toEqual(['View application', 'Accept']);
     expect(page.state.keys).toEqual(['Tab', 'Tab', 'Tab', 'Tab']);
     expect(page.document.activeElement?.getAttribute('id')).toBe('send');
+    expect(page.document.activeElement?.style.outline).toBe('3px solid #d89b45');
 
     const syntheticEnter = new FakeKeyboardEvent('keydown', { key: 'Enter' });
     page.document.dispatchEvent(syntheticEnter);

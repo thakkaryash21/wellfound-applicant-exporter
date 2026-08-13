@@ -497,13 +497,38 @@
   const sent = new Set();
   let armedKeyGuard = null;
   let cancelArmedWait = null;
+  let markedSend = null;
+  let markedSendStyle = null;
   const TYPING_INTERVAL_MS = Number(globalThis.__WFX_TYPING_INTERVAL_MS__ ?? 20);
+
+  function clearSendReadyMark() {
+    if (!markedSend || !markedSendStyle) return;
+    markedSend.style.outline = markedSendStyle.outline;
+    markedSend.style.outlineOffset = markedSendStyle.outlineOffset;
+    markedSend = null;
+    markedSendStyle = null;
+  }
+
+  function markSendReady(send) {
+    clearSendReadyMark();
+    markedSend = send;
+    markedSendStyle = {
+      outline: send.style.outline ?? '',
+      outlineOffset: send.style.outlineOffset ?? '',
+    };
+    // Wellfound's :focus-visible styling is not applied to focus reached after
+    // a mouse click. Draw a temporary ring only after activeElement proves the
+    // irreversible control really owns DOM focus.
+    send.style.outline = '3px solid #d89b45';
+    send.style.outlineOffset = '3px';
+  }
 
   function removeArmedKeyGuard() {
     if (!armedKeyGuard) return;
     document.removeEventListener('keydown', armedKeyGuard, true);
     armedKeyGuard = null;
     cancelArmedWait = null;
+    clearSendReadyMark();
   }
 
   // React can render the uniquely labelled Send control before its layout and
@@ -664,6 +689,7 @@
       if (document.activeElement !== send) {
         throw new Error('Could not focus the Accept application & send message control');
       }
+      markSendReady(send);
     } catch (error) {
       removeArmedKeyGuard();
       sent.delete(expected);
