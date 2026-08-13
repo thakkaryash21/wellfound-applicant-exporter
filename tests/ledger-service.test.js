@@ -85,7 +85,48 @@ describe('ledger-service accept dimension', () => {
       { id: 2, state: 'complete', exists: false, filename: `Jane Doe-2-${JOB}.pdf` },
     ];
     const [job] = await service.library();
-    expect(job).toMatchObject({ missing: 1, unreachable: 1 });
+    expect(job).toMatchObject({ missing: 1, unreachable: 1, unsettled: 0 });
+  });
+
+  // A provisional entry is the run's open question, so it must not be counted
+  // as either answer. Counting it under `unreachable` would tell the operator
+  // an irreversible message went out when nothing established that; counting it
+  // under `missing` would offer a walk that may find nobody.
+  it('counts a person whose send was never confirmed apart from both accepted and missing', async () => {
+    await service.recordDownloaded(JOB, { userId: '1' }, { jobTitle: 'Platform Engineer' });
+    await service.recordDownloaded(JOB, { userId: '2' }, { jobTitle: 'Platform Engineer' });
+    await service.recordDownloaded(JOB, { userId: '3' }, { jobTitle: 'Platform Engineer' });
+    await service.recordAccepted(JOB, '2');
+    await service.recordProvisional(JOB, '3');
+    fake.chrome.downloads.search = async () => [
+      { id: 1, state: 'complete', exists: false, filename: `Jane Doe-1-${JOB}.pdf` },
+      { id: 2, state: 'complete', exists: false, filename: `Jane Doe-2-${JOB}.pdf` },
+      { id: 3, state: 'complete', exists: false, filename: `Jane Doe-3-${JOB}.pdf` },
+    ];
+    const [job] = await service.library();
+    expect(job).toMatchObject({ missing: 1, unreachable: 1, unsettled: 1 });
+  });
+
+  it('moves an unsettled person to accepted once the queue vouches for the send', async () => {
+    await service.recordDownloaded(JOB, { userId: '3' }, { jobTitle: 'Platform Engineer' });
+    await service.recordProvisional(JOB, '3');
+    await service.confirmAccepted(JOB, '3');
+    fake.chrome.downloads.search = async () => [
+      { id: 3, state: 'complete', exists: false, filename: `Jane Doe-3-${JOB}.pdf` },
+    ];
+    const [job] = await service.library();
+    expect(job).toMatchObject({ missing: 0, unreachable: 1, unsettled: 0 });
+  });
+
+  it('returns an unsettled person to plain missing once the send is released', async () => {
+    await service.recordDownloaded(JOB, { userId: '3' }, { jobTitle: 'Platform Engineer' });
+    await service.recordProvisional(JOB, '3');
+    await service.releaseAccepted(JOB, '3');
+    fake.chrome.downloads.search = async () => [
+      { id: 3, state: 'complete', exists: false, filename: `Jane Doe-3-${JOB}.pdf` },
+    ];
+    const [job] = await service.library();
+    expect(job).toMatchObject({ missing: 1, unreachable: 0, unsettled: 0 });
   });
 
   it('forget (the download reset) does not silently clear accepts as a side effect readers can rely on separately', async () => {

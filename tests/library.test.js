@@ -19,6 +19,7 @@ const row = (over = {}) => ({
   lastRunAt: null,
   missing: 0,
   unreachable: 0,
+  unsettled: 0,
   unverifiable: 0,
   orphans: 0,
   ...over,
@@ -173,5 +174,48 @@ describe('someone who was accepted', () => {
 
   it('says nothing at all when nobody was accepted', () => {
     expect(describeRefetch({ refetched: 3, stillMissing: 0 })).toBe('Re-downloaded 3');
+  });
+});
+
+// The state between the two answers. A provisional entry says a send was
+// clicked and nobody could vouch for it. Reporting that person as accepted
+// would book an irreversible outcome the run never established, and reporting
+// them as missing would promise a walk that cannot be promised.
+describe('someone whose accept nobody could confirm', () => {
+  const withUnsettled = (over) => stubController({ library: vi.fn(async () => [row(over)]) });
+
+  it('is not spoken of as accepted, because nobody knows that yet', async () => {
+    await show(withUnsettled({ missing: 0, unsettled: 2 }));
+    expect(screen.innerHTML).not.toContain('were accepted');
+    expect(screen.innerHTML).not.toContain('can no longer be fetched');
+    expect(screen.innerHTML).toContain('have an accept nobody');
+    expect(screen.innerHTML).toContain('could confirm, so the next run settles it');
+  });
+
+  it('is not counted among the files missing from disk', async () => {
+    await show(withUnsettled({ missing: 0, unsettled: 2 }));
+    expect(screen.innerHTML).not.toContain('missing from disk');
+  });
+
+  it('is not offered a Re-download button on their own account', async () => {
+    await show(withUnsettled({ missing: 0, unsettled: 2 }));
+    expect(screen.querySelector('[data-act="refetch"]')).toBe(null);
+  });
+
+  it('leaves the button standing for the people a walk can still fetch', async () => {
+    await show(withUnsettled({ missing: 3, unsettled: 2 }));
+    expect(screen.querySelector('[data-act="refetch"]')).not.toBe(null);
+    expect(screen.innerHTML).toContain('missing from disk');
+  });
+
+  it('is spoken of one person at a time without a plural verb', async () => {
+    await show(withUnsettled({ unsettled: 1 }));
+    expect(screen.innerHTML).toContain('has an accept nobody');
+    expect(screen.innerHTML).not.toContain('have an accept nobody');
+  });
+
+  it('does not let a row of unsettled sends read as all files present', async () => {
+    await show(withUnsettled({ unsettled: 2 }));
+    expect(screen.innerHTML).not.toContain('all files present');
   });
 });

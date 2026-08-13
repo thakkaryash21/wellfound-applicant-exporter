@@ -80,6 +80,16 @@ function states(job) {
       <span class="job-meta"> ${job.unreachable === 1 ? 'was' : 'were'} accepted
       and can no longer be fetched</span>`);
   }
+  // Deliberately not the accepted wording, and deliberately not "missing". A
+  // provisional entry means the send was clicked and nobody could vouch for it,
+  // so claiming either answer here would be a guess. The next run asks the
+  // review queue and settles it, which is also the only thing that can, so this
+  // line says who is waiting and leaves no button to press.
+  if (job.unsettled) {
+    parts.push(`<span class="num">${job.unsettled}</span>
+      <span class="job-meta"> ${job.unsettled === 1 ? 'has' : 'have'} an accept nobody
+      could confirm, so the next run settles it</span>`);
+  }
   if (job.unverifiable) {
     parts.push(`<span class="num">${job.unverifiable}</span>
       <span class="job-meta"> not in your download history, so can\u2019t verify</span>`);

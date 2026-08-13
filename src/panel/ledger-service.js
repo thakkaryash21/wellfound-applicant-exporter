@@ -84,6 +84,16 @@ export function createLedgerService(storage) {
         // the button is pressed.
         const accepted = new Set((await ledger.acceptedUserIds(job.jobId)).map(String));
         const unreachable = status.missing.filter((id) => accepted.has(String(id)));
+        // A provisional entry is a question, not an accept. Nobody knows yet
+        // whether the message went out, so this person is neither gone for good
+        // nor a file a walk can promise to fetch back: the next run either
+        // confirms the send, which makes them unreachable, or releases them,
+        // which makes them ordinary and missing again. Counted apart from both
+        // so the screen never claims either answer before the run has one.
+        const provisional = new Set((await ledger.provisionalUserIds(job.jobId)).map(String));
+        const unsettled = status.missing.filter(
+          (id) => provisional.has(String(id)) && !accepted.has(String(id)),
+        );
         rows.push({
           jobId: job.jobId,
           jobTitle: job.jobTitle,
@@ -93,8 +103,9 @@ export function createLedgerService(storage) {
           // "0 downloaded" alone reads as "the import did nothing".
           known: job.known,
           lastRunAt: job.lastRunAt,
-          missing: status.missing.length - unreachable.length,
+          missing: status.missing.length - unreachable.length - unsettled.length,
           unreachable: unreachable.length,
+          unsettled: unsettled.length,
           unverifiable: status.unverifiable.length,
           orphans: status.orphans.length,
         });
