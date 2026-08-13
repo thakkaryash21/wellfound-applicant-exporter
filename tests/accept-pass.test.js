@@ -1313,7 +1313,15 @@ describe('the two kinds of deferral', () => {
   const four = ['70000001', '70000002', '70000003', '70000004'];
   const rowsFor = (ids) => ids.map((id) => captured(id));
 
-  // The slow success. Gone from the queue by the time the sweep asks.
+  // Answers in order, then the last one forever.
+  const answers = (...seq) => {
+    let i = 0;
+    return () => seq[Math.min(i++, seq.length - 1)];
+  };
+
+  // The slow success. Still queued through the settle window - so it really
+  // does become a deferral, rather than being resolved on the spot - and gone
+  // by the time the sweep asks at the end of the role.
   it('books a deferral the sweep finds gone, permanently', async () => {
     const records = rowsFor(four);
     const h = harness({
@@ -1321,9 +1329,13 @@ describe('the two kinds of deferral', () => {
       records,
       failAccept: four[0],
       landed: true,
-      checkQueue: (id) => (String(id) === four[0] ? 'gone' : 'queued'),
+      checkQueue: answers('queued', 'queued', 'gone'),
     });
     const result = await h.run();
+    // It was a deferral first, which is the state this test is about.
+    expect(h.events.some((e) => e.type === 'accept_candidate' && e.outcome === 'deferred')).toBe(
+      true,
+    );
 
     expect(result).toMatchObject({ accepted: 4, unresolved: 0, failed: 0 });
     // Out of the questions and into the accepts, where it is final.
@@ -1844,13 +1856,18 @@ describe('the send that commits long after everybody stopped looking', () => {
     const h = harness({
       people: many,
       records: many.map((id) => captured(id)),
-      // Every other one, so no two are ever adjacent.
+      // Every other one, so no two deferrals are ever adjacent. The queue says
+      // `queued` throughout, so each really does become a deferral rather than
+      // being settled on the spot.
       failAccept: [many[0], many[2], many[4], many[6]],
-      landed: true,
-      checkQueue: () => 'gone',
+      checkQueue: () => 'queued',
     });
     const result = await h.run();
-    expect(result).toMatchObject({ accepted: 9, stoppedBecause: 'finished' });
+    // Four deferrals - well past the bound - and the pass never stopped,
+    // because a confirmed accept arrived between each pair of them.
+    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(9);
+    expect(result.accepted).toBe(5);
+    expect(h.released).toHaveLength(4);
   });
 
   // The report the operator reads must never be the one they got last time:
