@@ -78,9 +78,10 @@ near them.
   query's variables and overriding only cursor and page size, rather than forging
   requests. Every request is genuinely the site's own client.
 - **The reviewer never submits.** It clicks to open the reviewer and composer,
-  types through the textarea setter, makes two synthetic Tab attempts, then
-  focuses the unique Send control explicitly. Only the operator's physical
-  Enter submits the message; synthetic Enter is blocked.
+  visibly types through the textarea setter with a yield between characters,
+  then focuses the unique Send control explicitly. Synthetic Tab events cannot
+  traverse browser focus and must never be described as real Tab presses. Only
+  the operator's physical Enter submits the message; synthetic Enter is blocked.
 - **The pass owns when a reload happens; the run controller owns how.** The tab
   is the controller's business.
 

@@ -73,6 +73,10 @@
   // longer exists.
   const MARGIN_MS = 18000;
   const TIMEOUT_MS = DRIVER_WORST_CASE_MS + MARGIN_MS;
+  // ACCEPT_CANDIDATE now waits for the operator's physical Enter before its
+  // confirmation clock starts. Do not turn a thoughtful pause into a relay
+  // timeout and the queue-check/rest loop the operator has not asked for.
+  const ACCEPT_TIMEOUT_MS = 10 * 60 * 1000;
   const pending = new Map();
   let counter = 0;
 
@@ -94,7 +98,7 @@
       const timer = setTimeout(() => {
         pending.delete(id);
         resolve({ ok: false, error: 'Page did not respond in time' });
-      }, TIMEOUT_MS);
+      }, type === 'ACCEPT_CANDIDATE' ? ACCEPT_TIMEOUT_MS : TIMEOUT_MS);
       pending.set(id, { resolve, timer });
       window.postMessage({ source: 'wfx-cs', id, type, payload }, '*');
     });
@@ -120,7 +124,12 @@
   // the exception: they are a claim about another file, and a claim is worth
   // nothing if nothing can check it.
   if (globalThis.__WFX_BRIDGE__) {
-    Object.assign(globalThis.__WFX_BRIDGE__, { TIMEOUT_MS, DRIVER_WORST_CASE_MS, MARGIN_MS });
+    Object.assign(globalThis.__WFX_BRIDGE__, {
+      TIMEOUT_MS,
+      ACCEPT_TIMEOUT_MS,
+      DRIVER_WORST_CASE_MS,
+      MARGIN_MS,
+    });
   }
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {

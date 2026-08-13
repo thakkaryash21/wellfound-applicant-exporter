@@ -117,6 +117,10 @@
   const CONFIRM_POLL_MS = 250;
   const COMPOSER_TIMEOUT_MS = 5000;
   const COMPOSER_POLL_MS = 100;
+  const SEND_READY_TIMEOUT_MS = 5000;
+  const SEND_READY_POLL_MS = 100;
+  const PAGE_FOCUS_TIMEOUT_MS = 8 * 60 * 1000;
+  const PAGE_FOCUS_POLL_MS = 100;
   // Teardown is not allowed to be slow. It runs after the pass has already
   // ended, so the operator is waiting on it with nothing left to watch, and a
   // control that does not respond in two seconds is reported rather than waited
@@ -492,16 +496,50 @@
   // already received one.
   const sent = new Set();
   let armedKeyGuard = null;
+  let cancelArmedWait = null;
+  const TYPING_INTERVAL_MS = Number(globalThis.__WFX_TYPING_INTERVAL_MS__ ?? 20);
 
   function removeArmedKeyGuard() {
     if (!armedKeyGuard) return;
     document.removeEventListener('keydown', armedKeyGuard, true);
     armedKeyGuard = null;
+    cancelArmedWait = null;
+  }
+
+  // React can render the uniquely labelled Send control before its layout and
+  // enabled state catch up, especially immediately after the scheduled page
+  // reload. Poll only its state; never repeat the Accept click or guess between
+  // controls. The final diagnostic retains the exact census used elsewhere.
+  async function waitForUniqueControl(scope, pattern, name) {
+    const deadline = Date.now() + SEND_READY_TIMEOUT_MS;
+    for (;;) {
+      const { matching, usable } = usableControls(scope, pattern);
+      if (usable.length === 1) return usable[0];
+      if (usable.length > 1) {
+        throw new Error(`Found ${usable.length} ${name} controls, expected exactly one`);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Could not find the ${name} control (${matching.length} matched by text, none usable)`,
+        );
+      }
+      await wait(SEND_READY_POLL_MS);
+    }
   }
 
   function guardPhysicalEnter({ expected, message, send }) {
     removeArmedKeyGuard();
     let trustedEnterAccepted = false;
+    let resolveSubmitted;
+    let rejectSubmitted;
+    const submitted = new Promise((resolve, reject) => {
+      resolveSubmitted = resolve;
+      rejectSubmitted = reject;
+    });
+    cancelArmedWait = (reason) => {
+      removeArmedKeyGuard();
+      rejectSubmitted(refuse(reason));
+    };
     armedKeyGuard = (event) => {
       if (event.key !== 'Enter' || document.activeElement !== send) return;
       // Synthetic Enter must never activate the irreversible control. For the
@@ -528,8 +566,10 @@
       // Keep the guard installed until the observed transition or teardown. A
       // second Enter in the gap is blocked rather than becoming a second send.
       trustedEnterAccepted = true;
+      resolveSubmitted();
     };
     document.addEventListener('keydown', armedKeyGuard, true);
+    return submitted;
   }
 
   // One round trip, deliberately, pauses and all. Splitting this into open /
@@ -545,6 +585,20 @@
   // rather than a claim repeated at each throw - every failure in here, named
   // or unforeseen, is caught by the one handler below and marked certain.
   async function prepareSend({ expected, message, beforePasteMs, afterPasteMs }) {
+    // Starting from the side panel leaves browser-level keyboard focus there.
+    // Page JavaScript cannot transfer that ownership. Wait for the operator's
+    // one click on Wellfound before opening or typing, otherwise physical Enter
+    // stays in the panel regardless of which page element receives DOM focus.
+    if (typeof document.hasFocus === 'function') {
+      const deadline = Date.now() + PAGE_FOCUS_TIMEOUT_MS;
+      while (!document.hasFocus()) {
+        if (stopped) throw new Error('Stopped before the Wellfound page received keyboard focus');
+        if (Date.now() >= deadline) {
+          throw new Error('The Wellfound page did not receive keyboard focus');
+        }
+        await wait(PAGE_FOCUS_POLL_MS);
+      }
+    }
     if (!expected) throw new Error('Refusing to accept without an expected candidate id');
     if (typeof message !== 'string' || message.trim() === '') {
       throw new Error('Refusing to send an empty message');
@@ -575,7 +629,7 @@
     // panel sampled.
     await pause(clampPause(beforePasteMs, MAX_BEFORE_PASTE_MS));
     if (stopped) throw new Error('Stopped before the message was entered');
-    typeMessage(composerBox(), message);
+    await typeMessage(composerBox(), message);
     // A beat to read it back.
     await pause(clampPause(afterPasteMs, MAX_AFTER_PASTE_MS));
     // After the pause and before arming, so a stop during either pause takes
@@ -583,7 +637,11 @@
     // possible, and nothing here ever retries one.
     if (stopped) throw new Error('Stopped before the message was sent');
 
-    const send = uniqueControl(dialogRoot(), SEND_LABEL, 'Accept application & send message');
+    const send = await waitForUniqueControl(
+      dialogRoot(),
+      SEND_LABEL,
+      'Accept application & send message',
+    );
     // Identity, re-read immediately before arming and nowhere else that
     // matters. Everything above this line took time, and the reviewer is
     // positional: if it moved while the composer was opening, the focused send
@@ -597,8 +655,9 @@
     // Synthetic Tab has no default focus traversal in a browser, so explicit
     // focus is the deterministic fallback. Nothing here activates the control.
     sent.add(expected);
+    let submitted;
     try {
-      guardPhysicalEnter({ expected, message, send });
+      submitted = guardPhysicalEnter({ expected, message, send });
       sendKey('Tab');
       sendKey('Tab');
       if (document.activeElement !== send && typeof send.focus === 'function') send.focus();
@@ -612,7 +671,7 @@
       if (box && typeof box.focus === 'function') box.focus();
       throw error;
     }
-    return { before };
+    return { before, submitted };
   }
 
   // The wrapper exists for the flag and for nothing else: for as long as an
@@ -630,8 +689,14 @@
     const expected = expectedUserId == null ? '' : String(expectedUserId);
 
     let before;
+    let submitted;
     try {
-      ({ before } = await prepareSend({ expected, message, beforePasteMs, afterPasteMs }));
+      ({ before, submitted } = await prepareSend({
+        expected,
+        message,
+        beforePasteMs,
+        afterPasteMs,
+      }));
     } catch (error) {
       // Send was never armed, so this is the certain half of the
       // contract. Marked here and only here: one site, guarding one region,
@@ -642,6 +707,7 @@
     // The extension stops acting here. The send control is focused and only a
     // physical Enter from the operator may activate it. Everything below is an
     // observation of whether Wellfound drained the queue.
+    await submitted;
 
     // The only honest confirmation: this candidate is gone from the slot AND
     // the bucket drained by one. Accepting removes them, so the next person
@@ -711,7 +777,7 @@
   // value setter and the same beforeinput/input notifications React consumes.
   // Character KeyboardEvents are deliberately absent: the reviewer binds A,
   // R and X at document level, and message text must never become shortcuts.
-  function typeMessage(box, message) {
+  async function typeMessage(box, message) {
     if (typeof box.focus === 'function') box.focus();
     const proto =
       typeof globalThis.HTMLTextAreaElement === 'function'
@@ -719,7 +785,9 @@
         : null;
     const setter = proto ? Object.getOwnPropertyDescriptor(proto, 'value')?.set : null;
     let entered = '';
-    for (const character of message) {
+    const characters = [...message];
+    for (let index = 0; index < characters.length; index += 1) {
+      const character = characters[index];
       if (typeof InputEvent === 'function') {
         const before = new InputEvent('beforeinput', {
           bubbles: true,
@@ -743,6 +811,9 @@
       } else if (typeof Event === 'function') {
         box.dispatchEvent(new Event('input', { bubbles: true }));
       }
+      // A yield between characters is what makes this actual visible typing
+      // rather than a synchronous series of mutations painted as one paste.
+      if (index < characters.length - 1) await pause(TYPING_INTERVAL_MS);
     }
     if (box.value !== message) throw new Error('The message did not reach the composer');
   }
@@ -857,6 +928,7 @@
     // the flag is what the pause and the pre-send check read.
     STOP: async () => {
       stopped = true;
+      cancelArmedWait?.('Stopped before the operator submitted the message');
       return { stopped: true };
     },
     // Leaving, which is deliberately NOT part of the message above.
@@ -907,6 +979,7 @@
       // number somebody added up in a comment once.
       ACCEPT_WORST_CASE_MS,
       uniqueControl,
+      waitForUniqueControl,
       firstOfMany,
       // Both predicates, so a test can count what the driver counts rather than
       // reimplement it and agree with itself - and so the difference between
@@ -919,6 +992,7 @@
       pause,
       handlers,
       sent,
+      TYPING_INTERVAL_MS,
       // Exposed so a test can assert the panel's copy of it is the same string.
       // A silent divergence here turns "stopped, nothing was sent" back into
       // the alarm it exists to stop crying wolf with.

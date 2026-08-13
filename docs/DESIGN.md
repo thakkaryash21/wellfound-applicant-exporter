@@ -294,10 +294,11 @@ exactly:
   says so.
 
 Navigation and opening the composer remain clicks. Submission is operator
-confirmed: the driver makes two synthetic Tab attempts, explicitly focuses the
-one unique `Accept application & send message` control when those untrusted
-events do not move focus, and waits. It never synthesizes Enter and never clicks
-Send. The operator keeps focus on the Wellfound page and presses Enter once. A
+confirmed: the driver visibly types with a yield between characters, explicitly
+focuses the one unique `Accept application & send message` control, and waits.
+Synthetic Tab events are not browser focus traversal and are not presented as
+real Tab presses. It never synthesizes Enter and never clicks Send. The operator
+clicks the Wellfound page once, waits for Send focus, and presses Enter once. A
 capture-phase guard accepts only trusted Enter and rechecks the exact candidate
 id and completed message at that moment.
 
@@ -1185,9 +1186,9 @@ the screen fixes itself when the operator does the thing it asked for.
   read the completed text before arming. The driver enters text incrementally
   through input events without emitting character key events, so A, R and X in
   the message can never become reviewer shortcuts.
-- **Submission is physical Enter.** Two synthetic Tab pairs are observable but
-  do not perform browser traversal; the driver verifies and explicitly focuses
-  Send. The extension never emits Enter or clicks the submit control. It blocks
+- **Submission is physical Enter.** Synthetic Tab pairs do not perform browser
+  traversal; the driver verifies and explicitly focuses Send instead. The
+  extension never emits Enter or clicks the submit control. It blocks
   synthetic Enter and revalidates identity and message on trusted Enter.
 - **Default page size 10**, matching what the UI actually sends. The 20 ceiling
   is exposed as an opt-in "faster" toggle, with the panel stating that 20 is a

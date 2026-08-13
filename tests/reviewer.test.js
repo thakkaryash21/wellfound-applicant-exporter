@@ -217,10 +217,16 @@ function createPage(options = {}) {
     }
     const send = document.getElementById('send');
     if (send) {
+      if (options.sendUsableAfterMs) {
+        send.disabled = true;
+        setTimeout(() => {
+          send.disabled = false;
+        }, options.sendUsableAfterMs);
+      }
       send.focus = () => {
         if (options.sendCannotFocus) return;
         document.activeElement = send;
-        if (!options.manualEnter) send.click();
+        if (!options.manualEnter) pressPhysicalEnter();
       };
     }
     send?.addEventListener('click', () => {
@@ -233,6 +239,14 @@ function createPage(options = {}) {
       (options.onSendClick ?? confirmSend)(state);
       render();
     });
+  }
+
+  function pressPhysicalEnter() {
+    const focused = document.activeElement;
+    const event = new FakeKeyboardEvent('keydown', { key: 'Enter', isTrusted: true });
+    document.dispatchEvent(event);
+    if (!event.defaultPrevented && focused?.tagName === 'BUTTON') focused.click();
+    return event;
   }
 
   // The bucket is a queue. Accepting removes that person; the index stays.
@@ -263,11 +277,7 @@ function createPage(options = {}) {
     render,
     currentId,
     pressEnter() {
-      const focused = document.activeElement;
-      const event = new FakeKeyboardEvent('keydown', { key: 'Enter', isTrusted: true });
-      document.dispatchEvent(event);
-      if (!event.defaultPrevented && focused?.tagName === 'BUTTON') focused.click();
-      return event;
+      return pressPhysicalEnter();
     },
   };
 }
@@ -317,7 +327,7 @@ class FakeHTMLTextAreaElement {
   }
 }
 
-function load(page, { inputEvents = true } = {}) {
+function load(page, { inputEvents = true, typingIntervalMs = 0 } = {}) {
   const fakeWindow = createFakeWindow();
   const { exposed } = loadClassicScript('src/content/reviewer.js', {
     globals: {
@@ -327,6 +337,7 @@ function load(page, { inputEvents = true } = {}) {
       Event: FakeEvent,
       ...(inputEvents ? { InputEvent: FakeInputEvent } : {}),
       HTMLTextAreaElement: FakeHTMLTextAreaElement,
+      __WFX_TYPING_INTERVAL_MS__: typingIntervalMs,
     },
     expose: '__WFX_REVIEWER__',
   });
@@ -409,6 +420,26 @@ describe('reporting who is shown', () => {
 });
 
 describe('accepting', () => {
+  it('does not enter confirmation or resting while it is still waiting for physical Enter', async () => {
+    start({ manualEnter: true });
+    await driver.openReviewer();
+    let settled = false;
+    const pending = driver
+      .acceptCurrent({ expectedUserId: '70000001', message: MESSAGE })
+      .finally(() => {
+        settled = true;
+      });
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(page.document.activeElement?.getAttribute('id')).toBe('send');
+    expect(page.state.sentText).toBe(null);
+    expect(settled).toBe(false);
+
+    page.pressEnter();
+    await vi.advanceTimersByTimeAsync(300);
+    await expect(pending).resolves.toMatchObject({ accepted: true });
+  });
+
   it('types the message, arms the send control, and waits for the operator to press Enter', async () => {
     start({ manualEnter: true });
     await driver.openReviewer();
@@ -563,13 +594,29 @@ describe('saying whether anything was sent', () => {
 const RISKY_MESSAGE = 'Hey Amara,\n\nRegarding your excellent application - warm regards!';
 
 describe('entering the message', () => {
+  it('visibly yields between characters instead of completing in one task', async () => {
+    start({ manualEnter: true }, { typingIntervalMs: 20 });
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: 'Hello' });
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(page.state.inputValues).toEqual(['H']);
+    await vi.advanceTimersByTimeAsync(20);
+    expect(page.state.inputValues.length).toBeGreaterThan(1);
+
+    await vi.runAllTimersAsync();
+    page.pressEnter();
+    await vi.advanceTimersByTimeAsync(300);
+    await expect(pending).resolves.toMatchObject({ accepted: true });
+  });
+
   it('dispatches no character key event, whatever the message contains', async () => {
     start();
     await driver.openReviewer();
     await driver.acceptCurrent({ expectedUserId: '70000001', message: RISKY_MESSAGE });
     // Only the two Tab attempts used to arm the operator's physical Enter.
     // Message characters never become shortcut KeyboardEvents.
-    expect(page.state.keys).toEqual(['Tab', 'Tab', 'Tab', 'Tab']);
+    expect(page.state.keys.filter((key) => key === 'Tab')).toEqual(['Tab', 'Tab', 'Tab', 'Tab']);
     expect(page.state.keys).not.toContain('a');
     expect(page.state.keys).not.toContain('r');
     expect(page.state.keys).not.toContain('x');
@@ -589,6 +636,16 @@ describe('entering the message', () => {
     // The value went in through HTMLTextAreaElement's own setter, which is the
     // step that leaves React holding the message rather than just the DOM node.
     expect(page.state.viaPrototypeSetter).toBe(true);
+  });
+
+  it('waits for the unique Send control to become usable after a reload render', async () => {
+    start({ sendUsableAfterMs: 200 });
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
+    await vi.advanceTimersByTimeAsync(199);
+    expect(page.state.sentText).toBe(null);
+    await vi.advanceTimersByTimeAsync(500);
+    await expect(pending).resolves.toMatchObject({ accepted: true });
   });
 
   it('still lands the value where the browser has no InputEvent constructor', async () => {
@@ -767,9 +824,8 @@ describe('the identity interlock', () => {
     page.render();
     page.pressEnter();
     expect(page.state.sentText).toBe(null);
-
-    await vi.advanceTimersByTimeAsync(60_000);
-    await expect(pending).resolves.toMatchObject({ pending: true, accepted: false });
+    await driver.handlers.STOP();
+    await expect(pending).rejects.toThrow(/nothing was sent/);
   });
 
   it('fails closed when identity becomes unreadable at physical Enter', async () => {
@@ -782,9 +838,8 @@ describe('the identity interlock', () => {
     const enter = page.pressEnter();
     expect(enter.defaultPrevented).toBe(true);
     expect(page.state.sentText).toBe(null);
-
-    await vi.advanceTimersByTimeAsync(60_000);
-    await expect(pending).resolves.toMatchObject({ pending: true, accepted: false });
+    await driver.handlers.STOP();
+    await expect(pending).rejects.toThrow(/nothing was sent/);
   });
 });
 

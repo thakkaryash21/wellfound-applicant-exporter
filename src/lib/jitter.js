@@ -10,12 +10,10 @@ export const PACING = {
   // rest of the pacing rather than in the pass, so there is one place to read
   // what this extension's timing looks like.
   reloadEvery: [5, 7],
-  // The two pauses either side of putting the message into the composer. Not a
-  // typing simulation: nobody types the same 400 characters six hundred times,
-  // so streaming it a character at a time would be a different tell rather than
-  // a smaller one. What a person actually does with boilerplate is paste it and
-  // glance over it, so that is what is paced - a beat while the composer opens
-  // and the wording is gathered, and a beat to read it back before sending.
+  // The two pauses either side of visibly typing the message into the composer:
+  // a beat while it opens and the wording is gathered, and a beat to read the
+  // completed text before the operator sends it. The per-character interval is
+  // owned by reviewer.js because that classic content script cannot import.
   // They draw from the same log-normal `sample` as everything else here; a
   // second randomness model would be its own signature.
   beforePasteMs: [1500, 5000],

@@ -113,6 +113,14 @@ describe('the bridge', () => {
     expect(sent.read()).toEqual({ ok: false, error: 'Page did not respond in time' });
   });
 
+  it('does not time out an accept while the operator is still waiting to press Enter', async () => {
+    const bridge = load();
+    const sent = bridge.send({ type: 'CX_ACCEPT_CANDIDATE', payload: {} });
+    await vi.advanceTimersByTimeAsync(45_000);
+    expect(sent.read()).toBe(undefined);
+    expect(bridge.budget.ACCEPT_TIMEOUT_MS).toBe(10 * 60 * 1000);
+  });
+
   it('drops the timeout the moment the page answers', async () => {
     const bridge = load();
     bridge.send({ type: 'CX_LIST_JOBS' });
