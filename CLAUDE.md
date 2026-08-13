@@ -119,15 +119,32 @@ Treat them as measurements, and re-measure rather than infer if you doubt them.
 
 ### Operational limit: accepts are gated by Turnstile
 
-Accept sends pass through Cloudflare Turnstile, and observed accept latency
-degrades sharply as a session accumulates volume: a few seconds early on, then
-tens of seconds, on the same role in the same session. That is why the feature is
-reliable at small volume and unreliable at large, and it caps what one session
-can do. The reload cadence and the settle window exist because of it.
+Accept sends pass through Cloudflare Turnstile. Directly observed: the challenge
+script loads at the moment of a send, `window.turnstile` is present afterwards,
+and no visible challenge or iframe appears - it runs invisibly. A send performed
+by hand completes immediately. Automated sends slow sharply as a session
+accumulates volume, and some never complete at all, leaving that person in the
+review queue indefinitely.
 
-Budget accordingly, prefer small runs, and read a timeout as "the page slowed
-down" rather than as a bug to chase. Do not write anything about circumventing
-it, and do not treat it as a problem to solve.
+That boundary is a design fact, not a backlog item: the feature is reliable at
+small volume and unreliable at large.
+
+**Read the full investigation in `docs/DESIGN.md` before touching any timeout in
+the accept path.** It records nine live runs, the measurements that ruled out
+every other cause, and the six bounds that were moved before anyone looked at
+the network. Do not repeat that path.
+
+The one thing to carry even if you read nothing else: **an operation that is
+bimodal - fast, or never - and whose failure rate rises with how many times you
+have performed it in a session is a gate, not a slow call.** No timeout fixes a
+decision about you. Check the network for challenge scripts first.
+
+Note the reload cadence and settle window predate this finding; they were built
+in response to the slowdowns, before anyone knew what caused them. Treat their
+constants as historical rather than as tuned against Turnstile.
+
+Do not write anything about circumventing it and do not treat it as a problem
+awaiting a solution.
 
 ## Traps this repo has actually hit
 
