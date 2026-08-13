@@ -271,7 +271,7 @@ exactly:
   rather than name-based. There is no fallback to the displayed name anywhere in
   the file; a modal whose id cannot be read, or that carries more than one,
   stops the run.
-- The id is re-read from the DOM immediately before the send click and after
+- The id is re-read from the DOM immediately before Send is armed and after
   every pause, because the reviewer is positional — it shows whoever sits at the
   current index, and a blind accept messages whoever is on screen.
 - Selectors are anchored and counted. Wellfound's page carries two elements
@@ -293,15 +293,16 @@ exactly:
   and closing the modal are reported separately, so a teardown that half worked
   says so.
 
-**Every interaction is a click.** Synthetic `keydown`/`keyup` events do nothing:
-dispatching `ArrowRight` leaves the reviewer on the same candidate with the same
-counter, while clicking `Next applicant` advances it. The site advertises its own
-keyboard shortcuts, but a scripted event is not a trusted one and its handlers
-ignore it. This is convenient rather than limiting — it means the driver never
-goes near the reject keys even in principle.
+Navigation and opening the composer remain clicks. Submission is operator
+confirmed: the driver makes two synthetic Tab attempts, explicitly focuses the
+one unique `Accept application & send message` control when those untrusted
+events do not move focus, and waits. It never synthesizes Enter and never clicks
+Send. The operator keeps focus on the Wellfound page and presses Enter once. A
+capture-phase guard accepts only trusted Enter and rechecks the exact candidate
+id and completed message at that moment.
 
 Filling the composer uses `HTMLTextAreaElement.prototype`'s own `value` setter
-followed by `input` and `change` events, because assigning `element.value`
+one character at a time, with `beforeinput` and `input`, because assigning `element.value`
 directly leaves React's state empty. That was the dangerous unknown on this
 path: had React ignored the synthetic input, the box would have *displayed* the
 message while state stayed empty, and a run would have sent hundreds of empty
@@ -618,8 +619,9 @@ one minutes after the click.
 
 **The ledger therefore holds a question as well as answers.** `accepted` means
 "a message reached this person and must never be sent again" — a claim, and one
-that may only be made when something vouched for it. `provisional` means "a send
-was clicked and nobody knows". They are separate maps and four separate verbs,
+that may only be made when something vouched for it. `provisional` means "Send
+was armed and nobody knows whether the operator used it". They are separate
+maps and four separate verbs,
 not one map with a flag, because collapsing them was a real bug with a real
 cost: of two sends the page never confirmed, one had landed and one had not, and
 the pass wrote both into `accepted`. The person who was never messaged was
@@ -636,7 +638,7 @@ it is the one the design refuses. The trade is stated plainly:
 `confirmProvisional` is the only route from the question to a permanent accept,
 and it moves the entry in a single write so the person is never briefly in both
 maps or briefly in neither: the whole value of the entry is that it exists
-continuously from the click until the answer. It carries the original click's
+continuously from arming until the answer. It carries the original arming
 timestamp across rather than restamping, because the question the CSV column
 asks is when the message went out, not when we found out.
 
@@ -711,7 +713,7 @@ survives the message is not sent. The check runs on an intermediate form where
 token slots have been replaced by markers but candidate values have not yet been
 dropped in, so a candidate whose own name happens to read like a token cannot be
 re-substituted into. Two guards, one at compose time and one in the driver
-immediately before the click, because the second is the last point at which a
+immediately before Send is armed, because the second is the last point at which a
 literal bracket can be stopped from reaching a stranger's inbox.
 
 ### Ledger
@@ -727,8 +729,8 @@ recorded early: an accept the ledger does not know about gets sent twice. The
 write is idempotent on its timestamp, so a repeat keeps the original moment.
 
 That ordering is structural, not a convention about where a call site sits. The
-pass names the person it is sending to before the click and clears the name only
-once they are durably recorded, and a reload requested inside that window
+pass writes the provisional question before Send can receive focus and clears
+its unresolved interlock only once the outcome is durably recorded. A reload requested inside that window
 throws. Moving the ledger write below the in-memory advance is the same defect by
 another road.
 
@@ -1179,17 +1181,14 @@ the screen fixes itself when the operator does the thing it asked for.
   reuses this model and deliberately the same constants: reading a profile
   before deciding is what a person does at that screen anyway, so the rhythm
   needs no new numbers.
-- **Two pauses around the message**, one while the composer opens and the
-  wording is gathered, one to read it back before sending. Drawn from the same
-  log-normal sampler as everything else, because a second randomness model would
-  be its own signature. They are not a typing simulation: nobody types the same
-  400 characters six hundred times, so streaming it a character at a time would
-  be a different tell rather than a smaller one. What a person does with
-  boilerplate is paste it and glance over it, so that is what is paced. The
-  driver clamps both to the upper bounds its own timeout budget was derived from.
-- **Every reviewer interaction is a click**, never a key. Not a policy — scripted
-  key events are ignored by the page outright — but it has the effect of a
-  policy, since it puts the reject keys out of reach in principle.
+- **Two pauses around the message**, one while the composer opens and one to
+  read the completed text before arming. The driver enters text incrementally
+  through input events without emitting character key events, so A, R and X in
+  the message can never become reviewer shortcuts.
+- **Submission is physical Enter.** Two synthetic Tab pairs are observable but
+  do not perform browser traversal; the driver verifies and explicitly focuses
+  Send. The extension never emits Enter or clicks the submit control. It blocks
+  synthetic Enter and revalidates identity and message on trusted Enter.
 - **Default page size 10**, matching what the UI actually sends. The 20 ceiling
   is exposed as an opt-in "faster" toggle, with the panel stating that 20 is a
   value the real UI never sends.
@@ -1314,6 +1313,10 @@ than as tuned against a known cause.
 
 ### What was measured, ruling out the obvious causes
 
+These measurements predate the assisted physical-Enter path. They establish
+the behavior of the former automatic submit click; whether operator-confirmed
+submission changes the outcome must be measured live rather than inferred.
+
 On the 111-applicant role, live:
 
 - advancing the reviewer to the next candidate: **44-135 ms**
@@ -1414,7 +1417,7 @@ have been established by looking.
 | The composed message still holds a bracket token | Do not send. Mark the row failed with the reason, skip that candidate, carry on: the fault is in the wording, not in the page. |
 | The reviewer is showing somebody other than the expected candidate, or their id cannot be read | Stop the pass. No name-based fallback and no guess. Nothing was sent. |
 | The composer does not open, or a control does not resolve to exactly one match | Stop the pass and say so. This is a **certain** failure: nothing was clicked and nothing went out, and the panel says exactly that. |
-| A send that never confirmed | Watch the DOM, then ask the review queue, then sweep again at the end of the role. Gone from the queue books the accept and the pass carries on; still queued releases them, so they stay eligible; no verdict leaves a provisional entry for the next run and raises the one alert in this panel that asks the operator to go and check Wellfound. Never retried, because a retry is a second message to a real person. |
+| A send that never confirmed | Watch the DOM, then ask the review queue, then sweep again at the end of the role. Gone from the queue books the accept and the pass carries on; still queued releases them only after teardown proves the armed composer was cancelled or closed, so they stay eligible; otherwise the provisional entry remains. No verdict also leaves a provisional entry for the next run and raises the one alert in this panel that asks the operator to go and check Wellfound. Never retried, because a retry is a second message to a real person. |
 | Three deferrals in a row, or a queue check with no verdict | End the pass `unclear`, and end the whole run rather than starting the next role in the same degraded session. The page has stopped vouching for anything, and the next role is the one that sends messages. |
 | The ledger write fails after a confirmed send | Its own outcome, `unrecorded`. Stop the run, name the person, write the CSV row anyway, and tell the operator to check that role before running it again. Neither "nothing was sent" nor "the click is in doubt". |
 | The reviewer will not close at the end of a pass | Reported, never thrown. A failure to tidy up must not become the reported outcome of a run that otherwise worked, and cancelling the composer and closing the modal are reported separately. |

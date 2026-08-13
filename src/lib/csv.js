@@ -57,7 +57,7 @@ export const ACCEPT_STATUS = {
   // NEEDS_REVIEW and can never be fetched again. The run declines, and the
   // cell says exactly why rather than sitting blank.
   NO_RESUME: 'refused: no resume on file, accepting would lose them for good',
-  // The send was clicked and nothing has vouched for it - not the page, not the
+  // Send was armed and nothing has vouched for it - not the page, not the
   // queue, not the sweep at the end of the role. It says neither `accepted`,
   // which would claim a message arrived, nor `failed`, which would claim none
   // did. Both claims have been made wrongly about this cell before.

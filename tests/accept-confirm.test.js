@@ -178,7 +178,8 @@ describe('the whole screen', () => {
     const html = renderConfirm(model());
     expect(html.indexOf(CONFIRM_IDS.back)).toBeLessThan(html.indexOf(CONFIRM_IDS.send));
     expect(html).toContain('class="primary" id="confirm-back"');
-    expect(html).toContain('Accept and send 45 messages');
+    expect(html).toContain('Start assisted accept for 45');
+    expect(html).toMatch(/you press\s+Enter once for each candidate/);
     expect(html).toContain('Go back');
   });
 });

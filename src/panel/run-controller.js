@@ -194,6 +194,8 @@ export function createController({
     // the live region: it is per-look noise, and the trace wants the fact.
     else if (event.type === 'accept_pending')
       trace.record('accept_pending', { jobId, userId: event.userId });
+    else if (event.type === 'accept_awaiting_enter')
+      trace.record('accept_awaiting_enter', { jobId, userId: event.userId });
     // The pass asking again, after the role is done, about every send it could
     // not settle on the spot. Recorded so a later timing question can see that
     // the sweep ran and how much it had to do - a run whose deferrals all
@@ -280,7 +282,7 @@ export function createController({
 
   // Is this person still in the review queue?
   //
-  // Asked by the accept pass, and only when a send was clicked and the page
+  // Asked by the accept pass, and only when Send was armed and the page
   // never confirmed it. The extension is not out of options at that moment: it
   // already reads an authoritative list, and an accepted candidate leaves it. So
   // rather than reporting a shrug it establishes the fact.
@@ -331,7 +333,7 @@ export function createController({
 
   // Is this person still in the review queue?
   //
-  // Asked by the accept pass, and only when a send was clicked and the page
+  // Asked by the accept pass, and only when Send was armed and the page
   // never confirmed it. The extension is not out of options at that moment: it
   // already reads an authoritative list, and an accepted candidate leaves it. So
   // rather than reporting a shrug it establishes the fact.
@@ -561,7 +563,7 @@ export function createController({
         acceptRefused: 0,
         acceptFailed: 0,
         acceptAlready: 0,
-        // People whose send was clicked and whose outcome nothing could settle,
+        // People whose Send was armed and whose outcome nothing could settle,
         // even after the accept pass asked again at the end of the role. Kept
         // apart from `accepted` and from `acceptFailed` because it is neither:
         // saying either about these people is the mistake this counter exists

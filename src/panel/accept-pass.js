@@ -35,7 +35,7 @@ const CAPTURED = new Set([RESUME_STATUS.DOWNLOADED, RESUME_STATUS.ALREADY]);
 const POINTER = RESUME_STATUS.ANOTHER_ROW;
 
 // The panel's half of the driver's one classification. src/content/reviewer.js
-// appends this phrase to every refusal it raises BEFORE the send is clicked,
+// appends this phrase to every refusal it raises BEFORE Send is armed,
 // and to nothing else; a test asserts the driver's own copy of it is this exact
 // string. The two live apart because the driver is a MAIN-world classic script
 // with no imports, the same reason the message types are duplicated into it.
@@ -73,14 +73,14 @@ export function sendOutcome(reason) {
   return String(reason).includes(NOTHING_SENT) ? 'error' : 'unclear';
 }
 
-// A send that was clicked, that the page did not confirm, and whose outcome
+// A send that was armed, that the page did not confirm, and whose outcome
 // this pass has NOT finished asking about. Its own word, deliberately, because
 // it is not the thing `unclear` names.
 //
-//   deferred - the click happened, nobody can vouch for it YET, and the pass is
+//   deferred - Send was armed, nobody can vouch for its use YET, and the pass is
 //              still going to ask. The person is booked out of the queue and
 //              into the ledger, so nothing will ever message them again.
-//   unclear  - the click happened, nobody can vouch for it, and the asking is
+//   unclear  - Send was armed, nobody can vouch for its use, and the asking is
 //              over. This is the word that sends the operator to Wellfound.
 //
 // Every deferral now ends as one of four things, and the fourth is the one this
@@ -101,7 +101,7 @@ export function sendOutcome(reason) {
 //
 // Four words, four different things, and none of them a synonym for another:
 //
-//   deferred     what the PASS did - clicked, cannot vouch yet, still asking
+//   deferred     what the PASS did - armed, cannot vouch yet, still asking
 //   provisional  what the LEDGER holds while that is true - a question, not a
 //                claim, and the thing a later run can resolve
 //   unresolved   what the CSV says about a deferral nothing ever settled
@@ -119,17 +119,17 @@ export const DEFERRED = 'deferred';
 //
 // So presence in the queue is no longer offered as evidence in either
 // direction. What the sentence says instead is what is actually true and what
-// the operator can actually act on: nothing here will ever message them again,
+// the operator can actually act on: nothing here will ever prepare them again,
 // and Wellfound is the only place that can say whether they already were.
 //
 // The driver's own sentence is kept in front, verbatim: it is the account of
-// what happened at the click, and this only adds what was learnt afterwards.
+// what happened after arming, and this only adds what was learnt afterwards.
 // Nothing appended may ever read as the driver's certainty phrase - `unclear`
 // is decided from the ORIGINAL reason, and a test asserts these sentences do
 // not disturb that.
 export function unresolvedReason(reason, { verdict, looks = 0, waitedMs = 0 } = {}) {
   const kept =
-    'They are recorded as unresolved, so nothing will message them again while that ' +
+    'They are recorded as unresolved, so nothing will prepare them again while that ' +
     'stands. Only Wellfound can say whether they already were.';
   if (verdict === 'queued') {
     const seconds = Math.round(waitedMs / 1000);
@@ -166,7 +166,7 @@ export function guardReload(unresolvedSend) {
 
 // What the operator is told when a message demonstrably went out and the ledger
 // refused to remember it. It is neither `error` - which promises nothing went
-// out - nor `unclear`, which is about the click. The send is a fact; the record
+// out - nor `unclear`, which is about the armed send. The send is a fact; the record
 // of it is what failed.
 //
 // The ledger is the single thing standing between this person and a second
@@ -195,19 +195,10 @@ export function unrecordedReason(userId, reason) {
 // reader who does not know that cannot judge it.
 export function releasedReason(userId, looks = 0) {
   return (
-    `The accept for ${userId} was clicked and the page never confirmed it. The review queue ` +
+    `Send was armed for ${userId} and the page never confirmed an accept. The review queue ` +
     `still showed them after ${looks} checks across the rest of the role, and a send that ` +
     'lands leaves that queue within minutes - so nothing went out to them. Nothing was ' +
     'retried. They were not messaged, and a later run may try them again.'
-  );
-}
-
-export function unrecordedDeferralReason(userId, reason) {
-  return (
-    `The accept for ${userId} was clicked, the page never confirmed it, and writing it to ` +
-    `the ledger failed: ${reason} Nothing was retried and this run stopped there. ` +
-    'Before running this role again, check that person in Wellfound: nothing here ' +
-    'remembers the attempt, so another run could message them.'
   );
 }
 
@@ -582,7 +573,7 @@ export async function resolveHeldOver({
 // that cannot ask the API gets exactly the behaviour this pass had before it
 // existed. It answers 'gone', 'queued' or 'unknown' for one userId, and it is
 // never given the chance to answer anything about a send that was refused
-// before the click.
+// before Send is armed.
 //
 // `reloadPage` is the fourth and is optional for the same reason: it reloads
 // the working tab and does not return until the page can answer for this job
@@ -596,16 +587,20 @@ export async function runAcceptPass(deps, options) {
   // being made with the same call:
   //
   //   recordAccepted     a message reached this person. Permanent.
-  //   recordProvisional  a send was clicked and nobody knows. A question.
+  //   recordProvisional  Send was armed and nobody knows whether it was used.
   //   confirmAccepted    the question is answered yes. Promotes to permanent.
   //   releaseAccepted    the question is answered no. Removes the question and
   //                      writes nothing, so the person is eligible again.
   //
-  // The last three default to doing nothing, which gives a caller that supplies
-  // none of them the shape this module had before: it can defer, it never
-  // claims, and it never releases.
-  const recordProvisional = deps.recordProvisional ?? recordAccepted;
-  const confirmAccepted = deps.confirmAccepted ?? (async () => {});
+  // Confirmation may use the original permanent writer and release/list may be
+  // omitted. Provisional recording is deliberately mandatory: arming Send
+  // without first persisting the uncertainty would make a reload unsafe.
+  const recordProvisional =
+    deps.recordProvisional ??
+    (async () => {
+      throw new Error('No provisional ledger writer is available');
+    });
+  const confirmAccepted = deps.confirmAccepted ?? recordAccepted;
   const releaseAccepted = deps.releaseAccepted ?? (async () => {});
   const listProvisional = deps.listProvisional ?? (async () => []);
   const rand = deps.rand ?? Math.random;
@@ -665,7 +660,7 @@ export async function runAcceptPass(deps, options) {
     alreadyAccepted: plan.alreadyAccepted,
     skipped: 0,
     failed: 0,
-    // People whose send was clicked and is still unresolved. Counted apart from
+    // People whose Send was armed and is still unresolved. Counted apart from
     // `failed`, which promises nothing went out, and apart from `accepted`,
     // which promises something did. It falls back to zero when a deferral is
     // settled later in the pass, and starts at whatever a previous run left
@@ -818,7 +813,7 @@ export async function runAcceptPass(deps, options) {
   // Nothing here can send anything. It reads, and it upgrades a deferral to the
   // accept it always was. The ledger entry was written when the send was
   // deferred, so this writes nothing and nobody can be messaged twice by it.
-  const settleDeferred = async () => {
+  const settleDeferred = async ({ armedComposerDisarmed = true } = {}) => {
     const open = () => deferred.filter((entry) => !entry.resolved);
     if (!checkQueue || open().length === 0) return;
     emit({ type: 'accept_settling', jobId, count: open().length });
@@ -879,7 +874,7 @@ export async function runAcceptPass(deps, options) {
     const released = [];
     const held = [];
     for (const entry of open()) {
-      if (entry.verdict === 'queued' && !cutShort) released.push(entry);
+      if (entry.verdict === 'queued' && !cutShort && armedComposerDisarmed) released.push(entry);
       else held.push(entry);
     }
 
@@ -927,12 +922,16 @@ export async function runAcceptPass(deps, options) {
     // failure is swallowed: this pass may already be carrying the error the
     // operator needs to read, and a teardown that threw over it would replace a
     // message about a candidate with a message about a button.
+    let armedComposerDisarmed = !touchedReviewer;
     if (touchedReviewer) {
       try {
-        await review({ type: CX_CLOSE_REVIEWER });
+        const closed = await review({ type: CX_CLOSE_REVIEWER });
+        armedComposerDisarmed = Boolean(closed?.cancelled || closed?.closed);
       } catch {
-        // Nothing to say and nowhere useful to say it. A tab that has gone away
-        // has no composer left open on it either.
+        // A missing answer does not prove the armed composer disappeared. Keep
+        // the provisional question so a late physical Enter cannot be followed
+        // by an automatic retry on the next run.
+        armedComposerDisarmed = false;
       }
     }
     // After the page has been let go of and before anything is reported. The
@@ -940,7 +939,7 @@ export async function runAcceptPass(deps, options) {
     // pass can still do honestly once the reviewer is closed, and doing it here
     // means every exit gets it: a finished pass, an aborted one, and the walk
     // that threw.
-    await settleDeferred();
+    await settleDeferred({ armedComposerDisarmed });
     signal?.removeEventListener('abort', forwardStop);
     emit({
       type: 'accept_done',
@@ -1084,7 +1083,7 @@ export async function runAcceptPass(deps, options) {
     let recorded = true;
     let reason = null;
     try {
-      await recordAccepted(jobId, userId);
+      await confirmAccepted(jobId, userId);
     } catch (ledgerError) {
       recorded = false;
       reason = String(ledgerError.message || ledgerError);
@@ -1132,29 +1131,14 @@ export async function runAcceptPass(deps, options) {
   // able to reach. That is the safe direction and it is reversible by hand;
   // being wrong the other way is not reversible at all.
   const bookDeferred = async (userId, told) => {
-    let recorded = true;
-    let reason = null;
-    try {
-      await recordProvisional(jobId, userId);
-    } catch (ledgerError) {
-      recorded = false;
-      reason = String(ledgerError.message || ledgerError);
-    }
     unresolvedSend = null;
     remaining.delete(userId);
     mark(userId, acceptUnresolved(told));
     totals.unresolved += 1;
     deferralsInARow += 1;
     deferred.push({ userId, told, looks: 0, resolved: false });
-    emitCandidate(userId, DEFERRED, { error: told, ...(recorded ? {} : { recorded: false }) });
-    if (recorded) return true;
-    // The ledger is the only thing standing between this person and a second
-    // message, and here it is also the only thing that would have remembered
-    // the attempt at all. Nothing further is sent.
-    stoppedBecause = 'unrecorded';
-    error = unrecordedDeferralReason(userId, reason);
-    emit({ type: 'accept_unrecorded', jobId, userId, error });
-    return false;
+    emitCandidate(userId, DEFERRED, { error: told });
+    return true;
   };
 
   try {
@@ -1230,11 +1214,24 @@ export async function runAcceptPass(deps, options) {
         continue;
       }
 
-      // The interlock closes HERE, before the click, and opens again only once
-      // this person is in the ledger. Everything in between is the window where
-      // a real message may exist that nothing durable knows about, and no
-      // reload may happen inside it.
+      // The interlock closes before the page is armed. Unlike the old automatic
+      // click, the operator may press Enter as soon as focus reaches Send, so
+      // the durable question must exist before this message crosses to the
+      // page. If this write fails, the composer is never opened.
       unresolvedSend = userId;
+      try {
+        await recordProvisional(jobId, userId);
+      } catch (ledgerError) {
+        const reason = String(ledgerError.message || ledgerError);
+        unresolvedSend = null;
+        mark(userId, acceptFailure(`Could not record the pending accept: ${reason}`));
+        totals.failed += 1;
+        stoppedBecause = 'error';
+        error = `Could not record the pending accept for ${userId}: ${reason}; nothing was sent`;
+        emitCandidate(userId, 'failed', { error });
+        break;
+      }
+      emit({ type: 'accept_awaiting_enter', jobId, userId });
       const sendStartedAt = now();
       try {
         const sent = await review({
@@ -1259,7 +1256,7 @@ export async function runAcceptPass(deps, options) {
         //
         // Only when the watching runs out too does this become the failure the
         // handler below is for, and it is raised in the DRIVER'S OWN words: the
-        // sentence describes what happened at the click, which is the driver's
+        // sentence describes what happened after arming, which is the driver's
         // to tell, and it carries no certainty phrase - so it reads as unclear,
         // exactly as the same outcome always has.
         if (sent?.pending) {
@@ -1269,11 +1266,11 @@ export async function runAcceptPass(deps, options) {
       } catch (sendError) {
         // Nothing is ever retried here. The whole of what follows is about
         // LEARNING what happened, never about trying again: the send has either
-        // gone out or it has not, and a second click would be a second message
+        // gone out or it has not, and preparing it again could create a second message
         // to a real person.
         //
         // What differs is what the operator is told. The driver knows whether
-        // it refused before clicking and says so; the panel used to flatten
+        // it refused before arming and says so; the panel used to flatten
         // both cases into the alarming one.
         const reason = String(sendError.message || sendError);
 
@@ -1285,6 +1282,20 @@ export async function runAcceptPass(deps, options) {
         // followed by a skip: whatever made the driver refuse is likely to
         // refuse for the next person too.
         if (sendOutcome(reason) === 'error') {
+          try {
+            await releaseAccepted(jobId, userId);
+          } catch (ledgerError) {
+            unresolvedSend = null;
+            stoppedBecause = 'error';
+            error =
+              `Nothing was sent to ${userId}, but the pending ledger entry could not be ` +
+              `released: ${String(ledgerError.message || ledgerError)}`;
+            mark(userId, acceptFailure(error));
+            totals.failed += 1;
+            emitCandidate(userId, 'failed', { error });
+            break;
+          }
+          unresolvedSend = null;
           mark(userId, acceptFailure(reason));
           totals.failed += 1;
           emitCandidate(userId, 'failed', { error: reason });

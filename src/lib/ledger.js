@@ -29,7 +29,8 @@ function emptyRecord(jobId) {
     // means "a message reached this person and must never be sent again". That
     // is a claim, and it may only be made when something vouched for it.
     //
-    // This map makes no claim. It means "a send was clicked and nobody knows",
+    // This map makes no claim. It means "Send was armed and nobody knows
+    // whether it was used",
     // and it is the state the sweep RESOLVES: out of here into `accepted` when
     // the queue says they are gone, or out of here and nowhere when the queue
     // still shows them. Anything left in it is a question, not an answer, and a
@@ -238,7 +239,7 @@ export function createLedger(storage) {
         accepted: userId in accepted ? accepted : { ...accepted, [userId]: at ?? localDateTimeText() },
       });
     },
-    // The queue still shows them long after the click, so the send did not
+    // The queue still shows them after the old composer was closed, so the send did not
     // happen. The entry goes, and NOTHING is written in its place: this person
     // was never messaged, so they are eligible again exactly as they were
     // before the attempt.

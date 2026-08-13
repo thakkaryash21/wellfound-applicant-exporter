@@ -172,6 +172,9 @@ export function renderConfirm(model) {
       <h2 class="post-run-title" id="${CONFIRM_IDS.title}">${escapeHtml(headline(model))}</h2>
       <div class="confirm-body">
         <p>Each one gets your message under your Wellfound account. It cannot be unsent.</p>
+        <p>This is an assisted pass. After it starts, click the Wellfound page once to keep
+           keyboard focus there. The extension types each message and focuses Send; you press
+           Enter once for each candidate.</p>
         <p>Accepting also removes them from the review queue for good. After this run
            this extension can never fetch or re-download an accepted applicant, so the
            CSV and the resume on disk are the only copies left.</p>
@@ -192,7 +195,7 @@ export function renderConfirm(model) {
       <div class="post-run-actions">
         <button class="primary" id="${CONFIRM_IDS.back}" type="button">Go back</button>
         <button class="secondary danger-action" id="${CONFIRM_IDS.send}" type="button">
-          ${escapeHtml(`Accept and send ${model.total} ${model.total === 1 ? 'message' : 'messages'}`)}
+          ${escapeHtml(`Start assisted accept for ${model.total}`)}
         </button>
       </div>
     </section>`;

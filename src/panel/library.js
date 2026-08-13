@@ -81,7 +81,7 @@ function states(job) {
       and can no longer be fetched</span>`);
   }
   // Deliberately not the accepted wording, and deliberately not "missing". A
-  // provisional entry means the send was clicked and nobody could vouch for it,
+  // provisional entry means Send was armed and nobody could vouch for its use,
   // so claiming either answer here would be a guess. The next run asks the
   // review queue and settles it, which is also the only thing that can, so this
   // line says who is waiting and leaves no button to press.

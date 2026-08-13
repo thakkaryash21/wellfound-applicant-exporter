@@ -52,7 +52,7 @@ export function createLedgerService(storage) {
     recordAccepted: (jobId, userId) => ledger.markAccepted(jobId, userId),
 
     // The three halves of a deferral, kept as three verbs because they are three
-    // different claims. `recordProvisional` says a send was clicked and nobody
+    // different claims. `recordProvisional` says Send was armed and nobody
     // knows; `confirmAccepted` says the queue has since vouched for it, and is
     // the only route from a question to a permanent accept; `releaseAccepted`
     // says the queue still shows them long afterwards, so nothing went out and

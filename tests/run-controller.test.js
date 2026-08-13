@@ -1617,7 +1617,7 @@ describe('the accept pass', () => {
         expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(['7700001', '7700002']);
         expect(Object.keys(ledgerRecord().provisional ?? {})).toEqual([]);
         const csv = await objectUrls[0].text();
-        expect(csv).toContain('failed: The accept for 7700003 was clicked');
+        expect(csv).toContain('failed: Send was armed for 7700003');
         expect(csv).toContain('nothing went out to them');
         // And still exactly one click, whatever the bookkeeping decided.
         expect(sendsTo('7700003')).toBe(1);
@@ -1941,7 +1941,7 @@ describe('the accept pass', () => {
     // and the file that is now the only record of these people was written.
     expect(done.jobs[0].wroteCsv).toBe(true);
     const csv = await objectUrls[0].text();
-    expect(csv.match(/failed: The accept for \d+ was clicked/g)).toHaveLength(2);
+    expect(csv.match(/failed: Send was armed for \d+/g)).toHaveLength(2);
     // Nothing claimed about either of them, and no question left behind. Both
     // are still in the review queue, so the next run will simply try again.
     expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual([]);

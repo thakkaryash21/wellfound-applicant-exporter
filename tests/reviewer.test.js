@@ -42,8 +42,9 @@ function createPage(options = {}) {
     sentText: null,
     rejected: false,
     focused: false,
-    pasted: [],
+    beforeInputs: [],
     inputs: 0,
+    inputValues: [],
     order: [],
   };
 
@@ -190,8 +191,8 @@ function createPage(options = {}) {
       }
       render();
     });
-    // The composer, watched the way a page watches its own field: what got
-    // focus, what was pasted into it, and what it was told about afterwards.
+    // The composer, watched the way a page watches its own field: focus and
+    // each input notification.
     const box = document.getElementById('msg');
     if (box) {
       // A composer that silently keeps nothing, which is the one failure that
@@ -200,19 +201,29 @@ function createPage(options = {}) {
         Object.defineProperty(box, '_value', { get: () => '', set() {}, configurable: true });
       }
       box.focus = () => {
+        document.activeElement = box;
         state.focused = true;
         state.order.push('focus');
       };
-      box.addEventListener('paste', (event) => {
-        state.order.push('paste');
-        state.pasted.push(event.clipboardData?.getData('text/plain'));
+      box.addEventListener('beforeinput', (event) => {
+        state.order.push('beforeinput');
+        state.beforeInputs.push(event.data);
       });
       box.addEventListener('input', () => {
         state.order.push('input');
         state.inputs += 1;
+        state.inputValues.push(box.value);
       });
     }
-    document.getElementById('send')?.addEventListener('click', () => {
+    const send = document.getElementById('send');
+    if (send) {
+      send.focus = () => {
+        if (options.sendCannotFocus) return;
+        document.activeElement = send;
+        if (!options.manualEnter) send.click();
+      };
+    }
+    send?.addEventListener('click', () => {
       const field = document.querySelector('textarea');
       state.sentText = field.value;
       // Which route the value took, captured while the composer still exists:
@@ -245,13 +256,35 @@ function createPage(options = {}) {
   }
 
   render();
-  return { dom, document, state, render, currentId };
+  return {
+    dom,
+    document,
+    state,
+    render,
+    currentId,
+    pressEnter() {
+      const focused = document.activeElement;
+      const event = new FakeKeyboardEvent('keydown', { key: 'Enter', isTrusted: true });
+      document.dispatchEvent(event);
+      if (!event.defaultPrevented && focused?.tagName === 'BUTTON') focused.click();
+      return event;
+    },
+  };
 }
 
 class FakeKeyboardEvent {
   constructor(type, init) {
     this.type = type;
     this.key = init?.key;
+    this.isTrusted = init?.isTrusted ?? false;
+    this.defaultPrevented = false;
+    this.immediatePropagationStopped = false;
+    this.preventDefault = () => {
+      this.defaultPrevented = true;
+    };
+    this.stopImmediatePropagation = () => {
+      this.immediatePropagationStopped = true;
+    };
   }
 }
 
@@ -261,24 +294,11 @@ class FakeEvent {
   }
 }
 
-class FakeDataTransfer {
-  constructor() {
-    this.data = new Map();
-  }
-
-  setData(type, value) {
-    this.data.set(type, String(value));
-  }
-
-  getData(type) {
-    return this.data.get(type) ?? '';
-  }
-}
-
-class FakeClipboardEvent {
+class FakeInputEvent extends FakeEvent {
   constructor(type, init) {
-    this.type = type;
-    this.clipboardData = init?.clipboardData ?? null;
+    super(type);
+    this.data = init?.data ?? null;
+    this.inputType = init?.inputType ?? '';
   }
 }
 
@@ -297,9 +317,7 @@ class FakeHTMLTextAreaElement {
   }
 }
 
-// `clipboard: false` is the browser that has no ClipboardEvent or DataTransfer.
-// The paste is decoration; the value must land regardless.
-function load(page, { clipboard = true } = {}) {
+function load(page, { inputEvents = true } = {}) {
   const fakeWindow = createFakeWindow();
   const { exposed } = loadClassicScript('src/content/reviewer.js', {
     globals: {
@@ -307,8 +325,8 @@ function load(page, { clipboard = true } = {}) {
       document: page.document,
       KeyboardEvent: FakeKeyboardEvent,
       Event: FakeEvent,
+      ...(inputEvents ? { InputEvent: FakeInputEvent } : {}),
       HTMLTextAreaElement: FakeHTMLTextAreaElement,
-      ...(clipboard ? { ClipboardEvent: FakeClipboardEvent, DataTransfer: FakeDataTransfer } : {}),
     },
     expose: '__WFX_REVIEWER__',
   });
@@ -391,20 +409,28 @@ describe('reporting who is shown', () => {
 });
 
 describe('accepting', () => {
-  it('types the message, sends once, and confirms by the bucket draining', async () => {
-    start();
+  it('types the message, arms the send control, and waits for the operator to press Enter', async () => {
+    start({ manualEnter: true });
     await driver.openReviewer();
-    const result = await driver.acceptCurrent({
+    const pending = driver.acceptCurrent({
       expectedUserId: '70000001',
       message: MESSAGE,
     });
 
-    expect(page.state.sentText).toBe(MESSAGE);
-    expect(page.state.clicks).toEqual([
-      'View application',
-      'Accept',
-      'Accept application & send message',
-    ]);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(page.state.sentText).toBe(null);
+    expect(page.state.clicks).toEqual(['View application', 'Accept']);
+    expect(page.state.keys).toEqual(['Tab', 'Tab', 'Tab', 'Tab']);
+    expect(page.document.activeElement?.getAttribute('id')).toBe('send');
+
+    const syntheticEnter = new FakeKeyboardEvent('keydown', { key: 'Enter' });
+    page.document.dispatchEvent(syntheticEnter);
+    expect(syntheticEnter.defaultPrevented).toBe(true);
+    expect(page.state.sentText).toBe(null);
+
+    page.pressEnter();
+    await vi.advanceTimersByTimeAsync(300);
+    const result = await pending;
     // Confirming auto-advances: the next person is already at index 1 and the
     // denominator dropped. A caller that pressed Next after this would skip
     // somebody, so the driver reports the new position rather than moving.
@@ -413,7 +439,6 @@ describe('accepting', () => {
       accepted: true,
       next: { userId: '70000002', index: 1, total: 2 },
     });
-    expect(page.state.keys).toEqual([]);
   });
 
   it('refuses when the reviewer is showing somebody else', async () => {
@@ -430,13 +455,24 @@ describe('accepting', () => {
     await driver.openReviewer();
     await expect(driver.acceptCurrent({ message: MESSAGE })).rejects.toThrow(/expected candidate/i);
   });
+
+  it('refuses without submitting when the send control cannot take focus', async () => {
+    start({ sendCannotFocus: true });
+    await driver.openReviewer();
+    await expect(
+      driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE }),
+    ).rejects.toThrow(/Could not focus.*nothing was sent/);
+    expect(page.state.sentText).toBe(null);
+    expect(page.state.clicks).toEqual(['View application', 'Accept']);
+    expect(driver.sent.has('70000001')).toBe(false);
+  });
 });
 
 // --- the two classes of failure -----------------------------------------------
 
 // This driver knows something the panel cannot work out for itself: whether the
-// send was clicked. A refusal raised before that click is certain - nothing went
-// anywhere - and the panel says so plainly; the one failure raised after it is
+// Send control was armed. A refusal raised before arming is certain - nothing went
+// anywhere - and the panel says so plainly; a failure raised after it is
 // genuinely ambiguous and raises the alarm that sends the operator to Wellfound
 // to check on a stranger. Flattening the two trained the operator to discount
 // the alarm on the run where it was real.
@@ -510,7 +546,7 @@ describe('saying whether anything was sent', () => {
     // is unchanged, and it still carries no certainty phrase - so if the
     // watching runs out too, it still reads as unclear.
     expect(result).toMatchObject({ accepted: false, pending: true });
-    expect(result.reason).toMatch(/may or may not have been sent/);
+    expect(result.reason).toMatch(/operator may or may not have sent/);
     expect(result.reason).not.toContain(driver.NOTHING_SENT);
     // The denominator before the click, which is what the panel needs to go on
     // applying the same predicate this file just applied.
@@ -522,45 +558,46 @@ describe('saying whether anything was sent', () => {
 
 // Every letter the reviewer binds a shortcut to, at document level: `a` is
 // Accept, `r` is Reject, `x` is Quick Reject. The real message is full of all
-// three, which is the reason the entry is a paste and not a typing simulation.
+// three, which is why message characters are input events rather than keyboard
+// events.
 const RISKY_MESSAGE = 'Hey Amara,\n\nRegarding your excellent application - warm regards!';
 
 describe('entering the message', () => {
-  it('dispatches no key event of any kind, whatever the message contains', async () => {
+  it('dispatches no character key event, whatever the message contains', async () => {
     start();
     await driver.openReviewer();
     await driver.acceptCurrent({ expectedUserId: '70000001', message: RISKY_MESSAGE });
-    // Not "no key that rejects" - no key at all. Typing this message out would
-    // have pressed `a`, `r` and `x` dozens of times against a page that binds
-    // all three, and the only thing standing between that and a rejected
-    // candidate would be a measurement continuing to hold.
-    expect(page.state.keys).toEqual([]);
+    // Only the two Tab attempts used to arm the operator's physical Enter.
+    // Message characters never become shortcut KeyboardEvents.
+    expect(page.state.keys).toEqual(['Tab', 'Tab', 'Tab', 'Tab']);
+    expect(page.state.keys).not.toContain('a');
+    expect(page.state.keys).not.toContain('r');
+    expect(page.state.keys).not.toContain('x');
     expect(page.state.rejected).toBe(false);
     expect(page.state.sentText).toBe(RISKY_MESSAGE);
   });
 
-  it('focuses, pastes, sets the value through the prototype setter, then says input', async () => {
+  it('focuses, enters each character through the prototype setter, and announces each input', async () => {
     start();
     await driver.openReviewer();
     await driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
-    // The order a browser does a paste in. Focus first because a real paste
-    // needs it; input last because that is what React reads the value on.
-    expect(page.state.order).toEqual(['focus', 'paste', 'input']);
-    expect(page.state.pasted).toEqual([MESSAGE]);
-    expect(page.state.inputs).toBe(1);
+    expect(page.state.order[0]).toBe('focus');
+    expect(page.state.beforeInputs.join('')).toBe(MESSAGE);
+    expect(page.state.inputs).toBe([...MESSAGE].length);
+    expect(page.state.inputValues[0]).toBe('H');
+    expect(page.state.inputValues.at(-1)).toBe(MESSAGE);
     // The value went in through HTMLTextAreaElement's own setter, which is the
     // step that leaves React holding the message rather than just the DOM node.
     expect(page.state.viaPrototypeSetter).toBe(true);
   });
 
-  it('still lands the value where the browser has no ClipboardEvent', async () => {
-    start(undefined, { clipboard: false });
+  it('still lands the value where the browser has no InputEvent constructor', async () => {
+    start(undefined, { inputEvents: false });
     await driver.openReviewer();
     await driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
-    expect(page.state.pasted).toEqual([]);
-    // The paste is decoration. Skipping it must not cost the send.
     expect(page.state.sentText).toBe(MESSAGE);
-    expect(page.state.order).toEqual(['focus', 'input']);
+    expect(page.state.beforeInputs).toEqual([]);
+    expect(page.state.inputs).toBe([...MESSAGE].length);
   });
 
   it('refuses to send when the text cannot be read back off the element', async () => {
@@ -573,10 +610,10 @@ describe('entering the message', () => {
   });
 });
 
-describe('the pauses either side of the paste', () => {
+describe('the pauses either side of entering the message', () => {
   const PAUSES = { beforePasteMs: 3000, afterPasteMs: 2000 };
 
-  it('waits before pasting and again before sending, honouring what it was handed', async () => {
+  it('waits before entering and again before arming, honouring what it was handed', async () => {
     start();
     await driver.openReviewer();
     const pending = driver.acceptCurrent({
@@ -587,11 +624,11 @@ describe('the pauses either side of the paste', () => {
 
     // The composer is open and empty: the operator is gathering their thoughts.
     await vi.advanceTimersByTimeAsync(2900);
-    expect(page.state.pasted).toEqual([]);
+    expect(page.state.inputValues).toEqual([]);
 
     await vi.advanceTimersByTimeAsync(200);
-    expect(page.state.pasted).toEqual([MESSAGE]);
-    // Pasted, but not sent: this is the glance over it before committing.
+    expect(page.state.inputValues.at(-1)).toBe(MESSAGE);
+    // Entered, but not sent: this is the glance over it before committing.
     expect(page.state.sentText).toBe(null);
 
     await vi.advanceTimersByTimeAsync(1800);
@@ -621,7 +658,7 @@ describe('the pauses either side of the paste', () => {
     });
     const settled = expect(pending).rejects.toThrow(/Stopped before the message was sent/);
     await vi.advanceTimersByTimeAsync(1500);
-    expect(page.state.pasted).toEqual([MESSAGE]);
+    expect(page.state.inputValues.at(-1)).toBe(MESSAGE);
 
     await driver.handlers.STOP();
     // One slice, not the remaining twenty-nine seconds. An operator who presses
@@ -648,7 +685,7 @@ describe('the pauses either side of the paste', () => {
     await driver.handlers.STOP();
     await vi.advanceTimersByTimeAsync(200);
     await settled;
-    expect(page.state.pasted).toEqual([]);
+    expect(page.state.inputValues).toEqual([]);
   });
 
   it('clears an earlier stop when the reviewer is opened for a new pass', async () => {
@@ -717,6 +754,37 @@ describe('the identity interlock', () => {
     ).rejects.toThrow(/moved to 70000002 before the send; nothing was sent/);
     expect(page.state.sentText).toBe(null);
     expect(page.state.clicks).not.toContain('Accept application & send message');
+  });
+
+  it('blocks Enter when the positional reviewer moves after Send was focused', async () => {
+    start({ manualEnter: true });
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(page.document.activeElement?.getAttribute('id')).toBe('send');
+
+    page.state.queue.push(page.state.queue.shift());
+    page.render();
+    page.pressEnter();
+    expect(page.state.sentText).toBe(null);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(pending).resolves.toMatchObject({ pending: true, accepted: false });
+  });
+
+  it('fails closed when identity becomes unreadable at physical Enter', async () => {
+    start({ manualEnter: true });
+    await driver.openReviewer();
+    const pending = driver.acceptCurrent({ expectedUserId: '70000001', message: MESSAGE });
+    await vi.advanceTimersByTimeAsync(100);
+    page.document.querySelector('a').remove();
+
+    const enter = page.pressEnter();
+    expect(enter.defaultPrevented).toBe(true);
+    expect(page.state.sentText).toBe(null);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    await expect(pending).resolves.toMatchObject({ pending: true, accepted: false });
   });
 });
 
@@ -1270,7 +1338,7 @@ describe('the accept round trip fitting inside the relay budget', () => {
     // point the relay would have given up and told the panel the page was quiet
     // while the send was still coming.
     await vi.advanceTimersByTimeAsync(5200);
-    expect(page.state.pasted).toEqual([MESSAGE]);
+    expect(page.state.inputValues.at(-1)).toBe(MESSAGE);
     expect(page.state.sentText).toBe(null);
     // And the second to 3000.
     await vi.advanceTimersByTimeAsync(3200);

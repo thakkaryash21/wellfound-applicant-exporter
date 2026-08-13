@@ -178,7 +178,7 @@ describe('someone who was accepted', () => {
 });
 
 // The state between the two answers. A provisional entry says a send was
-// clicked and nobody could vouch for it. Reporting that person as accepted
+// armed and nobody could vouch for it. Reporting that person as accepted
 // would book an irreversible outcome the run never established, and reporting
 // them as missing would promise a walk that cannot be promised.
 describe('someone whose accept nobody could confirm', () => {

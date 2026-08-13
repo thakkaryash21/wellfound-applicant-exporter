@@ -192,6 +192,7 @@ function harness({
   // trigger is Chrome reloading the extension mid-run, which severs
   // chrome.storage.local while the panel's promise chain is still live.
   ledgerFails = null,
+  provisionalFails = null,
   ledgerError = 'Extension context invalidated.',
   // Questions a previous run left in the ledger with nobody to answer them.
   heldOver = [],
@@ -253,14 +254,17 @@ function harness({
     review: reviewer.review,
     recordProvisional: async (jobId, userId) => {
       reviewer.log.push({ type: 'PROVISIONAL', userId });
-      if (onLedger) onLedger(String(userId));
-      if (ledgerFails !== null && String(ledgerFails) === String(userId)) {
+      if (provisionalFails !== null && String(provisionalFails) === String(userId)) {
         throw new Error(ledgerError);
       }
       provisional.push(String(userId));
     },
     confirmAccepted: async (jobId, userId) => {
       reviewer.log.push({ type: 'CONFIRM', userId });
+      if (onLedger) onLedger(String(userId));
+      if (ledgerFails !== null && String(ledgerFails) === String(userId)) {
+        throw new Error(ledgerError);
+      }
       provisional.splice(provisional.indexOf(String(userId)), 1);
       ledger.push({ jobId, userId });
     },
@@ -643,6 +647,9 @@ describe('runAcceptPass', () => {
           return reviewer.review(message);
         },
         recordAccepted: async () => ledger.push(1),
+        recordProvisional: async () => provisional.push(1),
+        confirmAccepted: async () => ledger.push(1),
+        releaseAccepted: async () => provisional.splice(0),
         sleep: async () => {},
         emit: (event) => events.push(event),
       },
@@ -660,6 +667,23 @@ describe('runAcceptPass', () => {
     expect(records[1].acceptStatus).toBe(ACCEPT_STATUS.NOT_REACHED);
   });
 
+  it('refuses to arm when no provisional ledger writer was supplied', async () => {
+    const records = [captured('1')];
+    const reviewer = fakeReviewer({ people: ['1'] });
+    const result = await runAcceptPass(
+      {
+        review: reviewer.review,
+        recordAccepted: async () => {},
+        sleep: async () => {},
+        emit: () => {},
+      },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+    );
+    expect(result.stoppedBecause).toBe('error');
+    expect(result.error).toMatch(/provisional ledger writer.*nothing was sent/i);
+    expect(typesOf(reviewer.log)).not.toContain(CX.ACCEPT_CANDIDATE);
+  });
+
   // Rule 5. The ledger write lands before anything else can interrupt - an
   // accept the ledger does not know about is a second message to a stranger.
   it('records the accept before it reads the next candidate', async () => {
@@ -669,10 +693,12 @@ describe('runAcceptPass', () => {
 
     const order = typesOf(reviewer.log);
     const firstAccept = order.indexOf(CX.ACCEPT_CANDIDATE);
-    const firstLedger = order.indexOf('LEDGER');
+    const provisional = order.indexOf('PROVISIONAL');
+    const confirmed = order.indexOf('CONFIRM');
     const nextRead = order.indexOf(CX.READ_CANDIDATE, firstAccept);
-    expect(firstLedger).toBeGreaterThan(firstAccept);
-    expect(firstLedger).toBeLessThan(nextRead);
+    expect(provisional).toBeLessThan(firstAccept);
+    expect(confirmed).toBeGreaterThan(firstAccept);
+    expect(confirmed).toBeLessThan(nextRead);
   });
 
   // Rule 6. A message that cannot be composed is not a message that gets sent
@@ -730,6 +756,7 @@ describe('runAcceptPass', () => {
           return answer;
         },
         recordAccepted: async () => {},
+        recordProvisional: async () => {},
         sleep: async () => {},
         emit: (event) => events.push(event),
       },
@@ -754,6 +781,7 @@ describe('runAcceptPass', () => {
           throw new Error('The reviewer did not open');
         },
         recordAccepted: async () => {},
+        recordProvisional: async () => {},
         sleep: async () => {},
         emit: (event) => events.push(event),
       },
@@ -833,6 +861,7 @@ describe('runAcceptPass', () => {
           return answer;
         },
         recordAccepted: async () => {},
+        recordProvisional: async () => {},
         sleep: async () => {},
         emit: () => {},
       },
@@ -873,7 +902,7 @@ describe('leaving Wellfound as the pass found it', () => {
     expect(result.stoppedBecause).toBe('unclear');
   });
 
-  it('closes it after a refusal raised before the send was clicked', async () => {
+  it('closes it after a refusal raised before Send was armed', async () => {
     // The composer never opened, so the message is not in the box - but the
     // reviewer is still up, and the next thing to click it will be a person.
     const records = [captured('1')];
@@ -887,6 +916,7 @@ describe('leaving Wellfound as the pass found it', () => {
           return reviewer.review(message);
         },
         recordAccepted: async () => {},
+        recordProvisional: async () => {},
         sleep: async () => {},
         emit: () => {},
       },
@@ -911,6 +941,7 @@ describe('leaving Wellfound as the pass found it', () => {
           return answer;
         },
         recordAccepted: async () => {},
+        recordProvisional: async () => {},
         sleep: async () => {},
         emit: () => {},
       },
@@ -939,6 +970,7 @@ describe('leaving Wellfound as the pass found it', () => {
           return { cancelled: false, closed: true, notes: [] };
         },
         recordAccepted: async () => {},
+        recordProvisional: async () => {},
         sleep: async () => {},
         emit: () => {},
       },
@@ -979,6 +1011,7 @@ describe('leaving Wellfound as the pass found it', () => {
       {
         review: reviewer.review,
         recordAccepted: async () => {},
+        recordProvisional: async () => {},
         sleep: async () => {},
         emit: (event) => events.push(event),
       },
@@ -1270,7 +1303,7 @@ describe('settling an unconfirmed send', () => {
     it('always says they are recorded, whatever the queue answered', () => {
       for (const verdict of ['queued', 'unknown', null]) {
         expect(unresolvedReason(original, { verdict, looks: 1 })).toContain(
-          'nothing will message them again while that stands',
+          'nothing will prepare them again while that stands',
         );
       }
     });
@@ -1296,8 +1329,8 @@ describe('settling an unconfirmed send', () => {
         checkQueue: () => 'unknown',
       }).run();
       expect(records[0].acceptStatus).toMatch(/^unresolved: /);
-      expect(records[0].acceptStatus).toContain('nothing will message them again while that');
-      expect(result.error).toContain('nothing will message them again while that');
+      expect(records[0].acceptStatus).toContain('nothing will prepare them again while that');
+      expect(result.error).toContain('nothing will prepare them again while that');
     });
   });
 });
@@ -1774,7 +1807,7 @@ describe('a role where every accept is slow', () => {
 // The run that made all of this necessary, at the level of the loop that has to
 // survive it.
 //
-// Accept-only over a 102-applicant role, 99 targets. The first send was clicked,
+// Accept-only over a 102-applicant role, 99 targets. The first Send was armed,
 // the relay gave up on it, the candidate was still in the review queue at every
 // look of the settle window - and the accept committed 111 s after the click.
 // The role reported 0 of 99 accepted, the person was recorded nowhere, and the
@@ -1820,7 +1853,7 @@ describe('the send that commits long after everybody stopped looking', () => {
     // was deferred rather than when it was settled.
     expect(h.ledger.map((e) => e.userId).sort()).toEqual([...five].sort());
     // The deferral's accept is written when the sweep answers it, not when the
-    // send was clicked - the click only ever wrote the question.
+    // Send was armed - arming only ever wrote the question.
     expect(h.ledger.at(-1).userId).toBe(five[0]);
     expect(h.provisional).toEqual([]);
   });
@@ -1956,21 +1989,18 @@ describe('the send that commits long after everybody stopped looking', () => {
   // The ledger entry is the only thing standing between this person and a
   // message from the next run, and on this path it is also the only thing that
   // would remember the attempt at all.
-  it('stops and says so plainly when the ledger will not remember the deferral', async () => {
+  it('stops before arming when the ledger cannot remember the pending accept', async () => {
     const h = harness({
       people: five,
       records: rowsFor(five),
       failAccept: five[0],
-      ledgerFails: five[0],
+      provisionalFails: five[0],
       checkQueue: () => 'queued',
     });
     const result = await h.run();
-    expect(result.stoppedBecause).toBe('unrecorded');
-    expect(result.error).toContain('never confirmed');
-    // It must not borrow the confirmed send's sentence, which opens by stating
-    // the message went out - the one thing nobody knows here.
-    expect(result.error).not.toContain('was sent, and writing it');
-    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
+    expect(result.stoppedBecause).toBe('error');
+    expect(result.error).toContain('nothing was sent');
+    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(0);
   });
 });
 
@@ -2116,17 +2146,19 @@ describe('a reload can never land inside an accept', () => {
   const rows = () => nine.map((id) => captured(id));
   const MIDDLE = () => 0.5;
 
-  // Rule 1 and rule 2 in one assertion, because they are one window: from the
-  // click to the ledger write there must be nothing else at all. A reload in
-  // there destroys the only context that could say whether the message went
-  // out, or leaves somebody messaged and unrecorded.
-  it('nothing at all comes between a send and its ledger write', async () => {
+  // The operator can send as soon as the control is focused, so the durable
+  // question must exist before the page is armed. Confirmation follows only
+  // after the queue transition is observed.
+  it('arms only between a provisional write and its confirmation', async () => {
     const h = harness({ people: nine, records: rows(), reloadPage: true, rand: MIDDLE });
     await h.run();
     const types = typesOf(h.reviewer.log);
     expect(types).toContain('RELOAD');
     types.forEach((type, i) => {
-      if (type === CX.ACCEPT_CANDIDATE) expect(types[i + 1]).toBe('LEDGER');
+      if (type === CX.ACCEPT_CANDIDATE) {
+        expect(types[i - 1]).toBe('PROVISIONAL');
+        expect(types[i + 1]).toBe('CONFIRM');
+      }
     });
   });
 
@@ -2143,10 +2175,8 @@ describe('a reload can never land inside an accept', () => {
     await h.run();
     const types = typesOf(h.reviewer.log);
     const send = types.indexOf(CX.ACCEPT_CANDIDATE);
-    // The settling happens off this log - it is API traffic, not the page - so
-    // the next thing the PAGE sees after the click is the ledger write, and the
-    // reload only after that.
-    expect(types[send + 1]).toBe('LEDGER');
+    expect(types[send - 1]).toBe('PROVISIONAL');
+    expect(types[send + 1]).toBe('CONFIRM');
     expect(types.indexOf('RELOAD')).toBeGreaterThan(send + 1);
   });
 
@@ -2561,7 +2591,10 @@ describe('a page that is slowing down', () => {
     await h.run();
     const types = typesOf(h.reviewer.log);
     types.forEach((type, i) => {
-      if (type === CX.ACCEPT_CANDIDATE) expect(types[i + 1]).toBe('LEDGER');
+      if (type === CX.ACCEPT_CANDIDATE) {
+        expect(types[i - 1]).toBe('PROVISIONAL');
+        expect(types[i + 1]).toBe('CONFIRM');
+      }
     });
     const at = types.indexOf('RELOAD');
     expect(types[at - 1]).toBe(CX_CLOSE_REVIEWER);

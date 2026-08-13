@@ -102,6 +102,10 @@ export function acceptConsideringLine({ index = null, total = null } = {}) {
   return `reading ${index} of ${total} in the review queue`;
 }
 
+export function acceptAwaitingEnterLine() {
+  return 'preparing the message on Wellfound; wait until Send is visibly focused before Enter';
+}
+
 export function acceptCandidateLine(outcome, { accepted = 0, intended = 0, error } = {}) {
   if (outcome === 'accepted') return `accepted and messaged${DOT}${accepted} of ${intended}`;
   if (outcome === 'failed') return `could not accept${DOT}${error ?? 'no reason given'}`;

@@ -68,9 +68,9 @@
 
   // This file distinguishes two classes of failure and the distinction is the
   // whole of what the panel can tell the operator afterwards. A refusal raised
-  // BEFORE the send is clicked is certain: no message went anywhere. The single
-  // failure raised AFTER the click is not: the message may or may not have gone
-  // out, and only that one may raise the alarm that sends the operator to
+  // BEFORE Send is armed is certain: no message went anywhere. A failure after
+  // focus reaches Send is not: the operator may or may not have pressed Enter,
+  // and only that one may raise the alarm that sends the operator to
   // Wellfound to check.
   //
   // The wire between the two worlds carries a string and nothing else - the
@@ -87,7 +87,7 @@
   // reading of an outcome nobody can vouch for.
   const NOTHING_SENT = 'nothing was sent';
 
-  // Every pre-click refusal goes through here, so none can be written without
+  // Every pre-arm refusal goes through here, so none can be written without
   // the phrase and none can drift in wording.
   function refuse(what) {
     return new Error(`${what}; ${NOTHING_SENT}`);
@@ -335,17 +335,11 @@
     clickSafely(el, name);
   }
 
-  // Nothing in this file calls this, and nothing should. Measured on the live
-  // page: a synthetic keydown+keyup for ArrowRight on the document moved the
-  // reviewer not at all - userId and `1 of 115` both unchanged - because a
-  // scripted KeyboardEvent is not a trusted one and never reaches the site's
-  // handlers. The reviewer's shortcut legend advertises keys the extension
-  // therefore cannot use, so every operation here clicks instead.
-  //
-  // It stays as the single gate any future key path would have to pass through,
-  // refusing R (Reject) and X (Quick Reject) - a guard over something that
-  // provably cannot happen today, kept because the cost of being wrong about
-  // that is a rejected candidate.
+  // The one gate for the two synthetic Tab attempts used to put the operator at
+  // the send control. Scripted Tab does not perform browser focus traversal, so
+  // the destination is always checked and focused explicitly below. R and X
+  // remain forbidden at this point of action: Wellfound binds them to Reject
+  // and Quick Reject.
   function sendKey(key) {
     if (FORBIDDEN_KEYS.test(key)) {
       throw new Error(`Refusing to send the ${key} key: it rejects the candidate`);
@@ -497,17 +491,57 @@
   // a second call. A repeated accept is a second message to somebody who
   // already received one.
   const sent = new Set();
+  let armedKeyGuard = null;
+
+  function removeArmedKeyGuard() {
+    if (!armedKeyGuard) return;
+    document.removeEventListener('keydown', armedKeyGuard, true);
+    armedKeyGuard = null;
+  }
+
+  function guardPhysicalEnter({ expected, message, send }) {
+    removeArmedKeyGuard();
+    let trustedEnterAccepted = false;
+    armedKeyGuard = (event) => {
+      if (event.key !== 'Enter' || document.activeElement !== send) return;
+      // Synthetic Enter must never activate the irreversible control. For the
+      // operator's trusted Enter, repeat both identity and message checks at
+      // the actual point of submission, after the potentially long pause.
+      let valid = false;
+      try {
+        const current = readUserId(dialogRoot());
+        const box = composerBox();
+        valid =
+          !trustedEnterAccepted &&
+          event.isTrusted === true &&
+          current === expected &&
+          box?.value === message;
+      } catch {
+        // An unreadable or ambiguous DOM is never permission to submit.
+        valid = false;
+      }
+      if (!valid) {
+        event.preventDefault?.();
+        event.stopImmediatePropagation?.();
+        return;
+      }
+      // Keep the guard installed until the observed transition or teardown. A
+      // second Enter in the gap is blocked rather than becoming a second send.
+      trustedEnterAccepted = true;
+    };
+    document.addEventListener('keydown', armedKeyGuard, true);
+  }
 
   // One round trip, deliberately, pauses and all. Splitting this into open /
-  // paste / send would let a stopped or failed run leave a half-open composer
+  // type / arm would let a stopped or failed run leave a half-open composer
   // on the page, and - worse - would put a message boundary between the
-  // identity re-read and the click it guards. The two pause lengths are sampled
+  // identity re-read and the arming it guards. The two pause lengths are sampled
   // by the panel from the same PACING the rest of the run uses and handed in;
   // this file owns no timings of its own, and treats a missing one as no pause
   // rather than inventing a number.
-  // Everything that happens before the send is clicked: the guards, the
-  // composer, the paste and the identity re-read. It is a function of its own
-  // so that "nothing has gone out yet" is a structural property of a region
+  // Everything that happens before Send is armed: the guards, the
+  // composer, incremental entry and the identity re-read. It is a function of
+  // its own so that "nothing has gone out yet" is a structural property of a region
   // rather than a claim repeated at each throw - every failure in here, named
   // or unforeseen, is caught by the one handler below and marked certain.
   async function prepareSend({ expected, message, beforePasteMs, afterPasteMs }) {
@@ -541,24 +575,44 @@
     // panel sampled.
     await pause(clampPause(beforePasteMs, MAX_BEFORE_PASTE_MS));
     if (stopped) throw new Error('Stopped before the message was entered');
-    pasteMessage(composerBox(), message);
-    // A beat to read it back, which is what the pause after a paste is.
+    typeMessage(composerBox(), message);
+    // A beat to read it back.
     await pause(clampPause(afterPasteMs, MAX_AFTER_PASTE_MS));
-    // After the pause and before the click, so a stop during either pause takes
+    // After the pause and before arming, so a stop during either pause takes
     // effect while nothing has yet gone out. Past this point a send is
     // possible, and nothing here ever retries one.
     if (stopped) throw new Error('Stopped before the message was sent');
 
     const send = uniqueControl(dialogRoot(), SEND_LABEL, 'Accept application & send message');
-    // Identity, re-read immediately before the click and nowhere else that
+    // Identity, re-read immediately before arming and nowhere else that
     // matters. Everything above this line took time, and the reviewer is
-    // positional: if it moved while the composer was opening, the click below
+    // positional: if it moved while the composer was opening, the focused send
     // would message whoever slid into the slot.
     const atTheClick = readUserId(dialogRoot());
     if (atTheClick !== expected) {
       throw new Error(`The reviewer moved to ${atTheClick} before the send`);
     }
-    return { before, send };
+    // From this point the operator may press Enter. Mark this document before
+    // focus can reach the submit control, then attempt the requested two Tabs.
+    // Synthetic Tab has no default focus traversal in a browser, so explicit
+    // focus is the deterministic fallback. Nothing here activates the control.
+    sent.add(expected);
+    try {
+      guardPhysicalEnter({ expected, message, send });
+      sendKey('Tab');
+      sendKey('Tab');
+      if (document.activeElement !== send && typeof send.focus === 'function') send.focus();
+      if (document.activeElement !== send) {
+        throw new Error('Could not focus the Accept application & send message control');
+      }
+    } catch (error) {
+      removeArmedKeyGuard();
+      sent.delete(expected);
+      const box = composerBox();
+      if (box && typeof box.focus === 'function') box.focus();
+      throw error;
+    }
+    return { before };
   }
 
   // The wrapper exists for the flag and for nothing else: for as long as an
@@ -576,21 +630,18 @@
     const expected = expectedUserId == null ? '' : String(expectedUserId);
 
     let before;
-    let send;
     try {
-      ({ before, send } = await prepareSend({ expected, message, beforePasteMs, afterPasteMs }));
+      ({ before } = await prepareSend({ expected, message, beforePasteMs, afterPasteMs }));
     } catch (error) {
-      // The click below has not happened, so this is the certain half of the
+      // Send was never armed, so this is the certain half of the
       // contract. Marked here and only here: one site, guarding one region,
       // rather than a phrase each throw has to remember to carry.
       throw refuse(String(error.message || error));
     }
 
-    // Recorded before the click, not after. If the click throws or the page
-    // dies mid-send, the message may still have gone out, and this document
-    // must never be talked into sending it again.
-    sent.add(expected);
-    clickSafely(send, 'Accept application & send message');
+    // The extension stops acting here. The send control is focused and only a
+    // physical Enter from the operator may activate it. Everything below is an
+    // observation of whether Wellfound drained the queue.
 
     // The only honest confirmation: this candidate is gone from the slot AND
     // the bucket drained by one. Accepting removes them, so the next person
@@ -621,9 +672,9 @@
       });
     } catch {
       // Not an error and deliberately not thrown. `total` is what the panel
-      // needs to keep watching - the denominator before the click - and
+      // needs to keep watching - the denominator before arming - and
       // `reason` is the sentence to use if the watching runs out too, kept here
-      // because this is the account of what happened AT the click and the panel
+      // because this is the account of what happened after arming and the panel
       // does not compose those.
       return {
         userId: expected,
@@ -631,10 +682,11 @@
         pending: true,
         total: before.total,
         reason:
-          `Could not confirm the accept for ${expected}. It may or may not have been sent - ` +
+          `Could not confirm the accept for ${expected}. The operator may or may not have sent it - ` +
           'check the candidate in Wellfound before running again. Nothing was retried.',
       };
     }
+    removeArmedKeyGuard();
     return { userId: expected, accepted: true, next };
   }
 
@@ -655,53 +707,44 @@
     );
   }
 
-  // The message goes in as a paste, in the order a browser does one: focus the
-  // field, deliver a paste event carrying the text, set the value, announce it
-  // with `input`.
-  //
-  // NO KEY EVENTS, EVER, ON THIS PATH - and not merely because they were
-  // measured to do nothing. The reviewer binds `A` to Accept and `R` to Reject
-  // at document level, and this message is full of both letters. Entering it
-  // key by key would make the safety of the whole feature rest on a measurement
-  // continuing to hold, which is not a thing to rest anything on.
-  function pasteMessage(box, message) {
+  // Enter the message one character at a time through the textarea's native
+  // value setter and the same beforeinput/input notifications React consumes.
+  // Character KeyboardEvents are deliberately absent: the reviewer binds A,
+  // R and X at document level, and message text must never become shortcuts.
+  function typeMessage(box, message) {
     if (typeof box.focus === 'function') box.focus();
-    announcePaste(box, message);
-    // The step React actually reads: assigning through the prototype's own
-    // setter, then dispatching input, leaves React's internal props holding the
-    // message rather than just the DOM node. Verified live.
     const proto =
       typeof globalThis.HTMLTextAreaElement === 'function'
         ? globalThis.HTMLTextAreaElement.prototype
         : null;
     const setter = proto ? Object.getOwnPropertyDescriptor(proto, 'value')?.set : null;
-    if (setter) setter.call(box, message);
-    else box.value = message;
-    if (typeof Event === 'function') {
-      box.dispatchEvent(new Event('input', { bubbles: true }));
+    let entered = '';
+    for (const character of message) {
+      if (typeof InputEvent === 'function') {
+        const before = new InputEvent('beforeinput', {
+          bubbles: true,
+          cancelable: true,
+          data: character,
+          inputType: 'insertText',
+        });
+        if (!box.dispatchEvent(before)) throw new Error('The composer refused message input');
+      }
+      entered += character;
+      if (setter) setter.call(box, entered);
+      else box.value = entered;
+      if (typeof InputEvent === 'function') {
+        box.dispatchEvent(
+          new InputEvent('input', {
+            bubbles: true,
+            data: character,
+            inputType: 'insertText',
+          }),
+        );
+      } else if (typeof Event === 'function') {
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+      }
     }
-    // The post-condition that matters: if the text cannot be read back off the
-    // element, nothing further happens.
     if (box.value !== message) throw new Error('The message did not reach the composer');
-  }
-
-  // Cosmetic, and treated as such: this is what makes the entry look like a
-  // paste to anything watching, while the value assignment above is what
-  // actually delivers it. Feature-detected, and its failure is swallowed rather
-  // than raised, because a decoration must never be the reason a send that the
-  // operator authorised does not happen.
-  function announcePaste(box, message) {
-    if (typeof ClipboardEvent !== 'function' || typeof DataTransfer !== 'function') return false;
-    try {
-      const carried = new DataTransfer();
-      carried.setData('text/plain', message);
-      box.dispatchEvent(
-        new ClipboardEvent('paste', { clipboardData: carried, bubbles: true, cancelable: true }),
-      );
-      return true;
-    } catch {
-      return false;
-    }
   }
 
   // --- leaving ----------------------------------------------------------------
@@ -747,6 +790,7 @@
       return report;
     }
     if (!reviewerRoot()) {
+      removeArmedKeyGuard();
       report.closed = true;
       return report;
     }
@@ -754,12 +798,14 @@
     const hadComposer = Boolean(composerBox());
     if (hadComposer) {
       await leave(CANCEL_LABEL, 'Cancel response', () => !composerBox(), report, 'cancelled');
+      if (report.cancelled) removeArmedKeyGuard();
     }
     if (reviewerRoot()) {
       await leave(EXIT_LABEL, 'Exit', () => !reviewerRoot(), report, 'closed');
     } else {
       report.closed = true;
     }
+    if (report.closed) removeArmedKeyGuard();
 
     // The sentence an operator would want, assembled once from what actually
     // happened rather than left for a reader to infer from two booleans and a
@@ -869,7 +915,7 @@
       reachableControls,
       clickSafely,
       sendKey,
-      pasteMessage,
+      typeMessage,
       pause,
       handlers,
       sent,

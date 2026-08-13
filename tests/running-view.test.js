@@ -12,6 +12,7 @@ import {
   acceptCounts,
   acceptText,
   acceptConsideringLine,
+  acceptAwaitingEnterLine,
   acceptCandidateLine,
   acceptUnconfirmedLine,
   acceptCheckedLine,
@@ -330,6 +331,11 @@ describe('the pause line', () => {
 });
 
 describe('the activity line', () => {
+  it('tells the operator exactly when their Enter is required', () => {
+    expect(acceptAwaitingEnterLine()).toBe(
+      'preparing the message on Wellfound; wait until Send is visibly focused before Enter',
+    );
+  });
   it('says what happened to the person just handled', () => {
     expect(candidateLine('downloaded', 'A Candidate')).toBe('saved A Candidate');
     expect(candidateLine('failed', 'A Candidate')).toBe('could not download A Candidate');

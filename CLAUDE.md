@@ -30,18 +30,20 @@ These are the code's reason for existing. Know which is which before you refacto
 near them.
 
 - **Identity interlock.** `reviewer.js` reads the candidate's userId out of the
-  DOM (`/link/{userId}/{token}/resume_url`), re-reads it immediately before the
-  send click, and aborts if it cannot read exactly one. There is no name-based
+  DOM (`/link/{userId}/{token}/resume_url`), re-reads it before arming and again
+  inside a capture-phase guard on the operator's trusted Enter. It blocks the
+  submission if either identity or message changed. There is no name-based
   fallback anywhere and there must never be one. The reviewer is positional: a
   blind Accept messages whoever happens to be on screen.
-- **Ledger before advance.** `accept-pass.js` sets `unresolvedSend = userId`
-  before the click and clears it only once the person is durably recorded. Inside
-  that window a real message may exist that nothing durable knows about.
+- **Ledger before arming.** `accept-pass.js` writes a provisional entry before
+  `reviewer.js` is allowed to focus Send, and clears it only once the person is
+  durably confirmed or a certain pre-send refusal releases it. Inside that
+  window a real message may exist and nothing may reload the page.
   `guardReload` throws if a reload is requested there. Moving the ledger write
   after `remaining.delete` / `mark` / `totals.accepted` is the same defect by
   another road: a rerun messages that person a second time.
 - **Four ledger verbs, not one with a flag.** `recordAccepted` (a message
-  reached them, permanent), `recordProvisional` (clicked, nobody knows, a
+  reached them, permanent), `recordProvisional` (armed, nobody knows, a
   question), `confirmAccepted`, `releaseAccepted`. Collapsing these was a real
   bug.
 - **Never send twice within a pass**, and never retry a send. A retried accept is
@@ -75,8 +77,10 @@ near them.
   returns 404. The panel drives the page's own Apollo client, copying the live
   query's variables and overriding only cursor and page size, rather than forging
   requests. Every request is genuinely the site's own client.
-- **The reviewer is driven by clicking**, exclusively. `sendKey` exists and has
-  no caller, deliberately.
+- **The reviewer never submits.** It clicks to open the reviewer and composer,
+  types through the textarea setter, makes two synthetic Tab attempts, then
+  focuses the unique Send control explicitly. Only the operator's physical
+  Enter submits the message; synthetic Enter is blocked.
 - **The pass owns when a reload happens; the run controller owns how.** The tab
   is the controller's business.
 
@@ -100,10 +104,10 @@ Treat them as measurements, and re-measure rather than infer if you doubt them.
 - **Applicant counts come from a separate query**, not from the Apollo cache.
   Waiting on the cache for them was a bug that told users to reopen the panel for
   a number that was never coming.
-- **Synthetic keyboard events do nothing.** `keydown` + `keyup` with
-  `key: 'ArrowRight'` left the position unchanged; clicking `Next applicant`
-  moved it. The site advertises its own shortcuts and ignores untrusted events.
-  Every interaction must be a click.
+- **Synthetic keyboard events do not perform page actions.** `keydown` +
+  `keyup` with `key: 'ArrowRight'` left the position unchanged. The assisted
+  accept path emits two Tab pairs as requested, verifies that they did not move
+  focus, and explicitly focuses Send. It never synthesizes Enter.
 - **Text alone is not a safe selector.** `/^accept$/i` matched 2 elements with 1
   usable; unanchored `/accept/i` matched 4 with 3 usable, picking up a
   candidate's own name and an "Ideal next opportunity" block. The opener
@@ -112,10 +116,9 @@ Treat them as measurements, and re-measure rather than infer if you doubt them.
   not express both with one helper.
 - **Page size is capped at 20 records per request** by their server.
 - **The React value-setter trick works**, verified at `__reactProps$*.value`, not
-  merely `element.value`. If this ever needs revisiting, check the React props.
-  Had React ignored the synthetic input, the box would have displayed the text
-  while state stayed empty and the run would have sent hundreds of empty messages
-  while reporting success.
+  merely `element.value`. The message is built one character at a time through
+  that setter with `beforeinput`/`input`, then read back exactly before Send is
+  focused. If this ever needs revisiting, check the React props.
 
 ### Operational limit: accepts are gated by Turnstile
 
@@ -125,6 +128,11 @@ and no visible challenge or iframe appears - it runs invisibly. A send performed
 by hand completes immediately. Automated sends slow sharply as a session
 accumulates volume, and some never complete at all, leaving that person in the
 review queue indefinitely.
+
+The current assisted path was introduced after those measurements: it prepares
+and focuses Send, while the operator presses physical Enter. Do not claim that
+this changes the Turnstile boundary until a live run measures it. The old nine
+runs remain evidence about the former automatic-click path.
 
 That boundary is a design fact, not a backlog item: the feature is reliable at
 small volume and unreliable at large.
