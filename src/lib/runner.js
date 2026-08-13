@@ -68,6 +68,12 @@ export async function runJob(deps, options) {
   } = options;
 
   const actions = runActions(askedActions);
+  // In accept-only mode fresh rows are not the target: they have no captured
+  // resume and the accept pass will refuse them. Spending the acceptance limit
+  // on those previews can stop the walk before it reaches ledger-known rows
+  // whose files are already on disk. Pass 2 applies the limit after filtering
+  // for captured candidates, so pass 1 must keep discovering here.
+  const discoveringAcceptTargets = actions.accept && !actions.download;
   // Two sets, because "already downloaded" was one word for two facts. This one
   // is the ledger as it stood before the walk began and is never added to: an id
   // in here has a file on disk from an earlier run, which is the only reading
@@ -201,7 +207,7 @@ export async function runJob(deps, options) {
       // have stopped at 25. The two buckets are mutually exclusive - a candidate
       // lands in exactly one - so their sum is "how many of the limit this walk
       // has spent", and a real run's arithmetic is unchanged.
-      if (downloaded.length + previewed.length >= limit) {
+      if (!discoveringAcceptTargets && downloaded.length + previewed.length >= limit) {
         stoppedBecause = 'limit';
         break;
       }

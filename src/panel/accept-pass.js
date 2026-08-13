@@ -41,6 +41,14 @@ const POINTER = RESUME_STATUS.ANOTHER_ROW;
 // with no imports, the same reason the message types are duplicated into it.
 export const NOTHING_SENT = 'nothing was sent';
 
+// Wellfound occasionally leaves the reviewer shell in the DOM while its
+// actionable controls have no layout box. The driver reports that measured
+// state verbatim. It is safe to recover only before a send, and only with a
+// bounded number of fresh documents so a persistently broken page cannot turn
+// into a reload loop.
+const BROKEN_LAYOUT = /matched by text, none usable/i;
+const MAX_BROKEN_LAYOUT_RELOADS = 2;
+
 // Leave the page as this pass found it: no reviewer modal, and above all no
 // composer sitting there with the operator's message typed into it, one click
 // from a stranger's inbox. src/content/reviewer.js does the clicking - `Cancel
@@ -1043,6 +1051,41 @@ export async function runAcceptPass(deps, options) {
     refreshPending = false;
   };
 
+  let brokenLayoutReloads = 0;
+  const recoverBrokenLayout = async (failure) => {
+    let current = failure;
+    let attempted = false;
+    while (reloadPage && BROKEN_LAYOUT.test(String(current?.message ?? current))) {
+      if (brokenLayoutReloads >= MAX_BROKEN_LAYOUT_RELOADS) throw current;
+      brokenLayoutReloads += 1;
+      attempted = true;
+      try {
+        await refresh();
+        return true;
+      } catch (refreshError) {
+        current = refreshError;
+      }
+    }
+    if (attempted) throw current;
+    return false;
+  };
+
+  // A failed skip has not acted on the candidate. After recovery the reviewer
+  // is back at position 1, so the caller must restart the identity walk rather
+  // than retrying the old positional click.
+  const skipOrRecover = async () => {
+    try {
+      await review({ type: CX.SKIP_CANDIDATE });
+      // A real positional navigation proves the recovered controls work. A
+      // later malformed render is a new incident with its own bounded retries.
+      brokenLayoutReloads = 0;
+      return true;
+    } catch (skipError) {
+      if (await recoverBrokenLayout(skipError)) return false;
+      throw skipError;
+    }
+  };
+
   // Called from exactly one place: the top of the loop, before READ_CANDIDATE
   // has even chosen who the next candidate is. That is what makes a refresh
   // mid-accept unrepresentable rather than merely avoided - and the interlock
@@ -1143,7 +1186,11 @@ export async function runAcceptPass(deps, options) {
 
   try {
     touchedReviewer = true;
-    await review({ type: CX.OPEN_REVIEWER });
+    try {
+      await review({ type: CX.OPEN_REVIEWER });
+    } catch (openError) {
+      if (!(await recoverBrokenLayout(openError))) throw openError;
+    }
 
     while (remaining.size > 0) {
       if (signal?.aborted) {
@@ -1153,7 +1200,13 @@ export async function runAcceptPass(deps, options) {
 
       await refreshIfDue();
 
-      const at = await review({ type: CX.READ_CANDIDATE });
+      let at;
+      try {
+        at = await review({ type: CX.READ_CANDIDATE });
+      } catch (readError) {
+        if (await recoverBrokenLayout(readError)) continue;
+        throw readError;
+      }
       const userId = at?.userId == null ? '' : String(at.userId);
       emit({
         type: 'accept_considering',
@@ -1169,7 +1222,7 @@ export async function runAcceptPass(deps, options) {
         // The only path that navigates. A skip advances the index and leaves
         // the bucket alone, which is why it is safe here and catastrophic
         // after an accept.
-        await review({ type: CX.SKIP_CANDIDATE });
+        if (!(await skipOrRecover())) continue;
         // Not counted or announced at all for somebody this pass deferred. If
         // their send did not land they are still sitting at the front of the
         // queue, so the walk does pass over them - but the panel has already
@@ -1209,7 +1262,7 @@ export async function runAcceptPass(deps, options) {
         mark(userId, acceptFailure(reason));
         totals.failed += 1;
         emitCandidate(userId, 'failed', { error: reason });
-        await review({ type: CX.SKIP_CANDIDATE });
+        if (!(await skipOrRecover())) continue;
         await pace();
         continue;
       }
@@ -1295,6 +1348,7 @@ export async function runAcceptPass(deps, options) {
             break;
           }
           unresolvedSend = null;
+          if (await recoverBrokenLayout(sendError)) continue;
           mark(userId, acceptFailure(reason));
           totals.failed += 1;
           emitCandidate(userId, 'failed', { error: reason });
@@ -1417,6 +1471,7 @@ export async function runAcceptPass(deps, options) {
       // interlock opens on the far side of that write, inside bookAccept.
       const carryOn = await bookAccept(userId);
       if (!carryOn) break;
+      brokenLayoutReloads = 0;
       acceptsSinceRefresh += 1;
 
       // No skip here, ever. A confirmed accept has already auto-advanced -

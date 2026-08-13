@@ -200,22 +200,23 @@ describe('runJob', () => {
       expect(preview.stoppedBecause).toBe(live.stoppedBecause);
     });
 
-    // The same arithmetic, for the mode the accept pass introduced: downloads
-    // off but the run is not idle. `previewed` is still what the limit is spent
-    // on, so an accept-only walk stops where a download run would have, rather
-    // than paging through the whole role.
-    it('stops an accept-only walk at the limit, the same as a preview', async () => {
+    // Accept-only is different from a plain preview: fresh rows are ineligible,
+    // while ledger-known rows later in the queue are exactly who the pass is
+    // trying to find. The acceptance limit belongs to pass 2, after that filter.
+    it('walks past fresh previews to find already-downloaded candidates', async () => {
       const d = deps({ fetchPage: pager([page([1, 2, 3]), page([4, 5, 6], false)]) });
       const out = await runJob(d, {
         ...options,
         limit: 2,
         actions: { download: false, accept: true },
+        seenUserIds: ['4', '5'],
       });
-      expect(out.previewed).toHaveLength(2);
+      expect(out.previewed.map((record) => record.userId)).toEqual(['1', '2', '3', '6']);
       expect(out.downloaded).toHaveLength(0);
-      expect(out.previewed.length + out.downloaded.length).toBe(2);
-      expect(out.stoppedBecause).toBe('limit');
-      expect(d.fetchPage).toHaveBeenCalledTimes(1);
+      expect(out.records.filter((record) => record.resumeStatus === RESUME_STATUS.ALREADY))
+        .toHaveLength(2);
+      expect(out.stoppedBecause).toBe('exhausted');
+      expect(d.fetchPage).toHaveBeenCalledTimes(2);
     });
 
     it('stops paging once a preview has met the limit, rather than walking on', async () => {

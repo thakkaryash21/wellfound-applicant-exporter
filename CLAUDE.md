@@ -83,7 +83,9 @@ near them.
   usable `Accept application & send message` control. It never uses keyboard
   events for submission and never retries an uncertain click.
 - **The pass owns when a reload happens; the run controller owns how.** The tab
-  is the controller's business.
+  is the controller's business. A pre-send control that exists but has no
+  usable layout box is a measured broken-page state: the pass may reload twice
+  and resume by userId, but never while a send is unresolved.
 
 ## Measured facts about Wellfound
 

@@ -62,6 +62,8 @@ function fakeReviewer({
   // alone as proof would book that person's message as delivered on the
   // strength of a stranger leaving.
   drainsElsewhere = false,
+  brokenSkips = 0,
+  brokenSkipAt = null,
 } = {}) {
   const failing = new Set([failAccept].flat().filter(Boolean).map(String));
   const slow = new Set([slowAccept].flat().filter(Boolean).map(String));
@@ -72,6 +74,8 @@ function fakeReviewer({
   const log = [];
   let index = 1;
   let opened = false;
+  let brokenSkipsLeft = brokenSkips;
+  let skipAttempts = 0;
 
   const at = () => {
     if (index > queue.length) throw new Error('The reviewer has no candidate at this position');
@@ -122,6 +126,11 @@ function fakeReviewer({
       return at();
     }
     if (message.type === CX.SKIP_CANDIDATE) {
+      skipAttempts += 1;
+      if (brokenSkipsLeft > 0 && (brokenSkipAt === null || skipAttempts >= brokenSkipAt)) {
+        brokenSkipsLeft -= 1;
+        throw new Error('Could not find the Next applicant control (1 matched by text, none usable)');
+      }
       index += 1;
       return at();
     }
@@ -175,6 +184,8 @@ function harness({
   landsAfterLooks = 2,
   drifts = false,
   drainsElsewhere = false,
+  brokenSkips = 0,
+  brokenSkipAt = null,
   landed = false,
   certain = false,
   checkQueue = null,
@@ -211,6 +222,8 @@ function harness({
     landsAfterLooks,
     drifts,
     drainsElsewhere,
+    brokenSkips,
+    brokenSkipAt,
     landed,
     certain,
     onSend,
@@ -2135,6 +2148,53 @@ describe('the periodic reload', () => {
     });
     await h.run();
     expect(h.events.find((e) => e.type === 'accept_reload')).toMatchObject({ accepted: 1 });
+  });
+});
+
+describe('a malformed Wellfound layout before any send', () => {
+  it('reloads once, resumes by identity, and accepts the captured candidate', async () => {
+    const target = '70000001';
+    const h = harness({
+      people: ['98', '99', target],
+      records: [captured(target)],
+      reloadPage: true,
+      brokenSkips: 1,
+      brokenSkipAt: 2,
+      rand: () => 0.5,
+    });
+
+    const result = await h.run();
+
+    expect(result).toMatchObject({ accepted: 1, stoppedBecause: 'finished' });
+    expect(typesOf(h.reviewer.log)).toEqual(
+      expect.arrayContaining([CX.SKIP_CANDIDATE, CX.CLOSE_REVIEWER, 'RELOAD', CX.OPEN_REVIEWER]),
+    );
+    expect(
+      h.reviewer.log.filter((entry) => entry.type === CX.ACCEPT_CANDIDATE),
+    ).toHaveLength(1);
+    expect(h.reviewer.log.filter((entry) => entry.type === CX.SKIP_CANDIDATE)).toHaveLength(4);
+    expect(result.skipped).toBe(2);
+    expect(h.ledger.map((entry) => entry.userId)).toEqual([target]);
+  });
+
+  it('stops after two reloads when the layout remains malformed', async () => {
+    const target = '70000001';
+    const h = harness({
+      people: ['99', target],
+      records: [captured(target)],
+      reloadPage: true,
+      brokenSkips: 3,
+      rand: () => 0.5,
+    });
+
+    const result = await h.run();
+
+    expect(result).toMatchObject({ accepted: 0, stoppedBecause: 'error' });
+    expect(result.error).toMatch(/Next applicant.*none usable/);
+    expect(typesOf(h.reviewer.log).filter((type) => type === 'RELOAD')).toHaveLength(2);
+    expect(
+      h.reviewer.log.filter((entry) => entry.type === CX.ACCEPT_CANDIDATE),
+    ).toHaveLength(0);
   });
 });
 

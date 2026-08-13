@@ -1768,6 +1768,41 @@ describe('the accept pass', () => {
       expect(sentTo()).toEqual(ROSTER.slice(0, 3));
     });
 
+    it('skips fresh previews and accepts downloaded candidates later in the queue', async () => {
+      const roster = ROSTER.slice(0, 6);
+      const downloaded = roster.slice(4);
+      setup({
+        people: roster.map((id) => person(id)),
+        bucketByJob: { [JOB]: roster },
+        storage: {
+          [`job:${JOB}`]: {
+            jobId: JOB,
+            seenUserIds: downloaded,
+            totalDownloaded: downloaded.length,
+          },
+        },
+      });
+      for (const id of downloaded) {
+        fake.addHistory({
+          filename: `resumes/Person ${id}-${id}-${JOB}.pdf`,
+          url: `https://wellfound.com/link/${id}/tok/resume_url`,
+          state: 'complete',
+          exists: true,
+        });
+      }
+      const controller = await controllerFor();
+      await controller.startRun({
+        jobs: [{ jobId: JOB, limit: 2 }],
+        folder: 'resumes',
+        pageSize: 3,
+        actions: { download: false, accept: true },
+      });
+
+      expect(sentTo()).toEqual(downloaded);
+      expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(downloaded);
+      expect(events.find((event) => event.type === 'done')).toMatchObject({ accepted: 2 });
+    });
+
     // The page degrades across a long session, so the pass reloads it
     // periodically. End to end, that has to be a real tab reload followed by
     // the readiness probe this extension already navigates through - not a
