@@ -48,6 +48,20 @@ function fakeReviewer({
   // one wait in the pass's watch, so 3 here is an accept that lands about 30s
   // after the click and 6 is one that lands around 125s.
   landsAfterLooks = 2,
+  // The half-signal, and the reason the watch's predicate has two halves. While
+  // a send is outstanding the reviewer MOVES - somebody else is on screen - but
+  // the bucket does not drain. That is the shape of a skip, not of a send, and
+  // a watch that took a changed candidate as proof would book a message that
+  // never went out. Measured on the live page as two different signals; this is
+  // the fake refusing to let one stand in for the other.
+  drifts = false,
+  // The other half-signal, and the mirror of `drifts`: the bucket DRAINS while
+  // a send is outstanding, but somebody else is what left it - a human working
+  // the same queue by hand, an application expiring - and the candidate this
+  // pass is waiting on is still on screen. A watch that took a dropped total
+  // alone as proof would book that person's message as delivered on the
+  // strength of a stranger leaving.
+  drainsElsewhere = false,
 } = {}) {
   const failing = new Set([failAccept].flat().filter(Boolean).map(String));
   const slow = new Set([slowAccept].flat().filter(Boolean).map(String));
@@ -86,6 +100,16 @@ function fakeReviewer({
       // The page catching up, one read at a time. This is the only place a
       // slow send becomes visible, which is what makes the pass's watch the
       // thing under test rather than the fake's generosity.
+      if (drifts && inFlight.size > 0) {
+        // Somebody else on screen, the same number of people in the bucket.
+        queue.push(queue.shift());
+        return at();
+      }
+      if (drainsElsewhere && inFlight.size > 0 && queue.length > 1) {
+        // The bucket shrinks behind the person still on screen.
+        queue.splice(1, 1);
+        return at();
+      }
       for (const [id, left] of inFlight) {
         if (left > 1) {
           inFlight.set(id, left - 1);
@@ -149,6 +173,8 @@ function harness({
   failAccept = null,
   slowAccept = null,
   landsAfterLooks = 2,
+  drifts = false,
+  drainsElsewhere = false,
   landed = false,
   certain = false,
   checkQueue = null,
@@ -180,6 +206,8 @@ function harness({
     failAccept,
     slowAccept,
     landsAfterLooks,
+    drifts,
+    drainsElsewhere,
     landed,
     certain,
     onSend,
@@ -1329,6 +1357,53 @@ describe('a role where every accept is slow', () => {
     const h = wholeSlowRole({ reloadPage: true, rand: () => 0.99 });
     await h.run();
     expect(h.events.filter((e) => e.type === 'accept_slow')).toHaveLength(0);
+  });
+
+  // The watch re-applies the driver's predicate, and it has two halves for a
+  // measured reason: an accept holds the index and drops the total, a skip
+  // raises the index and holds the total. Half of it is the shape of a
+  // reviewer that MOVED, which is not the shape of one that SENT - and taking
+  // it as proof would book a message that never went out, then walk on past
+  // somebody without ever having messaged them.
+  it('does not take a moved reviewer as proof that the send landed', async () => {
+    const records = rowsFor(twelve);
+    const records0 = () => records[0].acceptStatus;
+    const h = harness({
+      people: twelve,
+      records,
+      slowAccept: twelve[0],
+      // The person on screen keeps changing; the bucket never drains.
+      drifts: true,
+      checkQueue: () => 'queued',
+    });
+    const result = await h.run();
+    // Not booked as an accept on the strength of half a signal. It falls
+    // through to the queue and is deferred, which is the honest outcome - the
+    // pass carries on past it, as it should, but not by pretending.
+    expect(result.unresolved).toBe(1);
+    const about = h.events.filter((e) => e.type === 'accept_candidate' && e.userId === twelve[0]);
+    expect(about.map((e) => e.outcome)).toEqual(['deferred']);
+    expect(records0()).toMatch(/^unresolved: /);
+  });
+
+  // And the mirror. A dropped denominator is not proof either, because it does
+  // not say WHO left: a recruiter working the same queue by hand, or an
+  // application expiring, drains the bucket without this pass's message having
+  // gone anywhere.
+  it('does not take a drained bucket as proof while the candidate is still shown', async () => {
+    const records = rowsFor(twelve);
+    const h = harness({
+      people: twelve,
+      records,
+      slowAccept: twelve[0],
+      drainsElsewhere: true,
+      checkQueue: () => 'queued',
+    });
+    const result = await h.run();
+    expect(result.unresolved).toBe(1);
+    const about = h.events.filter((e) => e.type === 'accept_candidate' && e.userId === twelve[0]);
+    expect(about.map((e) => e.outcome)).toEqual(['deferred']);
+    expect(records[0].acceptStatus).toMatch(/^unresolved: /);
   });
 
   // Patience has an end, and past it nothing has changed: the send is deferred,
