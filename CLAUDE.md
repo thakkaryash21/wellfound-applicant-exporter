@@ -181,9 +181,13 @@ awaiting a solution.
   paid down; the user-facing word is **review queue**.
 - **Measure against the live page** rather than inferring from bundles or from
   what the code expects.
-- **Plain ASCII source.** No em dashes in prose. The operator's accept message is
-  the one place with typographic apostrophes and it is reproduced byte for byte
-  on purpose: do not normalise it.
+- **Plain ASCII source.** The operator's accept message is the one place with
+  typographic apostrophes and it is reproduced byte for byte on purpose: do not
+  normalise it.
+- **No em dashes in anything the operator reads** - panel copy, CSV headers,
+  report text, error messages. That rule was set for the product's own voice and
+  applies there. `docs/DESIGN.md` is prose written for engineers and uses them
+  throughout; leave it alone rather than half-converting a document.
 - **No `console.*`** outside the sanctioned sites (`verbose-console.js` and the
   one render-failure log in `run-controller.js`).
 - **The extension makes no network requests of its own.** No fetch, no XHR, no
