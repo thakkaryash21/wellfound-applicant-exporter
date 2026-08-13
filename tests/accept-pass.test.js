@@ -1411,18 +1411,27 @@ describe('the two kinds of deferral', () => {
   // ceiling counted them anyway and stopped the pass on the fifth.
   it('does not stop because several sends needed the queue to settle them', async () => {
     const twelve = Array.from({ length: 12 }, (_, i) => String(70000001 + i));
+    // The live sequence, exactly: four unconfirmed sends that the queue settles
+    // on the spot - ordinary accepts, every one - and then a fifth that becomes
+    // a deferral. The old ceiling counted all five and stopped on the fifth.
+    const settled = [twelve[0], twelve[1], twelve[2], twelve[3]];
+    const deferredOne = twelve[4];
     const h = harness({
       people: twelve,
       records: twelve.map((id) => captured(id)),
-      // Eight of twelve go unconfirmed at the page and are settled by the queue.
-      failAccept: [twelve[0], twelve[1], twelve[2], twelve[3], twelve[4], twelve[5], twelve[6],
-        twelve[7]],
+      failAccept: [...settled, deferredOne],
       landed: true,
-      checkQueue: () => 'gone',
+      checkQueue: (id) => (String(id) === deferredOne ? 'queued' : 'gone'),
     });
     const result = await h.run();
-    expect(result).toMatchObject({ accepted: 12, stoppedBecause: 'finished' });
+
+    // Five sends the page could not confirm, and the role still finished.
+    expect(h.events.filter((e) => e.type === 'accept_unconfirmed')).toHaveLength(5);
+    expect(result.stoppedBecause).toBe('finished');
     expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(12);
+    // Four of them were successes, and only the fifth was a release.
+    expect(result).toMatchObject({ accepted: 11, failed: 1 });
+    expect(h.released).toEqual([deferredOne]);
   });
 
   // Both at once, which is the run as it actually happened.
