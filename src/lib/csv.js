@@ -57,6 +57,16 @@ export const ACCEPT_STATUS = {
   // NEEDS_REVIEW and can never be fetched again. The run declines, and the
   // cell says exactly why rather than sitting blank.
   NO_RESUME: 'refused: no resume on file, accepting would lose them for good',
+  // The send was clicked and nothing has vouched for it - not the page, not the
+  // queue, not the sweep at the end of the role. It says neither `accepted`,
+  // which would claim a message arrived, nor `failed`, which would claim none
+  // did. Both claims have been made wrongly about this cell before.
+  //
+  // Lived in accept-pass.js for two rounds because this file was held by
+  // somebody else. It belongs here: this file owns the column's vocabulary, and
+  // the free-form `failed: ...` cell below is the only other thing the accept
+  // pass is allowed to write.
+  UNRESOLVED: 'unresolved: the message may have been sent; never retried',
 };
 
 // `failed: <reason>` for an accept the run attempted and Wellfound (or the
@@ -66,6 +76,14 @@ export const ACCEPT_STATUS = {
 // covers both columns instead of two.
 export function acceptFailure(reason) {
   return `failed: ${reason}`;
+}
+
+// The unresolved cell with the account of what happened appended. Same shape as
+// acceptFailure and deliberately so: the two are the only free-form cells this
+// column has, and a reader who has learnt to look after the colon on one finds
+// the same thing on the other.
+export function acceptUnresolved(reason) {
+  return `${ACCEPT_STATUS.UNRESOLVED} - ${reason}`;
 }
 
 // Wellfound sends Unix seconds (1786465883). The raw integer is meaningless in a

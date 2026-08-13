@@ -51,6 +51,21 @@ export function createLedgerService(storage) {
     // credit for a download ever was.
     recordAccepted: (jobId, userId) => ledger.markAccepted(jobId, userId),
 
+    // The three halves of a deferral, kept as three verbs because they are three
+    // different claims. `recordProvisional` says a send was clicked and nobody
+    // knows; `confirmAccepted` says the queue has since vouched for it, and is
+    // the only route from a question to a permanent accept; `releaseAccepted`
+    // says the queue still shows them long afterwards, so nothing went out and
+    // that person is eligible again.
+    //
+    // Only the last of these can make somebody messageable who was not a moment
+    // ago, and it can never reach the accepted map - see src/lib/ledger.js.
+    recordProvisional: (jobId, userId) => ledger.markProvisional(jobId, userId),
+    confirmAccepted: (jobId, userId) => ledger.confirmProvisional(jobId, userId),
+    releaseAccepted: (jobId, userId) => ledger.releaseProvisional(jobId, userId),
+    // Questions left behind by a run that died before it could ask them.
+    provisionalUserIdsFor: (jobId) => ledger.provisionalUserIds(jobId),
+
     // `folder` is remembered with the run so a later re-download lands beside
     // the originals rather than in whatever default the Library would guess.
     finishRun: (jobId, { folder }) => ledger.finishRun(jobId, { folder }),

@@ -701,6 +701,15 @@ export function createController({
               {
                 review: (message) => tabs.ask(tab.id, message),
                 recordAccepted: (id, userId) => ledgerService.recordAccepted(id, userId),
+                // The deferral's ledger, in the three verbs the pass needs. A
+                // deferral writes a question rather than an accept, and the
+                // sweep is what turns it into one - or removes it, when the
+                // queue still shows the person long after the click and the
+                // send therefore never happened.
+                recordProvisional: (id, userId) => ledgerService.recordProvisional(id, userId),
+                confirmAccepted: (id, userId) => ledgerService.confirmAccepted(id, userId),
+                releaseAccepted: (id, userId) => ledgerService.releaseAccepted(id, userId),
+                listProvisional: (id) => ledgerService.provisionalUserIdsFor(id),
                 // The way out of an unconfirmed send. It is the same tab and
                 // the same query pass 1 walked - there is no second Apollo
                 // caller - and the pass calls it only on the ambiguous path.

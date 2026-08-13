@@ -19,6 +19,22 @@ function emptyRecord(jobId) {
     // defect on this project, so this reuses local-time.js rather than
     // inventing a second way to stamp a record.
     accepted: {},
+    // userId -> local date/time text of the CLICK. Sends this ledger cannot
+    // yet vouch for, and the reason it is a second map rather than a flag on
+    // the one above.
+    //
+    // Measured on a real run: of two sends the page never confirmed, one had
+    // landed and one had not - and the pass wrote both into `accepted`, so the
+    // person who was never messaged was permanently written off. `accepted`
+    // means "a message reached this person and must never be sent again". That
+    // is a claim, and it may only be made when something vouched for it.
+    //
+    // This map makes no claim. It means "a send was clicked and nobody knows",
+    // and it is the state the sweep RESOLVES: out of here into `accepted` when
+    // the queue says they are gone, or out of here and nowhere when the queue
+    // still shows them. Anything left in it is a question, not an answer, and a
+    // later run can ask it again.
+    provisional: {},
   };
 }
 
@@ -47,6 +63,14 @@ function seenUserIds(record) {
 // fails loudly here instead of quietly re-sending messages to everyone.
 function acceptedMap(record) {
   return record?.accepted ?? {};
+}
+
+// Same defaulting rule again, and the stakes are the mirror image: a rename
+// that silently defaulted this to {} would lose the questions a crashed run
+// left behind, and every one of those people would be messaged again with no
+// record that they might already have been.
+function provisionalMap(record) {
+  return record?.provisional ?? {};
 }
 
 // What a caller outside this module may know about a job. Named fields, not the
@@ -173,6 +197,63 @@ export function createLedger(storage) {
         accepted: { ...accepted, [userId]: localDateTimeText() },
       });
     },
+    // Sends nobody has vouched for, left over from any run - including one that
+    // died before it could ask. A later pass resolves them; see resolveHeldOver
+    // in src/panel/accept-pass.js.
+    async provisionalUserIds(jobId) {
+      return Object.keys(provisionalMap(await get(jobId)));
+    },
+    // Written before anything else can interrupt, exactly as markAccepted is,
+    // and idempotent for the same reason: the stamp is the moment of the click,
+    // and a second call must not move it.
+    //
+    // It deliberately does NOT touch `accepted`. Writing there is the claim
+    // that a message arrived, and at this point nothing has said so.
+    async markProvisional(jobId, userId) {
+      const record = await get(jobId);
+      const provisional = provisionalMap(record);
+      if (userId in provisional) return;
+      await put({
+        ...record,
+        provisional: { ...provisional, [userId]: localDateTimeText() },
+      });
+    },
+    // The queue said they have left NEEDS_REVIEW, so the send landed. One write,
+    // so the person is never briefly in both maps or briefly in neither: the
+    // whole value of the provisional entry is that it exists continuously from
+    // the click until the answer.
+    //
+    // The original click stamp is carried into `accepted` rather than restamped
+    // with the moment of the answer, because the question the column asks is
+    // when the message went out, not when we found out.
+    async confirmProvisional(jobId, userId) {
+      const record = await get(jobId);
+      const provisional = { ...provisionalMap(record) };
+      const accepted = acceptedMap(record);
+      const at = provisional[userId];
+      delete provisional[userId];
+      await put({
+        ...record,
+        provisional,
+        accepted: userId in accepted ? accepted : { ...accepted, [userId]: at ?? localDateTimeText() },
+      });
+    },
+    // The queue still shows them long after the click, so the send did not
+    // happen. The entry goes, and NOTHING is written in its place: this person
+    // was never messaged, so they are eligible again exactly as they were
+    // before the attempt.
+    //
+    // This is the one place in this extension where a record that stops somebody
+    // being messaged is deliberately removed. It is safe because it removes only
+    // the provisional entry and can never reach `accepted`, so a send anything
+    // ever vouched for stays final.
+    async releaseProvisional(jobId, userId) {
+      const record = await get(jobId);
+      const provisional = { ...provisionalMap(record) };
+      if (!(userId in provisional)) return;
+      delete provisional[userId];
+      await put({ ...record, provisional });
+    },
     async forget(jobId) {
       await storage.remove(key(jobId));
     },
@@ -184,7 +265,10 @@ export function createLedger(storage) {
     // by accident.
     async forgetAccepted(jobId) {
       const record = await get(jobId);
-      await put({ ...record, accepted: {} });
+      // The unanswered questions go with the answers. Leaving them would let a
+      // rerun after clearing skip people on the strength of a record the
+      // operator has just asked to be rid of.
+      await put({ ...record, accepted: {}, provisional: {} });
     },
   };
 }

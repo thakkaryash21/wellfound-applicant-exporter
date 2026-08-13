@@ -1,4 +1,4 @@
-import { ACCEPT_STATUS, RESUME_STATUS, acceptFailure } from '../lib/csv.js';
+import { ACCEPT_STATUS, RESUME_STATUS, acceptFailure, acceptUnresolved } from '../lib/csv.js';
 import { composeMessage } from '../lib/accept-message.js';
 import { CX } from '../lib/messages.js';
 import { PACING, sample, sampleInt } from '../lib/jitter.js';
@@ -83,30 +83,30 @@ export function sendOutcome(reason) {
 //   unclear  - the click happened, nobody can vouch for it, and the asking is
 //              over. This is the word that sends the operator to Wellfound.
 //
-// Every deferral ends as one of three things: an accept the queue confirmed
-// later, an `unclear` that outlived the pass, or an `unrecorded` if the ledger
-// refused it. The distinction exists because the run that produced it was
-// neither ambiguous nor broken - it was SLOW. The accept committed 111 s after
-// the click, long after every window this pass had, and the person was in the
-// review queue for every one of the four looks that concluded otherwise.
+// Every deferral now ends as one of four things, and the fourth is the one this
+// round adds: an accept the queue confirmed later, a RELEASE when the queue
+// still shows them, an `unclear` that outlived the pass, or an `unrecorded` if
+// the ledger refused it.
+//
+// The release exists because "could not confirm" was collapsing two different
+// facts and resolving them the same way. Measured on one run, two deferrals:
+// one had left NEEDS_REVIEW - a slow success - and the other was still queued
+// forty minutes later, because nothing had been sent to them at all. Both were
+// written into the ledger as accepted, so the second person was permanently
+// written off by a run that had failed to message them.
+//
+// The two are distinguishable, just not quickly: a slow success leaves the
+// queue within minutes and a failure never does. That is exactly the question
+// the sweep asks, so the answer is now acted on in both directions.
+//
+// Four words, four different things, and none of them a synonym for another:
+//
+//   deferred     what the PASS did - clicked, cannot vouch yet, still asking
+//   provisional  what the LEDGER holds while that is true - a question, not a
+//                claim, and the thing a later run can resolve
+//   unresolved   what the CSV says about a deferral nothing ever settled
+//   unclear      why the RUN stopped
 export const DEFERRED = 'deferred';
-
-// The Accept cell for a send that is still unresolved when the pass ends.
-//
-// It must not say `accepted`, which the ledger's own entry for this person
-// might be read as, and it must not say `failed`, which is what the cell used
-// to say and is exactly the sentence this whole change exists to stop printing
-// about somebody who WAS messaged. It says neither, in that order, at the front
-// of the cell where a spreadsheet shows it.
-//
-// This belongs beside its siblings in ACCEPT_STATUS in src/lib/csv.js - that
-// file owns the column's vocabulary. Another agent holds csv.js this session,
-// so it is declared here and should move there when the file is free.
-export const ACCEPT_UNRESOLVED = 'unresolved';
-
-export function acceptUnresolved(reason) {
-  return `${ACCEPT_UNRESOLVED}: ${reason}`;
-}
 
 // What the operator is told about a send the queue could not settle.
 //
@@ -129,8 +129,8 @@ export function acceptUnresolved(reason) {
 // not disturb that.
 export function unresolvedReason(reason, { verdict, looks = 0, waitedMs = 0 } = {}) {
   const kept =
-    'They are recorded, so no run of this extension will ever message them again. ' +
-    'Only Wellfound can say whether they already were.';
+    'They are recorded as unresolved, so nothing will message them again while that ' +
+    'stands. Only Wellfound can say whether they already were.';
   if (verdict === 'queued') {
     const seconds = Math.round(waitedMs / 1000);
     return (
@@ -187,6 +187,21 @@ export function unrecordedReason(userId, reason) {
 // this person's only protection from a second message was the ledger entry that
 // just failed, and unlike a confirmed accept there is not even a CSV row
 // claiming the send happened.
+// What the operator is told about a send the sweep decided never happened.
+//
+// It says `failed`, which is the same thing this column says about every other
+// attempt that did not complete, and it says WHY that conclusion was reached -
+// because the conclusion rests on an interval, not on a single look, and a
+// reader who does not know that cannot judge it.
+export function releasedReason(userId, looks = 0) {
+  return (
+    `The accept for ${userId} was clicked and the page never confirmed it. The review queue ` +
+    `still showed them after ${looks} checks across the rest of the role, and a send that ` +
+    'lands leaves that queue within minutes - so nothing went out to them. Nothing was ' +
+    'retried. They were not messaged, and a later run may try them again.'
+  );
+}
+
 export function unrecordedDeferralReason(userId, reason) {
   return (
     `The accept for ${userId} was clicked, the page never confirmed it, and writing it to ` +
@@ -238,8 +253,18 @@ export function resolveFirstName(record) {
 // Everyone over the number keeps NOT_REACHED - already the word for "the run
 // was accepting and stopped (a limit, an abort) before reaching this
 // candidate", which is precisely what happened to them.
-export function planAccepts({ records = [], alreadyAccepted = [], limit = Infinity } = {}) {
+export function planAccepts({
+  records = [],
+  alreadyAccepted = [],
+  // People a previous run clicked send for and nobody has been able to resolve,
+  // this run included. They are not targets: a message may already have reached
+  // them. They are not `alreadyAccepted` either, because that word promises one
+  // did. They keep the cell that says exactly what is known, which is nothing.
+  heldProvisional = [],
+  limit = Infinity,
+} = {}) {
   const already = new Set(alreadyAccepted.map(String));
+  const held = new Set(heldProvisional.map(String));
   // Grouped before anything is decided, because the decision is about a PERSON
   // and the evidence is spread across their rows. Deciding row by row let one
   // person be refused on the row whose download failed and accepted on the
@@ -263,6 +288,7 @@ export function planAccepts({ records = [], alreadyAccepted = [], limit = Infini
   const targets = [];
   let refusedNoResume = 0;
   let alreadyCount = 0;
+  let heldCount = 0;
 
   const refuse = (rows) => {
     for (const row of rows) row.acceptStatus = ACCEPT_STATUS.NO_RESUME;
@@ -289,6 +315,14 @@ export function planAccepts({ records = [], alreadyAccepted = [], limit = Infini
       alreadyCount += rows.length;
       continue;
     }
+    // Checked after `already` and before anything becomes a target: a person
+    // who has since been confirmed is simply accepted, and only somebody still
+    // in question lands here.
+    if (held.has(userId)) {
+      for (const row of rows) row.acceptStatus = ACCEPT_STATUS.UNRESOLVED;
+      heldCount += rows.length;
+      continue;
+    }
     targets.push(userId);
     // Held until the walk reaches them. A pass that stops early leaves this
     // word in the cell, which is the honest one.
@@ -307,7 +341,13 @@ export function planAccepts({ records = [], alreadyAccepted = [], limit = Infini
   // "everyone" still accepts everyone.
   const capped = Number.isFinite(limit) ? targets.slice(0, Math.max(0, limit)) : targets;
 
-  return { targets: capped, rowsById, refusedNoResume, alreadyAccepted: alreadyCount };
+  return {
+    targets: capped,
+    rowsById,
+    refusedNoResume,
+    alreadyAccepted: alreadyCount,
+    heldProvisional: heldCount,
+  };
 }
 
 // How long the pass goes on watching the page for a send the driver's fast
@@ -409,15 +449,30 @@ const DEFERRED_SWEEP_WAITS_MS = [15000, 45000, 90000];
 // last one there is nobody left to slide in. So one per role is now normal, and
 // 3 left almost no room above normal.
 //
-// DEFERRALS_PER_PASS bounds something else entirely, and it is not about the
-// page at all: it is how many real people this pass may leave in limbo for the
-// operator to check by hand. That cost is human and it does not get cheaper
-// because the mechanism got better. Two is already a chore; ten would not be
-// acceptable however healthy the page looked. It stays at 2, and what changed
-// is that reaching it now takes a send the page did not show for over two
-// minutes AND a queue that would not vouch for it - not merely a slow role.
+// The other bound was DEFERRALS_PER_PASS = 2, sized as "how many real people
+// this pass may leave for the operator to check by hand". That was right while
+// a deferral was permanent. It no longer is: the sweep resolves nearly all of
+// them, into an accept or into a release, and either way the operator is left
+// with nothing to do. Counting them was counting the wrong thing, and on a run
+// that was working it stopped the pass after 5 accepts of 80.
+//
+// What is worth stopping on is not how many sends were slow, it is whether the
+// page has stopped confirming ANYTHING. So the bound counts deferrals IN A ROW,
+// and a single confirmed accept resets it. A pass that defers three sends
+// between eighty confirmations is a slow role and carries on; a pass that
+// defers three in succession has a page that is no longer completing sends, and
+// there is nothing to be gained by giving it a fourth real person.
+//
+// Three, because two in a row is reachable by ordinary bad luck on a role where
+// most accepts are slow, and because each deferral has already cost 12 s of
+// fast path, 125 s of watching and two queue looks - so three of them is
+// several minutes of a page saying nothing.
+//
+// It also bounds the total: a pass cannot accumulate deferrals without
+// confirming accepts in between, so the leftovers a crashed run can strand are
+// bounded by the work it actually did.
 const UNCONFIRMED_SENDS_PER_PASS = 5;
-const DEFERRALS_PER_PASS = 2;
+const DEFERRALS_IN_A_ROW = 3;
 
 // One accept taking this long is the page asking to be reloaded.
 //
@@ -461,6 +516,56 @@ const DEFERRALS_PER_PASS = 2;
 // PACING.reloadEvery, which was reloading every five to seven accepts anyway.
 const SLOW_ACCEPT_MS = 90000;
 
+// Answer the questions a previous run left in the ledger.
+//
+// A pass that dies - a crash, a closed panel, a fatal error - leaves provisional
+// entries with nobody to resolve them. They are self-healing rather than
+// permanent because the question does not expire: a send that landed has left
+// NEEDS_REVIEW and stays gone, and a send that never happened leaves the person
+// queued indefinitely. So exactly the sweep's question, asked once each.
+//
+// Three answers, and the third is the reason `held` is returned rather than
+// swallowed: a queue that cannot be read has taught this run nothing, so the
+// entry stays where it is and the person is neither messaged nor written off.
+export async function resolveHeldOver({
+  jobId,
+  checkQueue,
+  listProvisional,
+  confirmAccepted,
+  releaseAccepted,
+  emit,
+}) {
+  const ids = (await listProvisional(jobId)).map(String);
+  if (ids.length === 0) return { confirmed: [], released: [], held: [] };
+  emit({ type: 'accept_heldover', jobId, count: ids.length });
+
+  const confirmed = [];
+  const released = [];
+  const held = [];
+  for (const userId of ids) {
+    let seen = 'unknown';
+    if (checkQueue) {
+      try {
+        seen = String((await checkQueue(userId)) ?? 'unknown');
+      } catch {
+        seen = 'unknown';
+      }
+    }
+    emit({ type: 'accept_checked', jobId, userId, verdict: seen, look: 0 });
+    if (seen === 'gone') {
+      await confirmAccepted(jobId, userId);
+      confirmed.push(userId);
+    } else if (seen === 'queued') {
+      await releaseAccepted(jobId, userId);
+      released.push(userId);
+    } else {
+      held.push(userId);
+    }
+    emit({ type: 'accept_heldover_resolved', jobId, userId, verdict: seen });
+  }
+  return { confirmed, released, held };
+}
+
 // `review` is one call into the reviewer driver, `recordAccepted` is the
 // ledger write, and both are injected for the same reason the download walk
 // injects its own: this loop is the part worth testing, and neither a real tab
@@ -478,6 +583,24 @@ const SLOW_ACCEPT_MS = 90000;
 // is the run controller's business because the tab is.
 export async function runAcceptPass(deps, options) {
   const { review, recordAccepted, sleep, emit, checkQueue, reloadPage } = deps;
+  // The ledger writes a deferral needs, injected exactly as recordAccepted is,
+  // and deliberately four separate verbs rather than one with a flag. Each one
+  // is a different claim, and the whole defect this round fixes was two of them
+  // being made with the same call:
+  //
+  //   recordAccepted     a message reached this person. Permanent.
+  //   recordProvisional  a send was clicked and nobody knows. A question.
+  //   confirmAccepted    the question is answered yes. Promotes to permanent.
+  //   releaseAccepted    the question is answered no. Removes the question and
+  //                      writes nothing, so the person is eligible again.
+  //
+  // The last three default to doing nothing, which gives a caller that supplies
+  // none of them the shape this module had before: it can defer, it never
+  // claims, and it never releases.
+  const recordProvisional = deps.recordProvisional ?? recordAccepted;
+  const confirmAccepted = deps.confirmAccepted ?? (async () => {});
+  const releaseAccepted = deps.releaseAccepted ?? (async () => {});
+  const listProvisional = deps.listProvisional ?? (async () => []);
   const rand = deps.rand ?? Math.random;
   // The clock, injected for the same reason  is: a test that has to make
   // an accept take thirty-six seconds must not take thirty-six seconds.
@@ -495,7 +618,38 @@ export async function runAcceptPass(deps, options) {
     limit = Infinity,
   } = options;
 
-  const plan = planAccepts({ records, alreadyAccepted, limit });
+  // Questions a previous run left behind, answered before this one plans
+  // anything.
+  //
+  // WHY HERE, and not when the person is next met in the walk. planAccepts
+  // decides who this pass will message, and a held-over entry changes that
+  // decision in both directions: resolved to `gone` the person becomes someone
+  // this run must not touch, released they become a target again. Deciding
+  // first and correcting later would mean building the plan, the intended
+  // count and the confirm-screen arithmetic on an answer known to be stale.
+  //
+  // It is also the moment the answer is at its most reliable. The question is
+  // "has enough time passed for a landed send to have left the queue"; a run
+  // that starts minutes or hours after the one that stranded the entry has all
+  // the time there is. The sweep at the end of a pass has to be patient
+  // deliberately - this simply is.
+  //
+  // Cost is one query per stranded entry, and only a run that died before its
+  // own sweep strands any.
+  const heldOver = await resolveHeldOver({
+    jobId,
+    checkQueue,
+    listProvisional,
+    confirmAccepted,
+    releaseAccepted,
+    emit,
+  });
+  const plan = planAccepts({
+    records,
+    alreadyAccepted: [...alreadyAccepted, ...heldOver.confirmed],
+    heldProvisional: heldOver.held,
+    limit,
+  });
   const intended = plan.targets.length;
   const remaining = new Set(plan.targets);
   const totals = {
@@ -507,8 +661,9 @@ export async function runAcceptPass(deps, options) {
     // People whose send was clicked and is still unresolved. Counted apart from
     // `failed`, which promises nothing went out, and apart from `accepted`,
     // which promises something did. It falls back to zero when a deferral is
-    // settled later in the pass.
-    unresolved: 0,
+    // settled later in the pass, and starts at whatever a previous run left
+    // stranded that this one could not answer either.
+    unresolved: plan.heldProvisional,
   };
   let stoppedBecause = 'finished';
   let error;
@@ -585,7 +740,9 @@ export async function runAcceptPass(deps, options) {
   // anybody is messaged.
   const deferred = [];
   let unconfirmedSends = 0;
-  let deferrals = 0;
+  // Reset by every confirmed accept: what is worth stopping on is a page that
+  // has stopped confirming anything, not a role where some sends are slow.
+  let deferralsInARow = 0;
 
   // Keep watching the page for a send its fast path did not see land.
   //
@@ -658,38 +815,102 @@ export async function runAcceptPass(deps, options) {
     const open = () => deferred.filter((entry) => !entry.resolved);
     if (!checkQueue || open().length === 0) return;
     emit({ type: 'accept_settling', jobId, count: open().length });
+    let cutShort = false;
     for (let wave = 0; ; wave += 1) {
       for (const entry of open()) {
         entry.looks += 1;
-        if ((await lookAtQueue(entry.userId, entry.looks)) !== 'gone') continue;
+        entry.verdict = await lookAtQueue(entry.userId, entry.looks);
+        if (entry.verdict !== 'gone') continue;
         // They have left NEEDS_REVIEW, and the click that would remove them
-        // from it is the one this pass made. The send landed.
+        // from it is the one this pass made. The send landed, slowly.
+        //
+        // NOW the claim may be made, and only now: the provisional entry
+        // becomes an accept, permanently, and nothing will ever message them
+        // again. Its failure is swallowed for the same reason a confirmed
+        // accept's is not - see below, where a release is the risky direction.
         entry.resolved = true;
         totals.unresolved -= 1;
         totals.accepted += 1;
+        await confirmAccepted(jobId, entry.userId);
         mark(entry.userId, ACCEPT_STATUS.ACCEPTED, localDateTimeText());
         emitCandidate(entry.userId, 'accepted', { confirmedBy: 'queue', looks: entry.looks });
       }
       if (open().length === 0) break;
       if (wave >= DEFERRED_SWEEP_WAITS_MS.length) break;
       // An operator who has pressed Stop is not waiting another two minutes for
-      // an answer the run will report honestly either way.
-      if (signal?.aborted) break;
+      // an answer the run will report honestly either way - but a sweep that
+      // ends here has not asked its question properly, and the conclusion below
+      // rests on the whole interval rather than on any one look. So it is
+      // recorded as cut short, and nobody is released on the strength of it.
+      if (signal?.aborted) {
+        cutShort = true;
+        break;
+      }
       emit({ type: 'resting', jobId, ms: DEFERRED_SWEEP_WAITS_MS[wave] });
       await sleep(DEFERRED_SWEEP_WAITS_MS[wave], signal);
     }
-    const stillOpen = open();
-    if (stillOpen.length === 0) return;
-    // The asking is over, so the word changes. This is where `deferred` becomes
-    // `unclear` - the one state in this panel that asks the operator to go and
-    // look at Wellfound - and it is the only place it can, because it is the
-    // only place that knows nothing further will be asked.
+
+    // The asking is over, and what is left divides in two.
+    //
+    // `queued` is now an answer rather than the absence of one. Somebody the
+    // queue still shows after the whole sweep was not messaged: a send that
+    // landed leaves NEEDS_REVIEW within minutes, and this has had all of them.
+    // So the provisional entry is RELEASED - removed, with nothing written in
+    // its place - and that person is eligible again, exactly as they were
+    // before the attempt.
+    //
+    // This is the one place the never-send-twice rule is relaxed, it is relaxed
+    // deliberately, and it was the owner's decision: leaving somebody eligible
+    // risks a second message if a send lands extraordinarily late, against the
+    // certainty of permanently writing off somebody who was never messaged at
+    // all. They chose the risk. It is confined to this branch - within a pass
+    // nothing is ever resent, and an accept anything vouched for stays final.
+    //
+    // `unknown` is still the absence of an answer: the queue could not be read,
+    // so nothing was learnt and the entry stays exactly where it is, for a
+    // later run to ask about.
+    const released = [];
+    const held = [];
+    for (const entry of open()) {
+      if (entry.verdict === 'queued' && !cutShort) released.push(entry);
+      else held.push(entry);
+    }
+
+    for (const entry of released) {
+      entry.resolved = true;
+      totals.unresolved -= 1;
+      totals.failed += 1;
+      const told = releasedReason(entry.userId, entry.looks);
+      mark(entry.userId, acceptFailure(told));
+      // Released after the row is marked, never before: if this write fails the
+      // person keeps a provisional entry, which costs them a message they might
+      // have wanted and costs nobody a second one.
+      await releaseAccepted(jobId, entry.userId);
+      emitCandidate(entry.userId, 'failed', { error: told, released: true });
+      emit({ type: 'accept_released', jobId, userId: entry.userId });
+    }
+
+    // The word only changes for what is genuinely still unanswered. This is
+    // where `deferred` becomes `unclear` - the one state in this panel that
+    // asks the operator to go and look at Wellfound - and it is the only place
+    // it can, because it is the only place that knows nothing further will be
+    // asked.
     //
     // It does not overwrite a reason the pass already had: `unrecorded` and a
     // failed walk both name something worse and both point at the same page.
-    if (stoppedBecause === 'finished' || stoppedBecause === 'aborted') {
+    if (held.length && (stoppedBecause === 'finished' || stoppedBecause === 'aborted')) {
       stoppedBecause = 'unclear';
-      error = stillOpen[0].told;
+      error = held[0].told;
+      return;
+    }
+    // A pass that stopped because the page deferred three sends in a row, and
+    // whose every deferral then turned out to be a send that never happened.
+    // `unclear` would send the operator to Wellfound to check people nothing
+    // was sent to; `error` is this pass's existing word for "it stopped and
+    // nothing went out", which is now exactly what is known.
+    if (!held.length && stoppedBecause === 'unclear') {
+      stoppedBecause = 'error';
+      error = released.length ? releasedReason(released[0].userId, released[0].looks) : error;
     }
   };
 
@@ -868,6 +1089,11 @@ export async function runAcceptPass(deps, options) {
     remaining.delete(userId);
     mark(userId, ACCEPT_STATUS.ACCEPTED, localDateTimeText());
     totals.accepted += 1;
+    // A confirmed accept is the evidence that the page is still completing
+    // sends, so the run of deferrals starts again from zero. Without this the
+    // bound would count three slow sends spread across a whole working role as
+    // if they had happened back to back.
+    deferralsInARow = 0;
     emitCandidate(userId, 'accepted', { ...extra, ...(recorded ? {} : { recorded: false }) });
     if (recorded) return true;
     stoppedBecause = 'unrecorded';
@@ -902,7 +1128,7 @@ export async function runAcceptPass(deps, options) {
     let recorded = true;
     let reason = null;
     try {
-      await recordAccepted(jobId, userId);
+      await recordProvisional(jobId, userId);
     } catch (ledgerError) {
       recorded = false;
       reason = String(ledgerError.message || ledgerError);
@@ -911,7 +1137,7 @@ export async function runAcceptPass(deps, options) {
     remaining.delete(userId);
     mark(userId, acceptUnresolved(told));
     totals.unresolved += 1;
-    deferrals += 1;
+    deferralsInARow += 1;
     deferred.push({ userId, told, looks: 0, resolved: false });
     emitCandidate(userId, DEFERRED, { error: told, ...(recorded ? {} : { recorded: false }) });
     if (recorded) return true;
@@ -1122,7 +1348,10 @@ export async function runAcceptPass(deps, options) {
         // Two of these is not a slow page any more, and neither is a fourth
         // unconfirmed send. The pass stops with everybody it has messaged
         // already written down.
-        if (deferrals >= DEFERRALS_PER_PASS || unconfirmedSends >= UNCONFIRMED_SENDS_PER_PASS) {
+        if (
+          deferralsInARow >= DEFERRALS_IN_A_ROW ||
+          unconfirmedSends >= UNCONFIRMED_SENDS_PER_PASS
+        ) {
           stoppedBecause = 'unclear';
           error = told;
           break;

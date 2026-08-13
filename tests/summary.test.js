@@ -282,10 +282,10 @@ describe('the accept pass, afterwards', () => {
     expect(s.alert).toContain('Check them in Wellfound');
   });
 
-  // The promise that replaces the guess. The alert used to leave the operator
-  // with a person and no way to reason about them; the one thing this system
-  // can state outright is that nobody will be messaged twice.
-  it('promises the unresolved person will not be messaged again', () => {
+  // What the alert can promise, now that a held question is temporary: nothing
+  // reaches this person while it stands, and the next run over the role asks
+  // about them again rather than leaving them to the operator forever.
+  it('says a held question will be asked again rather than left', () => {
     const s = summarize(
       accepting({
         accepted: 3,
@@ -293,7 +293,8 @@ describe('the accept pass, afterwards', () => {
         jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptUnresolved: 1 }],
       }),
     );
-    expect(s.alert).toContain('no later run will message them again');
+    expect(s.alert).toContain('held rather than counted either way');
+    expect(s.alert).toContain('will ask about them again');
   });
 
   // The contradiction the review found: the alert said the message may or may
@@ -331,7 +332,8 @@ describe('the accept pass, afterwards', () => {
         jobs: [{ jobId: '1', jobTitle: 'Platform Engineer', acceptUnresolved: 1 }],
       }),
     ).notes.join('\n');
-    expect(notes).toContain('2 could not be accepted. Nothing was sent to them.');
+    expect(notes).toContain('2 could not be accepted. Nothing was sent to them');
+    expect(notes).toContain('running this role again will try them');
     expect(notes).toContain('1 accept could not be confirmed');
   });
 

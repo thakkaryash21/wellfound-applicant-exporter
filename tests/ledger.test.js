@@ -241,3 +241,74 @@ describe('ledger.forgetAccepted', () => {
     expect(record.totalDownloaded).toBe(1);
   });
 });
+
+// A send nobody has vouched for is a QUESTION, and the ledger has to be able to
+// hold one without answering it. Both wrong answers have been shipped: writing
+// it as an accept permanently wrote off somebody who was never messaged, and
+// writing nothing at all let a later run message somebody who might have been.
+describe('provisional accepts', () => {
+  it('is not an accept, and does not appear as one', async () => {
+    await ledger.markProvisional('1', '70000001');
+    expect(await ledger.provisionalUserIds('1')).toEqual(['70000001']);
+    // The whole point: nothing here claims a message arrived.
+    expect(await ledger.acceptedUserIds('1')).toEqual([]);
+  });
+
+  it('keeps the moment of the click when asked twice', async () => {
+    await ledger.markProvisional('1', '70000001');
+    const first = (await ledger.get('1')).provisional['70000001'];
+    await ledger.markProvisional('1', '70000001');
+    expect((await ledger.get('1')).provisional['70000001']).toBe(first);
+  });
+
+  it('becomes a permanent accept when confirmed, and stops being a question', async () => {
+    await ledger.markProvisional('1', '70000001');
+    await ledger.confirmProvisional('1', '70000001');
+    expect(await ledger.acceptedUserIds('1')).toEqual(['70000001']);
+    expect(await ledger.provisionalUserIds('1')).toEqual([]);
+  });
+
+  // The column asks when the message went out, not when we found out.
+  it('carries the click stamp into the accept rather than restamping it', async () => {
+    await ledger.markProvisional('1', '70000001');
+    const clicked = (await ledger.get('1')).provisional['70000001'];
+    await ledger.confirmProvisional('1', '70000001');
+    expect((await ledger.get('1')).accepted['70000001']).toBe(clicked);
+  });
+
+  it('leaves nothing at all behind when released', async () => {
+    await ledger.markProvisional('1', '70000001');
+    await ledger.releaseProvisional('1', '70000001');
+    expect(await ledger.provisionalUserIds('1')).toEqual([]);
+    // Not moved to accepted, not remembered anywhere. That is what makes this
+    // person eligible for a later run.
+    expect(await ledger.acceptedUserIds('1')).toEqual([]);
+  });
+
+  // The guard on the one operation that can make somebody messageable again.
+  it('can never release a send something has vouched for', async () => {
+    await ledger.markAccepted('1', '70000001');
+    await ledger.releaseProvisional('1', '70000001');
+    expect(await ledger.acceptedUserIds('1')).toEqual(['70000001']);
+  });
+
+  it('keeps questions separate per job', async () => {
+    await ledger.markProvisional('1', '111');
+    await ledger.markProvisional('2', '222');
+    expect(await ledger.provisionalUserIds('1')).toEqual(['111']);
+    expect(await ledger.provisionalUserIds('2')).toEqual(['222']);
+  });
+
+  it('is empty for a job the ledger has never seen', async () => {
+    expect(await ledger.provisionalUserIds('nope')).toEqual([]);
+  });
+
+  // Clearing who has been messaged clears the unanswered questions too:
+  // leaving them would skip people on the strength of a record the operator
+  // just asked to be rid of.
+  it('is cleared by forgetAccepted', async () => {
+    await ledger.markProvisional('1', '70000001');
+    await ledger.forgetAccepted('1');
+    expect(await ledger.provisionalUserIds('1')).toEqual([]);
+  });
+});

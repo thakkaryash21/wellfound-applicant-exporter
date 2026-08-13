@@ -39,6 +39,10 @@ function fakePage({
   // it reproduces only what was measured from outside - the send succeeded and
   // the driver reported that it could not tell.
   unconfirmed = null,
+  // The queue check reading a bucket it did not mean to read, which is how it
+  // comes to answer "unknown". That is the only answer which now leaves a
+  // deferral unresolved: still-queued is a release, and gone is an accept.
+  foreignBucket = false,
 }) {
   const calls = { fetches: [], listJobs: 0, reviewer: [] };
   const buckets = new Map();
@@ -82,7 +86,7 @@ function fakePage({
           // REJECTED and SHORTLISTED, and this is the one the extension walks;
           // the queue check refuses to conclude anything from a page that came
           // back from a different bucket, so the fake has to send the real one.
-          bucket: 'NEEDS_REVIEW',
+          bucket: foreignBucket ? 'SHORTLISTED' : 'NEEDS_REVIEW',
           // Wellfound's shapes, confirmed live: submittedAt a number of Unix
           // seconds, currentLocation an object. Both used to be pre-flattened
           // here, which meant this end-to-end suite never crossed formatDate's
@@ -211,8 +215,20 @@ function setup({
   actionableCount = null,
   bucketByJob = null,
   unconfirmed = null,
+  // The queue check reading a bucket it did not mean to read, which is how it
+  // comes to answer "unknown". That is the only answer which now leaves a
+  // deferral unresolved: still-queued is a release, and gone is an accept.
+  foreignBucket = false,
 } = {}) {
-  const page = fakePage({ people, jobs, peopleByJob, actionableCount, bucketByJob, unconfirmed });
+  const page = fakePage({
+    people,
+    jobs,
+    peopleByJob,
+    actionableCount,
+    bucketByJob,
+    unconfirmed,
+    foreignBucket,
+  });
   fake = installFakeChrome({ tabs: [{ id: TAB, url: tabUrl }], pages: { [TAB]: page }, storage });
   return page;
 }
@@ -1583,36 +1599,94 @@ describe('the accept pass', () => {
     });
 
     describe('when the queue still shows them', () => {
-      // The counterpart, and the reason the check is worth making at all: it
-      // has to be capable of the other answer. Nothing was established, so the
-      // person is deferred: unresolved, recorded, and never sent to again.
-      it('records them, says unclear, and never sends a second message', async () => {
+      // The defect this fixes, end to end. Checked against the real API after a
+      // real run, a person still queued long after the click had not been
+      // messaged at all - and the pass had written them into the ledger as
+      // accepted, so nothing would ever message them again. A run that failed
+      // to reach somebody had permanently written them off.
+      it('releases them, sends nothing else, and leaves them eligible', async () => {
         await runWith({ userId: '7700003', landed: false });
 
         const done = events.find((e) => e.type === 'done');
-        // Neither accepted nor failed. "Nothing was sent to them" is exactly
-        // what nobody can say about this person.
-        expect(done).toMatchObject({ accepted: 2, acceptFailed: 0, acceptUnresolved: 1 });
-        expect(done.jobs[0].acceptStoppedBecause).toBe('unclear');
-        // The durable trace, and the whole of what it is for: the next run
-        // reads this and does not reach them.
-        expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(ROSTER);
+        // Not accepted and not unresolved: nothing went out to them, which the
+        // sweep established by asking across the rest of the role.
+        expect(done).toMatchObject({ accepted: 2, acceptFailed: 1, acceptUnresolved: 0 });
+        // The ledger holds the two who were confirmed and NOTHING about the
+        // third - no accept, and no leftover question either. That is what
+        // leaves them a target for the next run.
+        expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(['7700001', '7700002']);
+        expect(Object.keys(ledgerRecord().provisional ?? {})).toEqual([]);
         const csv = await objectUrls[0].text();
-        expect(csv).toContain('unresolved: Could not confirm the accept for 7700003');
-        expect(csv).not.toContain('failed: Could not confirm');
+        expect(csv).toContain('failed: The accept for 7700003 was clicked');
+        expect(csv).toContain('nothing went out to them');
+        // And still exactly one click, whatever the bookkeeping decided.
         expect(sendsTo('7700003')).toBe(1);
       });
 
-      // The report the operator actually read last time: "0 accepted" beside an
-      // alert saying the message may or may not have gone out. It said nothing
-      // was confirmed about somebody who had in fact been messaged.
-      it('never tells the operator nothing went out', async () => {
+      it('says plainly that they were not messaged and will be tried again', async () => {
         await runWith({ userId: '7700003', landed: false });
         const done = events.find((e) => e.type === 'done');
         const report = summarize(done);
-        expect(report.alert).toContain('could not be confirmed');
-        expect(report.alert).toContain('no later run will message them again');
-        expect(report.notes.join(' ')).not.toContain('Nothing was sent to them');
+        // No alarm: there is nothing for the operator to go and check.
+        expect(report.alert).toBe(null);
+        expect(report.notes.join(' ')).toContain('1 could not be accepted');
+        expect(report.notes.join(' ')).toContain('running this role again will try them');
+      });
+    });
+
+    // The third answer, and the only one that now leaves anybody unresolved.
+    // The queue could not be read, so nothing was learnt in either direction.
+    describe('when the queue cannot be read at all', () => {
+      it('holds the question rather than claiming or releasing', async () => {
+        setup({
+          people: ROSTER.map((id) => person(id)),
+          bucketByJob: { [JOB]: ROSTER },
+          unconfirmed: { userId: '7700001', landed: false },
+          foreignBucket: true,
+        });
+        const controller = await controllerFor();
+        await acceptRun(controller, { pageSize: 10 });
+
+        const done = events.find((e) => e.type === 'done');
+        expect(done).toMatchObject({ acceptUnresolved: 1 });
+        expect(done.jobs[0].acceptStoppedBecause).toBe('unclear');
+        // In the questions, not in the accepts. A later run asks again.
+        expect(Object.keys(ledgerRecord().provisional ?? {})).toEqual(['7700001']);
+        expect(Object.keys(ledgerRecord().accepted ?? {})).not.toContain('7700001');
+        const csv = await objectUrls[0].text();
+        expect(csv).toContain('unresolved: the message may have been sent; never retried');
+        expect(csv).toContain('Could not confirm the accept for 7700001');
+        expect(sendsTo('7700001')).toBe(1);
+      });
+
+      // A run that dies here leaves that question behind. The next run over the
+      // same role asks it before it plans anything, and by then the answer is
+      // as reliable as it will ever be.
+      it('is resolved by the next run over that role', async () => {
+        setup({
+          people: ROSTER.map((id) => person(id)),
+          bucketByJob: { [JOB]: ROSTER },
+          unconfirmed: { userId: '7700001', landed: false },
+          foreignBucket: true,
+        });
+        let controller = await controllerFor();
+        await acceptRun(controller, { pageSize: 10 });
+        expect(Object.keys(ledgerRecord().provisional ?? {})).toEqual(['7700001']);
+
+        // Second run, same storage, and this time the queue answers. 7700001 is
+        // still in the bucket, so nothing was ever sent to them.
+        events.length = 0;
+        setup({
+          people: ROSTER.map((id) => person(id)),
+          bucketByJob: { [JOB]: ROSTER },
+          storage: fake.store,
+        });
+        controller = await controllerFor();
+        await acceptRun(controller, { pageSize: 10 });
+
+        // The question is gone, and they were messaged rather than written off.
+        expect(Object.keys(ledgerRecord().provisional ?? {})).toEqual([]);
+        expect(Object.keys(ledgerRecord().accepted ?? {})).toContain('7700001');
       });
     });
   });
@@ -1837,19 +1911,22 @@ describe('the accept pass', () => {
     await acceptRun(controller);
 
     const done = events.find((e) => e.type === 'done');
-    // Every send on this page is unconfirmed, so the pass defers the first,
-    // reloads, defers the second and stops there. The run stops with it, not
-    // just the role: messages may have gone out and nobody can vouch for them.
-    expect(done).toMatchObject({ accepted: 0, acceptUnresolved: 2, stoppedBecause: 'unclear' });
+    // Every send on this page is unconfirmed, so the pass defers both - two in
+    // a row is under the bound, so it works through the whole role - and the
+    // sweep then finds both still queued, which is what a send that never
+    // happened looks like. Nothing went out and nobody is left for the operator
+    // to check, so the pass simply finished having accepted nobody.
+    expect(done).toMatchObject({ accepted: 0, acceptUnresolved: 0, acceptFailed: 2 });
+    expect(done.jobs[0].acceptStoppedBecause).toBe('finished');
     // The run itself is unharmed: the resumes are on disk, the ledger has them,
     // and the file that is now the only record of these people was written.
     expect(done.jobs[0].wroteCsv).toBe(true);
     const csv = await objectUrls[0].text();
-    expect(csv.match(/unresolved: Could not confirm the accept/g)).toHaveLength(2);
-    // Both of them in the ledger, which is what stops the next run reaching
-    // either of them a second time.
-    expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(roster);
-    expect(trace_hasAcceptStop(controller)).toBe(true);
+    expect(csv.match(/failed: The accept for \d+ was clicked/g)).toHaveLength(2);
+    // Nothing claimed about either of them, and no question left behind. Both
+    // are still in the review queue, so the next run will simply try again.
+    expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual([]);
+    expect(Object.keys(ledgerRecord().provisional ?? {})).toEqual([]);
   });
 
   // `unclear` is the strongest signal this system has: a message may have gone
@@ -1876,6 +1953,11 @@ describe('the accept pass', () => {
         bucketByJob: { [JOB]: ROLE1, [OTHER]: ROLE2 },
         // The first role's first accept never confirms.
         unconfirmed: { userId: ROLE1[0], landed: false },
+        // And the queue cannot be read, so the send stays a question. A send
+        // the sweep can settle is no longer a reason to stop anything: the
+        // person is either accepted or released, and neither needs the
+        // operator.
+        foreignBucket: true,
       });
       const controller = await controllerFor();
       await controller.startRun({

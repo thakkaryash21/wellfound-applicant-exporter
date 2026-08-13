@@ -103,9 +103,10 @@ export function acceptAlert(jobs = []) {
     lines.push(
       `${people} ${people === 1 ? 'accept' : 'accepts'} in ` +
         `${listNames(unclear.map((job) => job.jobTitle))} could not be confirmed, even after ` +
-        'asking again at the end. The message may have gone out - this page has been seen ' +
-        'sending one minutes after the click - and nothing was retried. They are recorded, so ' +
-        'no later run will message them again. Check them in Wellfound.',
+        'asking the review queue again at the end. The message may have gone out - this page ' +
+        'has been seen sending one minutes after the click - and nothing was retried. They are ' +
+        'held rather than counted either way, and the next run over that role will ask about ' +
+        'them again. Check them in Wellfound if you would rather know now.',
     );
   }
   // The other hands-on state, and the more definite of the two: the message
@@ -237,14 +238,18 @@ export function summarize(event, trace = []) {
     // of its people it may say that about.
     const certain = event.acceptFailed ?? 0;
     if (certain) {
-      both(`${certain} could not be accepted. Nothing was sent to them.`);
+      both(
+        `${certain} could not be accepted. Nothing was sent to them, and they are still ` +
+          'in the review queue, so running this role again will try them.',
+      );
     }
     const unresolved = event.acceptUnresolved ?? 0;
     if (unresolved) {
       both(
-        `${unresolved} ${unresolved === 1 ? 'accept' : 'accepts'} could not be confirmed. The ` +
-          'message may have gone out; nothing was retried, and nothing here will message them ' +
-          'again. Only Wellfound can say which it was.',
+        `${unresolved} ${unresolved === 1 ? 'accept' : 'accepts'} could not be confirmed, even ` +
+          'after asking the review queue again at the end. The message may have gone out; ' +
+          'nothing was retried. They are held, so nothing will message them again until a ' +
+          'later run can settle it.',
       );
     }
     // Sent, and not written down. Kept apart from both of the above because the

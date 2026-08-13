@@ -193,6 +193,8 @@ function harness({
   // chrome.storage.local while the panel's promise chain is still live.
   ledgerFails = null,
   ledgerError = 'Extension context invalidated.',
+  // Questions a previous run left in the ledger with nobody to answer them.
+  heldOver = [],
   // Called with the userId as the ledger write BEGINS, so a test can read what
   // the pass has and has not done at that exact moment.
   onLedger = null,
@@ -214,6 +216,10 @@ function harness({
   });
   const events = [];
   const ledger = [];
+  // What the ledger holds that is a question rather than a claim, and who a
+  // sweep decided was never messaged at all.
+  const provisional = [];
+  const released = [];
   const sleeps = [];
   const asked = [];
   // `'page'` is the honest fake: the API and the reviewer are two views of one
@@ -245,6 +251,26 @@ function harness({
         }
       : {}),
     review: reviewer.review,
+    recordProvisional: async (jobId, userId) => {
+      reviewer.log.push({ type: 'PROVISIONAL', userId });
+      if (onLedger) onLedger(String(userId));
+      if (ledgerFails !== null && String(ledgerFails) === String(userId)) {
+        throw new Error(ledgerError);
+      }
+      provisional.push(String(userId));
+    },
+    confirmAccepted: async (jobId, userId) => {
+      reviewer.log.push({ type: 'CONFIRM', userId });
+      provisional.splice(provisional.indexOf(String(userId)), 1);
+      ledger.push({ jobId, userId });
+    },
+    releaseAccepted: async (jobId, userId) => {
+      reviewer.log.push({ type: 'RELEASE', userId });
+      const at = provisional.indexOf(String(userId));
+      if (at !== -1) provisional.splice(at, 1);
+      released.push(String(userId));
+    },
+    listProvisional: async () => heldOver,
     recordAccepted: async (jobId, userId) => {
       // Written into the same log the reviewer writes to, so the ORDER of a
       // ledger write against the next reviewer message is assertable.
@@ -275,7 +301,7 @@ function harness({
       signal,
       ...(limit === undefined ? {} : { limit }),
     });
-  return { run, reviewer, events, ledger, sleeps, asked };
+  return { run, reviewer, events, ledger, sleeps, asked, provisional, released };
 }
 
 const typesOf = (log) => log.map((entry) => entry.type);
@@ -573,7 +599,7 @@ describe('runAcceptPass', () => {
   // first, which is the only thing that stops the next attempt reaching them.
   it('stops on an unclear send, retries nothing, and touches nobody after it', async () => {
     const records = [captured('1'), captured('2')];
-    const { run, reviewer, ledger, events } = harness({
+    const { run, reviewer, ledger, events, provisional } = harness({
       people: ['1', '2'],
       records,
       failAccept: '1',
@@ -586,7 +612,10 @@ describe('runAcceptPass', () => {
     expect(result.failed).toBe(0);
     expect(reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
     expect(typesOf(reviewer.log)).not.toContain(CX.SKIP_CANDIDATE);
-    expect(ledger.map((e) => e.userId)).toEqual(['1']);
+    // A question, not a claim: the send is in the provisional map, and nothing
+    // has been written into the accepted one.
+    expect(provisional).toEqual(['1']);
+    expect(ledger).toEqual([]);
     expect(records[0].acceptStatus).toMatch(/^unresolved: /);
     expect(records[1].acceptStatus).toBe(ACCEPT_STATUS.NOT_REACHED);
     expect(events.at(-1)).toMatchObject({ type: 'accept_done', stoppedBecause: 'unclear' });
@@ -601,6 +630,10 @@ describe('runAcceptPass', () => {
     const reviewer = fakeReviewer({ people: ['1', '2'] });
     const events = [];
     const ledger = [];
+  // What the ledger holds that is a question rather than a claim, and who a
+  // sweep decided was never messaged at all.
+  const provisional = [];
+  const released = [];
     const result = await runAcceptPass(
       {
         review: async (message) => {
@@ -1063,10 +1096,12 @@ describe('an unconfirmed send', () => {
       });
       const result = await h.run();
       expect(result).toMatchObject({ accepted: 0, unresolved: 1, stoppedBecause: 'unclear' });
-      // Booked before anything else, even here. It is the entry that stops the
-      // next attempt reaching this person, and the pass being about to give up
-      // is not a reason to leave them unprotected.
-      expect(h.ledger.map((e) => e.userId)).toEqual(['1']);
+      // A question is written before anything else, even here: it is what stops
+      // the next attempt reaching this person while nobody knows, and the pass
+      // being about to give up is not a reason to leave them unprotected. It is
+      // NOT an accept - nothing has vouched for this send.
+      expect(h.provisional).toEqual(['1']);
+      expect(h.ledger).toEqual([]);
       expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
     });
   }
@@ -1096,7 +1131,8 @@ describe('an unconfirmed send', () => {
   it('stops, and still records them, when no queue check was given', async () => {
     const h = harness({ people: three, records: rowsFor(three), failAccept: '1', landed: true });
     expect(await h.run()).toMatchObject({ unresolved: 1, stoppedBecause: 'unclear' });
-    expect(h.ledger.map((e) => e.userId)).toEqual(['1']);
+    expect(h.provisional).toEqual(['1']);
+    expect(h.ledger).toEqual([]);
   });
 });
 
@@ -1129,7 +1165,9 @@ describe('settling an unconfirmed send', () => {
 
     expect(h.asked).toEqual(['1', '1', '1']);
     expect(result).toMatchObject({ accepted: 3, failed: 0, stoppedBecause: 'finished' });
-    expect(h.ledger.map((e) => e.userId)).toEqual(three);
+    // Everyone accepted, and nothing left as a question.
+    expect(h.ledger.map((e) => e.userId).sort()).toEqual(three);
+    expect(h.provisional).toEqual([]);
     // The rule nothing may ever break, across three looks and a minute of
     // waiting: one click each.
     const sends = h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE);
@@ -1171,11 +1209,14 @@ describe('settling an unconfirmed send', () => {
       checkQueue: () => 'queued',
     });
     const result = await h.run();
-    // Three looks on the spot, then the sweep asks again once the pass is over.
-    expect(h.asked.length).toBeGreaterThan(3);
+    // Two looks on the spot, then the sweep asks again once the pass is over.
+    expect(h.asked.length).toBeGreaterThan(2);
     // And it carries on: the two behind the deferral are accepted, which is
-    // exactly what the old settle window cost the operator.
-    expect(result).toMatchObject({ accepted: 2, failed: 0, unresolved: 1 });
+    // exactly what the old settle window cost the operator. The deferral itself
+    // is released by the sweep - still queued after all of it means the send
+    // never happened - so it ends as a failure and not as a question.
+    expect(result).toMatchObject({ accepted: 2, failed: 1, unresolved: 0 });
+    expect(h.released).toEqual(['1']);
     // One click each, and never a second to the deferred one.
     const sends = h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE);
     expect(sends.map((e) => e.expectedUserId)).toEqual(three);
@@ -1229,7 +1270,7 @@ describe('settling an unconfirmed send', () => {
     it('always says they are recorded, whatever the queue answered', () => {
       for (const verdict of ['queued', 'unknown', null]) {
         expect(unresolvedReason(original, { verdict, looks: 1 })).toContain(
-          'ever message them again',
+          'nothing will message them again while that stands',
         );
       }
     });
@@ -1246,16 +1287,240 @@ describe('settling an unconfirmed send', () => {
 
     it('reaches the CSV cell and the run report', async () => {
       const records = rowsFor(three);
+      // `unknown` is the answer that leaves the question open. `queued` no
+      // longer does - see the release, below.
       const result = await harness({
         people: three,
         records,
         failAccept: '1',
-        checkQueue: () => 'queued',
+        checkQueue: () => 'unknown',
       }).run();
       expect(records[0].acceptStatus).toMatch(/^unresolved: /);
-      expect(records[0].acceptStatus).toContain('ever message them again');
-      expect(result.error).toContain('ever message them again');
+      expect(records[0].acceptStatus).toContain('nothing will message them again while that');
+      expect(result.error).toContain('nothing will message them again while that');
     });
+  });
+});
+
+// The defect this round fixes, and the two populations that made it visible.
+//
+// One run left two deferrals. Checked against the API afterwards, one had left
+// NEEDS_REVIEW - the send landed, slowly - and the other was still queued forty
+// minutes later, because nothing had been sent to them at all. The pass wrote
+// BOTH into the ledger as accepted, so the second person was permanently
+// written off by a run that had failed to message them.
+describe('the two kinds of deferral', () => {
+  const four = ['70000001', '70000002', '70000003', '70000004'];
+  const rowsFor = (ids) => ids.map((id) => captured(id));
+
+  // The slow success. Gone from the queue by the time the sweep asks.
+  it('books a deferral the sweep finds gone, permanently', async () => {
+    const records = rowsFor(four);
+    const h = harness({
+      people: four,
+      records,
+      failAccept: four[0],
+      landed: true,
+      checkQueue: (id) => (String(id) === four[0] ? 'gone' : 'queued'),
+    });
+    const result = await h.run();
+
+    expect(result).toMatchObject({ accepted: 4, unresolved: 0, failed: 0 });
+    // Out of the questions and into the accepts, where it is final.
+    expect(h.provisional).toEqual([]);
+    expect(h.released).toEqual([]);
+    expect(h.ledger.map((e) => e.userId)).toContain(four[0]);
+    expect(records[0].acceptStatus).toBe(ACCEPT_STATUS.ACCEPTED);
+  });
+
+  // The outright failure. Still queued through the whole sweep, which is what
+  // a send that never happened looks like and what a landed one never does.
+  it('releases a deferral the sweep still finds queued, leaving them eligible', async () => {
+    const records = rowsFor(four);
+    const h = harness({
+      people: four,
+      records,
+      failAccept: four[0],
+      landed: false,
+      checkQueue: () => 'queued',
+    });
+    const result = await h.run();
+
+    // Not accepted, not unresolved. Nothing was sent to them.
+    expect(result).toMatchObject({ unresolved: 0, failed: 1 });
+    expect(h.released).toEqual([four[0]]);
+    // The question is gone and NOTHING was written in its place. That is what
+    // makes them eligible again.
+    expect(h.provisional).toEqual([]);
+    expect(h.ledger.map((e) => e.userId)).not.toContain(four[0]);
+    expect(records[0].acceptStatus).toMatch(/^failed: /);
+    expect(records[0].acceptStatus).toContain('nothing went out to them');
+  });
+
+  // Both at once, which is the run as it actually happened.
+  it('tells the two apart in the same pass', async () => {
+    const records = rowsFor(four);
+    const h = harness({
+      people: four,
+      records,
+      failAccept: [four[0], four[1]],
+      checkQueue: (id) => (String(id) === four[0] ? 'gone' : 'queued'),
+    });
+    await h.run();
+    expect(h.ledger.map((e) => e.userId)).toContain(four[0]);
+    expect(h.released).toEqual([four[1]]);
+    expect(records[0].acceptStatus).toBe(ACCEPT_STATUS.ACCEPTED);
+    expect(records[1].acceptStatus).toMatch(/^failed: /);
+  });
+
+  // The rule that did not change, and the one the release could most easily
+  // have broken. A released person is eligible for a LATER run; nothing may
+  // reach them again inside this one.
+  it('never sends to a released person again within the same pass', async () => {
+    const h = harness({
+      people: four,
+      records: rowsFor(four),
+      failAccept: four[0],
+      checkQueue: () => 'queued',
+    });
+    await h.run();
+    const sends = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sends.filter((id) => id === four[0])).toHaveLength(1);
+    expect(sends).toEqual(four);
+  });
+
+  // And the point of releasing at all: the next run may try them.
+  it('leaves a released person a target for the next run', async () => {
+    const first = harness({
+      people: four,
+      records: rowsFor(four),
+      failAccept: four[0],
+      checkQueue: () => 'queued',
+    });
+    await first.run();
+
+    const records = rowsFor(four);
+    const second = harness({
+      people: four,
+      records,
+      // Everything the first run actually established: the accepts it made,
+      // and no entry at all for the person it released.
+      alreadyAccepted: first.ledger.map((e) => e.userId),
+      checkQueue: () => 'gone',
+    });
+    await second.run();
+    const sends = second.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sends).toEqual([four[0]]);
+    expect(records[0].acceptStatus).toBe(ACCEPT_STATUS.ACCEPTED);
+  });
+
+  // A sweep the operator cut short has not asked its question: the conclusion
+  // rests on the whole interval, not on whichever look happened to be last.
+  // Releasing on that would write off somebody whose send was simply still
+  // going out.
+  it('releases nobody when the sweep is cut short by a stop', async () => {
+    const controller = new AbortController();
+    const h = harness({
+      people: four,
+      records: rowsFor(four),
+      failAccept: four[0],
+      signal: controller.signal,
+      checkQueue: () => {
+        controller.abort();
+        return 'queued';
+      },
+    });
+    const result = await h.run();
+    expect(h.released).toEqual([]);
+    expect(h.provisional).toEqual([four[0]]);
+    expect(result.unresolved).toBe(1);
+  });
+});
+
+// A run that dies before its sweep leaves questions behind. They are answerable
+// later - a landed send has left the queue and stays gone, a failed one leaves
+// the person queued indefinitely - so the next pass over that role asks them,
+// before it plans anything.
+describe('questions a previous run left behind', () => {
+  const four = ['70000001', '70000002', '70000003', '70000004'];
+  const rowsFor = (ids) => ids.map((id) => captured(id));
+
+  it('books a held-over entry the queue now says is gone, and messages nobody twice', async () => {
+    const records = rowsFor(four);
+    const h = harness({
+      people: four.slice(1),
+      records,
+      heldOver: [four[0]],
+      checkQueue: () => 'gone',
+    });
+    await h.run();
+    expect(h.ledger.map((e) => e.userId)).toContain(four[0]);
+    expect(records[0].acceptStatus).toBe(ACCEPT_STATUS.ALREADY);
+    const sends = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sends).not.toContain(four[0]);
+  });
+
+  it('releases a held-over entry the queue still shows, and tries them', async () => {
+    const records = rowsFor(four);
+    const h = harness({
+      people: four,
+      records,
+      heldOver: [four[0]],
+      checkQueue: () => 'queued',
+    });
+    await h.run();
+    expect(h.released).toContain(four[0]);
+    const sends = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sends).toContain(four[0]);
+    expect(records[0].acceptStatus).toBe(ACCEPT_STATUS.ACCEPTED);
+  });
+
+  // The third answer, and the reason it is not folded into either of the other
+  // two: a queue that could not be read has taught this run nothing, so the
+  // person is neither messaged nor written off.
+  it('holds one it still cannot resolve, and does not message them', async () => {
+    const records = rowsFor(four);
+    const h = harness({
+      people: four,
+      records,
+      heldOver: [four[0]],
+      checkQueue: () => 'unknown',
+    });
+    const result = await h.run();
+    expect(h.released).toEqual([]);
+    expect(records[0].acceptStatus).toBe(ACCEPT_STATUS.UNRESOLVED);
+    expect(result.unresolved).toBe(1);
+    const sends = h.reviewer.log
+      .filter((e) => e.type === CX.ACCEPT_CANDIDATE)
+      .map((e) => String(e.expectedUserId));
+    expect(sends).not.toContain(four[0]);
+  });
+
+  // The property that makes dying safe. A pass that never reaches its sweep
+  // must not have claimed anything about anybody.
+  it('claims nothing permanent about a deferral when the pass dies first', async () => {
+    const h = harness({
+      people: four,
+      records: rowsFor(four),
+      failAccept: four[0],
+      // The reviewer breaks straight after the deferral, so the walk throws and
+      // the pass unwinds without a queue it can ask.
+      checkQueue: null,
+    });
+    const result = await h.run();
+    expect(result.stoppedBecause).toBe('unclear');
+    // In the questions, not in the accepts. A later run can still resolve this
+    // person either way; nothing has been forfeited.
+    expect(h.provisional).toEqual([four[0]]);
+    expect(h.ledger.map((e) => e.userId)).not.toContain(four[0]);
   });
 });
 
@@ -1376,14 +1641,15 @@ describe('a role where every accept is slow', () => {
       drifts: true,
       checkQueue: () => 'queued',
     });
-    const result = await h.run();
-    // Not booked as an accept on the strength of half a signal. It falls
-    // through to the queue and is deferred, which is the honest outcome - the
-    // pass carries on past it, as it should, but not by pretending.
-    expect(result.unresolved).toBe(1);
+    await h.run();
+    // Not booked as an accept on the strength of half a signal. It falls through
+    // to the queue, which still shows them, so the sweep concludes the send
+    // never happened - and nobody has been claimed for.
+    expect(h.ledger.map((e) => e.userId)).not.toContain(twelve[0]);
+    expect(h.released).toEqual([twelve[0]]);
     const about = h.events.filter((e) => e.type === 'accept_candidate' && e.userId === twelve[0]);
-    expect(about.map((e) => e.outcome)).toEqual(['deferred']);
-    expect(records0()).toMatch(/^unresolved: /);
+    expect(about.map((e) => e.outcome)).toEqual(['deferred', 'failed']);
+    expect(records0()).toMatch(/^failed: /);
   });
 
   // And the mirror. A dropped denominator is not proof either, because it does
@@ -1399,11 +1665,12 @@ describe('a role where every accept is slow', () => {
       drainsElsewhere: true,
       checkQueue: () => 'queued',
     });
-    const result = await h.run();
-    expect(result.unresolved).toBe(1);
+    await h.run();
+    expect(h.ledger.map((e) => e.userId)).not.toContain(twelve[0]);
+    expect(h.released).toEqual([twelve[0]]);
     const about = h.events.filter((e) => e.type === 'accept_candidate' && e.userId === twelve[0]);
-    expect(about.map((e) => e.outcome)).toEqual(['deferred']);
-    expect(records[0].acceptStatus).toMatch(/^unresolved: /);
+    expect(about.map((e) => e.outcome)).toEqual(['deferred', 'failed']);
+    expect(records[0].acceptStatus).toMatch(/^failed: /);
   });
 
   // Patience has an end, and past it nothing has changed: the send is deferred,
@@ -1415,12 +1682,15 @@ describe('a role where every accept is slow', () => {
       slowAccept: twelve[0],
       // More looks than the watch has waits, so the page never catches up.
       landsAfterLooks: 99,
-      checkQueue: () => 'queued',
+      // Unreadable, so the sweep learns nothing and the question stays open.
+      checkQueue: () => 'unknown',
     });
     const result = await h.run();
     expect(result.unresolved).toBe(1);
-    expect(h.ledger[0].userId).toBe(twelve[0]);
-    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(12);
+    expect(h.provisional).toEqual([twelve[0]]);
+    // A queue that cannot be read is a pass with no instrument left, so it
+    // stops there rather than sending into the dark.
+    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(1);
   });
 });
 
@@ -1472,7 +1742,10 @@ describe('the send that commits long after everybody stopped looking', () => {
     // Everyone in the ledger, the slow one included, and written when the send
     // was deferred rather than when it was settled.
     expect(h.ledger.map((e) => e.userId).sort()).toEqual([...five].sort());
-    expect(h.ledger[0].userId).toBe(five[0]);
+    // The deferral's accept is written when the sweep answers it, not when the
+    // send was clicked - the click only ever wrote the question.
+    expect(h.ledger.at(-1).userId).toBe(five[0]);
+    expect(h.provisional).toEqual([]);
   });
 
   it('says deferred while it is unresolved, and accepted once it is not', async () => {
@@ -1494,15 +1767,17 @@ describe('the send that commits long after everybody stopped looking', () => {
   // The blocking problem, stated as the thing it actually was: the same person
   // is reached first on every attempt, so a pass that cannot get past them can
   // never get past them.
-  it('is not reached again by the next attempt, whichever way the send went', async () => {
+  it('is not reached again by the next attempt once the sweep has vouched for it', async () => {
     const first = harness({
       people: five,
       records: rowsFor(five),
       failAccept: five[0],
-      checkQueue: () => 'queued',
+      landed: true,
+      // The sweep finds them gone, so the send landed and the accept is final.
+      checkQueue: () => 'gone',
     });
     const firstResult = await first.run();
-    expect(firstResult.unresolved).toBe(1);
+    expect(firstResult.accepted).toBe(5);
 
     // The second attempt, given the ledger the first one left behind.
     const records = rowsFor(five);
@@ -1541,16 +1816,41 @@ describe('the send that commits long after everybody stopped looking', () => {
 
   // One is a slow page. Two is a page this module can no longer reason about,
   // and it will not keep sending irreversible messages into one.
-  it('stops after a second deferral rather than piling them up', async () => {
+  it('stops after three deferrals in a row rather than piling them up', async () => {
     const h = harness({
       people: five,
       records: rowsFor(five),
-      failAccept: [five[0], five[1]],
+      failAccept: [five[0], five[1], five[2]],
       checkQueue: () => 'queued',
     });
     const result = await h.run();
-    expect(result).toMatchObject({ unresolved: 2, stoppedBecause: 'unclear' });
-    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(2);
+    // Three sends the page would not confirm, back to back, is a page that has
+    // stopped completing them - so it gets no fourth real person.
+    expect(h.reviewer.log.filter((e) => e.type === CX.ACCEPT_CANDIDATE)).toHaveLength(3);
+    // And the sweep then found all three still queued, so nothing went out to
+    // any of them. `unclear` would send the operator to check three people who
+    // were never messaged; `error` is this pass's existing word for "it stopped
+    // and nothing went out", which is now exactly what is known.
+    expect(result).toMatchObject({ unresolved: 0, failed: 3, stoppedBecause: 'error' });
+    expect(h.released).toEqual([five[0], five[1], five[2]]);
+  });
+
+  // The counterpart, and the reason the bound counts a RUN of deferrals rather
+  // than their total: a confirmed accept says the page is still completing
+  // sends, so the count starts again. At two-per-pass this role stopped after
+  // five accepts of eighty on a run that was working.
+  it('carries on when confirmed accepts keep coming between the deferrals', async () => {
+    const many = Array.from({ length: 9 }, (_, i) => String(70000001 + i));
+    const h = harness({
+      people: many,
+      records: many.map((id) => captured(id)),
+      // Every other one, so no two are ever adjacent.
+      failAccept: [many[0], many[2], many[4], many[6]],
+      landed: true,
+      checkQueue: () => 'gone',
+    });
+    const result = await h.run();
+    expect(result).toMatchObject({ accepted: 9, stoppedBecause: 'finished' });
   });
 
   // The report the operator reads must never be the one they got last time:
@@ -1561,7 +1861,9 @@ describe('the send that commits long after everybody stopped looking', () => {
       people: five,
       records,
       failAccept: five[0],
-      checkQueue: () => 'queued',
+      // Unreadable, so nothing is concluded in either direction and the person
+      // stays a question.
+      checkQueue: () => 'unknown',
     }).run();
     expect(result.unresolved).toBe(1);
     expect(result.error).not.toContain('nothing was sent');
