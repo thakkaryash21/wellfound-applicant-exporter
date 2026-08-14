@@ -14,8 +14,8 @@ let screen;
 const row = (over = {}) => ({
   jobId: JOB,
   jobTitle: 'Platform Engineer',
-  downloaded: 3,
-  known: 3,
+  resumesAvailable: 3,
+  captured: 3,
   lastRunAt: null,
   missing: 0,
   unreachable: 0,
@@ -57,6 +57,9 @@ describe('the Library screen', () => {
   it('lists a job with what the ledger knows about it', async () => {
     await show(stubController());
     expect(screen.innerHTML).toContain('Platform Engineer');
+    expect(screen.innerHTML).toContain('resumes available');
+    expect(screen.innerHTML).toContain('<span class="num">3</span>');
+    expect(screen.innerHTML).not.toContain('accepted');
   });
 
   it('says so when there is nothing in the ledger yet', async () => {
@@ -91,16 +94,6 @@ describe('a failing action', () => {
 });
 
 describe('an action that worked', () => {
-  it('says what an adoption did, once however often it is tapped', async () => {
-    const controller = stubController({ library: vi.fn(async () => [row({ orphans: 2 })]) });
-    await show(controller);
-    await click('[data-act="adopt"]');
-    expect(screen.innerHTML).toContain('Adopted 2 files.');
-    expect(messages('lib-note')).toHaveLength(1);
-    await click('[data-act="adopt"]');
-    expect(messages('lib-note')).toHaveLength(1);
-  });
-
   it('says what an import did', async () => {
     const controller = stubController();
     await show(controller);
@@ -123,18 +116,16 @@ describe('an action that worked', () => {
   });
 });
 
-// The one outcome a re-download has no remedy for. An accepted candidate has
-// left the only collection this extension can query, so "still missing" would
-// send the user looking for a button that cannot exist.
-describe('someone who was accepted', () => {
+// The delivery ledger still prevents an unsafe recovery attempt, but the
+// Library does not expose an accepted count.
+describe('a historical capture outside Review', () => {
   const withAccepts = (over) => stubController({ library: vi.fn(async () => [row(over)]) });
 
   it('is not counted among the files missing from disk', async () => {
     await show(withAccepts({ missing: 0, unreachable: 2 }));
     expect(screen.innerHTML).not.toContain('missing from disk');
-    expect(screen.innerHTML).toContain('2');
-    expect(screen.innerHTML).toContain('were accepted');
-    expect(screen.innerHTML).toContain('can no longer be fetched');
+    expect(screen.innerHTML).toContain('some historical captures are no longer in Review');
+    expect(screen.innerHTML).not.toContain('accepted');
   });
 
   it('is not offered a Re-download button, because no walk can find them', async () => {
@@ -146,13 +137,7 @@ describe('someone who was accepted', () => {
     await show(withAccepts({ missing: 3, unreachable: 2 }));
     expect(screen.querySelector('[data-act="refetch"]')).not.toBe(null);
     expect(screen.innerHTML).toContain('missing from disk');
-    expect(screen.innerHTML).toContain('can no longer be fetched');
-  });
-
-  it('is spoken of one person at a time without a plural verb', async () => {
-    await show(withAccepts({ unreachable: 1 }));
-    expect(screen.innerHTML).toContain('was accepted');
-    expect(screen.innerHTML).not.toContain('were accepted');
+    expect(screen.innerHTML).toContain('cannot be recovered');
   });
 
   it('does not let a row of accepts read as all files present', async () => {
@@ -162,13 +147,13 @@ describe('someone who was accepted', () => {
 
   it('is reported as unfetchable, not as missing', () => {
     expect(describeRefetch({ refetched: 0, stillMissing: 0, acceptedGone: 2 })).toBe(
-      'Nothing to re-download: 2 were accepted and can no longer be fetched',
+      'Nothing to re-download: 2 are no longer in Review and cannot be fetched',
     );
   });
 
   it('is named alongside the people the walk did fetch', () => {
     expect(describeRefetch({ refetched: 3, stillMissing: 1, acceptedGone: 1 })).toBe(
-      'Re-downloaded 3, 1 still missing, 1 was accepted and can no longer be fetched',
+      'Re-downloaded 3, 1 still missing, 1 is no longer in Review and cannot be fetched',
     );
   });
 
@@ -188,8 +173,7 @@ describe('someone whose accept nobody could confirm', () => {
     await show(withUnsettled({ missing: 0, unsettled: 2 }));
     expect(screen.innerHTML).not.toContain('were accepted');
     expect(screen.innerHTML).not.toContain('can no longer be fetched');
-    expect(screen.innerHTML).toContain('have an accept nobody');
-    expect(screen.innerHTML).toContain('could confirm, so the next run settles it');
+    expect(screen.innerHTML).toContain('acceptance outcome still needs reconciliation');
   });
 
   it('is not counted among the files missing from disk', async () => {
@@ -206,12 +190,6 @@ describe('someone whose accept nobody could confirm', () => {
     await show(withUnsettled({ missing: 3, unsettled: 2 }));
     expect(screen.querySelector('[data-act="refetch"]')).not.toBe(null);
     expect(screen.innerHTML).toContain('missing from disk');
-  });
-
-  it('is spoken of one person at a time without a plural verb', async () => {
-    await show(withUnsettled({ unsettled: 1 }));
-    expect(screen.innerHTML).toContain('has an accept nobody');
-    expect(screen.innerHTML).not.toContain('have an accept nobody');
   });
 
   it('does not let a row of unsettled sends read as all files present', async () => {

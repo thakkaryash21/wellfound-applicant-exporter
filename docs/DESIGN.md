@@ -24,16 +24,14 @@ under the operator's name and it cannot be undone. That one fact reshapes more
 of this design than anything else in it, and the section on accepting explains
 what follows from it.
 
-### Tracking model correction (implementation pending)
+### Tracking model correction
 
 The approved identity, capture-availability, new-applicant, and acceptance
 eligibility contract is [Candidate tracking model](TRACKING_MODEL.md). It is the
-canonical source for the corrected model and its release gates. The current
-implementation still contains the count-subtraction estimate, treats some
-unverifiable captures as acceptance evidence, and caps remembered identities;
-the linked contract is deliberately documented before that implementation work
-begins. Existing sections below describe the code as it stands until the
-correction lands.
+canonical source for the corrected model and its release gates. The implementation
+uses complete current-Review identity snapshots, positive file availability,
+and an uncapped capture registry. Existing sections below are subordinate to
+the linked contract.
 
 ## Non-goals
 
@@ -500,9 +498,10 @@ consequences:
 - **The confirm click auto-advances; `A` does not.** After the send the modal is
   already on the next person, so sending `Next` after an accept skips somebody.
 - **Accepting everyone needs no navigation at all.** Stay at position 1, accept,
-  repeat until the queue empties. There is no index arithmetic and therefore no
-  drift between the API's ordering and the reviewer's — the entire class of
-  off-by-one bugs simply does not arise.
+  repeat until the queue empties. There is no reviewer index arithmetic, so the
+  off-by-one class does not arise. API discovery order and reviewer order are
+  independently measured; the API selects the immutable target identities and
+  the reviewer may encounter those identities in another sequence.
 
 Accept and skip are therefore confirmed by *different* signals, and neither may
 stand in for the other:
@@ -567,27 +566,25 @@ It is a pointer, so it is neither.
 
 **Existing features this changes:**
 
-- **Re-download of an accepted candidate is impossible.** The Library's targeted
+- **Re-download of a candidate who has left Review is impossible.** The Library's targeted
   walk searches `NEEDS_REVIEW` with a guest list and a page cap; an accepted
   person is not there, so the walk would page to its cap and report them missing
   after a long, pointless crawl. Instead the accept ledger is read before the
-  Library screen renders, and such a person is counted as **accepted and can no
-  longer be fetched** rather than as missing from disk — with no Re-download
-  button behind them. Offering a remedy for a state that has no remedy, or
+  Library screen renders. The delivery interlock keeps that identity out of the
+  recoverable-missing set, but the Library does not publish an accepted count;
+  it says generically that some historical captures are no longer in Review and
+  cannot be recovered, with no Re-download button behind them. Offering a remedy for a state that has no remedy, or
   walking forty pages to arrive at a wrong answer, are both the pretending-to-work
   this extension does not do.
-- **Somebody with a provisional entry is a third state**, and the Library says
-  so in its own words. They are not accepted, because nothing established that,
-  and rendering them with the accepted wording would put an irreversible claim on
-  screen that no run ever made. They are not plainly missing either, because a
-  walk may find nobody. So they get their own count and their own line, and no
-  button: the thing that resolves them is the next accept run over that role, and
-  it is the only thing that can.
+- **Somebody with a provisional entry is a third state.** They are neither
+  accepted nor recoverable-missing. The Library shows a generic reconciliation
+  warning without turning the internal delivery interlock into a product metric.
 - **The CSV and the downloaded file are the only surviving copy** of an accepted
-  candidate's data, which is why the row is written before the accept and why an
-  aborted run still flushes what it has.
-- **Home screen counts drop as accepting proceeds**, because the queue is what
-  they count.
+  candidate's data. The file is captured in pass 1; the CSV is flushed after
+  pass 2 so its Accept cell records the outcome, including an aborted or unclear
+  pass.
+- **Home exact counts are invalidated by acceptance.** The next Home render asks
+  for another complete identity check instead of decrementing a stale count.
 
 **What it buys:** a candidate who would otherwise expire in a few days, and be
 emailed that the company never responded, gets a reply instead. That is the point
@@ -738,7 +735,7 @@ recorded early: an accept the ledger does not know about gets sent twice. The
 write is idempotent on its timestamp, so a repeat keeps the original moment.
 
 That ordering is structural, not a convention about where a call site sits. The
-pass writes the provisional question before Send can receive focus and clears
+pass writes the provisional question before the Send click can be dispatched and clears
 its unresolved interlock only once the outcome is durably recorded. A reload requested inside that window
 throws. Moving the ledger write below the in-memory advance is the same defect by
 another road.
@@ -746,7 +743,7 @@ another road.
 The accept dimension is **two maps**, `accepted` and `provisional`, for the
 reason the section on unconfirmed sends gives: one holds answers and the other
 holds questions, and a question written into the answers map is unrecoverable.
-Both are maps rather than lists like `seenUserIds`, because these events are
+Both are maps like the capture registry, because these events are
 unrepeatable and the moment each happened matters.
 
 The queue also dedups on its own, since an accepted person never reappears in it.
@@ -759,15 +756,13 @@ reports something that already did. It states, plainly: how many people broken
 down by role, that each of them receives a message, the exact wording as it will
 be sent, and that accepting cannot be undone.
 
-Its number must never read higher than what will happen, which is why an
-accept-only run counts the people already on disk minus the ones already
-accepted — the download ledger keeps holding somebody after they are accepted,
-the review queue does not, and using the ledger's count alone double-counts that
-difference on the second run over a role. The role's own limit is applied to that
-figure too, since it bounds how many people are messaged and not only how many
-are downloaded; a screen reading "Accept 100 people" above a run that will
-message 25 is the one thing this screen must not do. Where the exact figure is
-not knowable the screen says "up to" rather than guessing.
+Its number must never read higher than what will happen. Accept-only therefore
+uses the identity-derived current Review set whose files are positively
+available, excluding accepted and provisional identities directly; historical
+count subtraction is forbidden. The role's own limit is applied after every
+refusal, since it bounds how many people are messaged and not only how many are
+downloaded. Where a complete current check is unavailable, the screen names the
+candidate check instead of presenting a partial total.
 
 It is not a scare screen. The operator asked for this feature and knows what
 accepting is. It is a place to read the number back before it becomes real.
@@ -827,13 +822,15 @@ Per-job record:
 
 ```
 job:{jobId} = {
-  jobId, jobTitle, seenUserIds: string[], lastRunAt, totalDownloaded, folder,
+  jobId, jobTitle, schemaVersion: 2,
+  captures: { [userId]: downloaded | imported | adopted | legacy },
+  migrationIncomplete, lastRunAt, totalDownloaded, folder,
   accepted:    { [userId]: localDateTimeText },
   provisional: { [userId]: localDateTimeText }
 }
 ```
 
-`accepted` and `provisional` are maps rather than lists like `seenUserIds`,
+`accepted` and `provisional` are maps like `captures`,
 because an accept is unrepeatable and the moment it happened matters. Both are
 stamped with local date and time text through `local-time.js`; a raw Unix
 timestamp in a cell a human reads has already been a reported defect on this
@@ -849,13 +846,11 @@ the provisional map it would lose every question a crashed run left behind, and
 each of those people would be messaged again with nothing recording that they
 may already have been. Failing loudly in one place is worth the indirection.
 
-`seenUserIds` is the seen set, and that is its name everywhere: the stored field,
-the reader inside `ledger.js`, and the accessor callers use. The one place the
-codebase says something else is `known` on a described record — deliberately
-broader, because it counts everyone the ledger will not re-fetch including people
-it learned about from a CSV import or an orphan adoption, while `totalDownloaded`
-counts only files this extension actually fetched. After importing 400 people,
-`downloaded` is still 0 and only `known` shows the import did anything.
+`captures` is the durable historical identity registry. Its provenance records
+how the extension learned the capture; it does not prove the file is available
+now. `seenUserIdsFor` is a compatibility reader derived from this map and is
+never stored. Operator-facing download counts come from positive reconciliation,
+not `totalDownloaded` or the number of capture keys.
 
 `folder` is remembered so a later re-download lands beside the originals rather
 than in whatever default the Library would have guessed.
@@ -874,11 +869,10 @@ conceals candidates until the recruiter unlocks them, so a queue can genuinely
 open with a full page of masked applicants; reading that as "fully seen" would
 have stopped a run before it reached anybody real.
 
-A userId is added to `seenUserIds` only after its file is written. A failed
-download is retried on the next run.
-
-`seenUserIds` is capped at 5000 entries per job with oldest-first eviction, a
-practical bound on `chrome.storage.local`'s 10 MB quota.
+A userId is added to `captures` only after its file is written, imported, or
+positively adopted from download history. A failed download is retried on the
+next run. Captured identities are never silently evicted; a storage failure is
+fatal before acceptance.
 
 ### 2. Reconciliation against Chrome's download history
 
@@ -894,8 +888,8 @@ carries `state` and `exists`, so three drifts become visible:
 | Drift | Meaning | Action |
 |---|---|---|
 | In ledger, `exists: false` or interrupted | file deleted, moved, or never finished | offer to re-download |
-| In ledger, no download record | history cleared, or never really wrote | trust the ledger, flag as unverifiable |
-| Download record, not in ledger | extension storage was cleared | adopt into the ledger |
+| In registry, no download record | history cleared, or never really wrote | flag as unverifiable; never accept |
+| Download record, not in registry | extension storage was cleared | auto-adopt before derivation |
 
 The judgement is made per person, not per download record: Chrome keeps a
 separate entry for every attempt, so one candidate can have both a completed
@@ -906,8 +900,8 @@ This turns "the extension thinks it has this" into "the file is on your disk",
 which is the claim you actually care about. No extra permission is needed —
 `downloads` already covers `search()`.
 
-Reconciliation never deletes ledger entries on its own. It reports, and the
-Library screen offers the actions.
+Reconciliation never deletes capture identities. Verified orphans are adopted
+automatically before counts or acceptance are derived.
 
 ### 3. CSV import
 
@@ -1119,22 +1113,17 @@ download nothing), **Fetch 20 at a time instead of 10**, and a verbose console
 toggle. There is no per-run item cap and no pace control; the number of people to
 take is a per-role choice on the row itself.
 
-The **Library** screen lists each known job with: downloaded, known, last run
-date, the three reconciliation drifts, and two groups whose files have left the
-disk and cannot simply be fetched again. Anybody accepted is reported as
-**accepted and can no longer be fetched**, not as missing. Anybody whose send was
-never confirmed is reported as having an accept nobody could confirm, which the
-next run settles. Neither draws a Re-download button. Both distinctions are made
-where the counts are read rather than inside the action, so the screen never
-offers a remedy it would refuse a moment later. One phrasing per fact: the
-accepted wording is the same sentence the re-download result uses, because it is
-the same fact told at a different moment, and the unconfirmed wording is
-deliberately not that sentence because it is not that fact. Actions per job,
-and only these:
-**Re-download missing**, **Adopt N found files** (shown only when reconciliation
-found orphans), **Import CSV**, and **Forget this job** (confirmed, and visually
-separated from the rest). There is no ledger export — the CSV *is* the portable
-form, and the import path reads it back.
+The **Library** screen lists each known job with the number of positively
+verified resumes available, last check date, and recoverable reconciliation
+drifts. Accepted and provisional maps remain internal delivery interlocks and
+are not displayed as counts. Identities outside Review are excluded from the
+Re-download action and described only as historical captures that cannot be
+recovered. Actions per job are **Re-download missing**, **Import CSV**, and
+**Forget this job** (confirmed, and visually separated from the rest). Verified
+orphans are auto-adopted before the screen renders. There is no ledger export —
+the CSV *is* the portable form, and the import path reads back only rows whose
+`Job ID` matches the selected Library job. CSV import can restore identities;
+it cannot prove a lossy legacy registry complete or clear its migration gate.
 
 ### Motion
 
@@ -1159,7 +1148,8 @@ it the absence of an action: `actions.download` off. A run carries one
 `actions` value, `{ download, accept }`, so the four modes a run can be in - the
 CSV alone, download, accept, or both - are each expressible; `download` defaults
 on because that is what a run has always done, and `accept` is only ever
-opt-in. The seen set is `seenUserIds`. The GraphQL page size is
+opt-in. Historical capture identity is the `captures` registry; current
+availability is the positive reconciliation set. The GraphQL page size is
 `pageSize` and the number of candidates to take from a role is `limit`; they used
 to share the name `first`, which is why the constant that means "25 candidates"
 was once called `DEFAULT_FIRST`.
@@ -1212,9 +1202,10 @@ the screen fixes itself when the operator does the thing it asked for.
   rather than two on purpose. It used to bound pass 1 alone, and pass 1 counts
   *new* downloads: on a role already fully downloaded its counter never moves, so
   a limit of 3 sent 115 messages. It now also means "at most N people are
-  messaged", applied last, after every row has its cell, so queue order is
-  preserved and a refusal or an already-accepted person does not spend the
-  number. If the two ever have to differ they should be two named settings on
+  messaged", applied last, after every row has its cell, so API discovery order
+  selects the capped identity set and a refusal or an already-accepted person
+  does not spend the number. The reviewer may present that set in another
+  order. If the two ever have to differ they should be two named settings on
   screen, not one number read two ways.
 - **The reload cadence** — see below. It is the one pacing constant argued from
   what the page needs rather than from what a person does, and it is named here
@@ -1505,10 +1496,9 @@ Accepting is the one path where a green test is not enough on its own, because
 the failure it guards against is a message to a real stranger. The rule on this path is
 that a guard which matters is mutation-tested rather than trusted: point the Accept selector at
 Reject and the guard must fire; loosen the anchor on the Accept pattern and the
-uniqueness check must catch it; take the accept knowledge out of the Library's
-counts and a test must fail on what the operator sees, not merely on an internal
-number; render a provisional person with the accepted wording and a test must
-fail on the sentence, because that sentence is the claim. A test named after a
+uniqueness check must catch it; let the Library expose accepted history as a
+product count and a test must fail on what the operator sees; allow a provisional
+person into either the recoverable or eligible set and a test must fail. A test named after a
 risk proves nothing until it has been watched to fail.
 
 This has caught real things twice. Unanchoring the Accept pattern once passed all
@@ -1540,8 +1530,8 @@ Manual verification checklist:
 3. Immediate re-run — early stop fires, nothing re-downloads.
 4. Delete one downloaded file, open Library — it reports one file missing and
    re-downloads only that one.
-5. Clear extension storage, open Library — it offers to adopt the existing
-   downloads instead of re-fetching everything.
+5. Clear extension storage, revisit Home and Library — verified existing
+   downloads are auto-adopted instead of re-fetched.
 6. A full run on a role of ~30 — completes, no rate limiting.
 7. Panel at 320 px and 500 px width; `prefers-reduced-motion` enabled; keyboard-
    only traversal with visible focus.

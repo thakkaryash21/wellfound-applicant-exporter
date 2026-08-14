@@ -76,6 +76,18 @@ describe('userIdsFromCsv', () => {
     expect(userIdsFromCsv(text)).toEqual(['111', '222']);
   });
 
+  it('imports only rows scoped to the selected job', () => {
+    const text =
+      `User ID,Job ID,Resume\r\n111,9100001,${D}\r\n` +
+      `222,9100002,${D}\r\n`;
+    expect(userIdsFromCsv(text, { jobId: '9100001' })).toEqual(['111']);
+  });
+
+  it('adopts nothing for a job-scoped import when Job ID is missing', () => {
+    const text = `User ID,Resume\r\n111,${D}\r\n`;
+    expect(userIdsFromCsv(text, { jobId: '9100001' })).toEqual([]);
+  });
+
   it('tolerates a BOM and quoted fields', () => {
     const text = `\ufeff"Name","User ID","Resume"\r\n"Doe, Jane","333","${D}"\r\n`;
     expect(userIdsFromCsv(text)).toEqual(['333']);

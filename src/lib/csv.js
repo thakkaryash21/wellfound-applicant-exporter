@@ -21,6 +21,7 @@ export const RESUME_STATUS = {
   // accept pass reads as "we hold their resume", and it used to also cover the
   // case below, which does not mean that at all.
   ALREADY: 'already downloaded',
+  NEEDS_RECOVERY: 'previously captured; resume needs recovery',
   // One person can hold two applications, so one person can hold two rows. The
   // walk spends a download on the first row it reaches and the second row gets
   // this: not an outcome, a pointer to where the outcome is. Whether the file
@@ -235,7 +236,7 @@ export const ADOPTABLE_RESUME_STATUSES = new Set([
 // CSV's shape: it declares the columns, it writes the Resume cell, and it is the
 // only place that has to change if a status string ever moves. importCsv would
 // otherwise have to re-parse header names to make the same decision.
-export function userIdsFromCsv(text) {
+export function userIdsFromCsv(text, { jobId = null } = {}) {
   const lines = text
     .replace(/^\ufeff/, '')
     .split(/\r?\n/)
@@ -244,6 +245,12 @@ export function userIdsFromCsv(text) {
   const header = parseRow(lines[0]);
   const index = header.indexOf('User ID');
   if (index === -1) return [];
+  const jobIndex = header.indexOf('Job ID');
+  // A Library import is per job. Without a matching Job ID column, a CSV from
+  // another role could teach this role that a genuinely new applicant was
+  // already captured. The unscoped form remains available to pure CSV readers;
+  // production imports always supply jobId and therefore fail closed here.
+  if (jobId !== null && jobIndex === -1) return [];
   const statusIndex = header.indexOf('Resume');
   // Older CSVs predate the Resume column. Their Resume Filename cell is the
   // only surviving evidence that a file landed, so fall back to it: a named
@@ -256,6 +263,7 @@ export function userIdsFromCsv(text) {
   const rows = lines.slice(1).map(parseRow);
   return rows
     .filter((row) => {
+      if (jobId !== null && row[jobIndex]?.trim() !== String(jobId)) return false;
       if (statusIndex !== -1) return ADOPTABLE_RESUME_STATUSES.has(row[statusIndex]?.trim());
       if (filenameIndex !== -1) return Boolean(row[filenameIndex]?.trim());
       // Neither column: nothing in the file distinguishes a fetched person from

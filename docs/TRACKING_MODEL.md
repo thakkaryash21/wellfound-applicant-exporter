@@ -1,15 +1,15 @@
 # Candidate tracking model
 
-- Status: **approved design contract; implementation pending**
+- Status: **implemented**
 - Approved: 2026-08-13
 - Review: independently adversarially reviewed against the code and focused
   test paths before documentation
 
-This is the canonical contract for candidate tracking. It deliberately records
-the model before implementation begins. The current code does not yet satisfy
-every rule below; in particular, Home estimates new applicants from incompatible
-counts, unverifiable captures can be treated as acceptance evidence, and the
-identity ledger silently evicts old entries.
+This is the canonical contract for candidate tracking. The implementation is
+split across `src/lib/tracking.js` (set derivation), `src/lib/ledger.js`
+(durable capture provenance and migration), `src/lib/runner.js` (complete Review
+snapshots), and `src/panel/run-controller.js` (fresh reconciliation and the
+acceptance gate).
 
 Changes to the definitions, equations, persisted state, or acceptance gates in
 this document must update the corresponding tests in the same change. Other
@@ -100,11 +100,19 @@ wall-clock TTL that turns an older snapshot into permission to send. A stale or
 incomplete snapshot may be shown as incomplete, but it may not produce an exact
 new count or authorize accepts.
 
-Building the plan materializes an immutable, ordered target list. A confirmed
+For Home display, the implementation exposes a completed snapshot once, only on
+the same tab URL and within five minutes. A later refresh requires another
+identity check because equal raw counts cannot prove the members are unchanged.
+
+Building the plan materializes an immutable target identity set. API discovery
+order decides which first `N` eligible identities enter that set, but does not
+constrain execution order: the reviewer and API orders are independently
+measured and may differ. A confirmed
 accept performed by that plan invalidates the snapshot for further count
 claims, because the queue changed, but does not invalidate the plan's remaining
 targets. Each remaining target still passes the live DOM identity/message
-interlock at its own click boundary. Any other invalidation stops the plan.
+interlock at its own click boundary. A document navigation, foreign bucket, or
+live identity/message mismatch stops the plan.
 
 ### Delivery safety state
 
@@ -172,7 +180,7 @@ eligibleToAccept = review
                    - accepted
                    - provisional
 
-plannedToAccept = first N eligibleToAccept identities in Review queue order
+plannedToAccept = first N eligibleToAccept identities in Review API discovery order
 ```
 
 These equations use identities, never subtraction between unrelated counts.
@@ -186,7 +194,9 @@ exception and are never silently folded into new, downloaded, or eligible.
 `N` is the job's acceptance limit. It is applied after unavailable, accepted,
 provisional, and otherwise refused identities have been removed. Those
 identities do not consume the limit, and the plan can never contain more than
-`N` people. An unlimited run preserves the complete eligible queue order.
+`N` people. The reviewer may encounter the selected identities in a different
+order; immutable membership, the per-target DOM identity gate, and the limit
+still constrain every send.
 
 ## Resume and acceptance decisions
 
@@ -260,9 +270,14 @@ A legacy record is migration-incomplete when its remembered identity list has
 reached the old 5,000-ID cap, when `totalDownloaded` exceeds the recoverable
 identity union, or when reconciliation itself does not complete. In that state,
 the extension publishes no exact new count and authorizes no acceptance. It
-offers CSV recovery or a complete current-Review recovery walk that positively
-captures every current identifiable applicant. Migration never claims that a
-successful but empty history search reconstructed erased information.
+offers scoped CSV identity restoration and a complete current-Review recovery
+walk that positively captures every current identifiable applicant. CSV rows
+are adopted only when their `Job ID` matches the selected Library job. A CSV may
+restore historical identities, but it never clears `migrationIncomplete`:
+neither its row count nor the legacy download counter proves that an evicted
+history is complete. Only the full current-Review recovery walk clears that
+state. Migration never claims that a successful but empty history search or a
+large CSV reconstructed erased information.
 
 Existing `accepted` and `provisional` maps are retained byte-for-byte. Their UI
 counts may be removed, but their meanings and timestamps do not change.
@@ -292,8 +307,9 @@ Implementation is complete only when automated tests prove all of the following:
 - duplicate rows cannot turn one failed capture into an eligible person;
 - accepted and provisional identities remain excluded even when their counts
   are hidden;
-- a per-role limit is applied after every refusal/exclusion, preserves Review
-  queue order, and never permits more than that many sends;
+- a per-role limit is applied after every refusal/exclusion, selects in API
+  discovery order, and never permits more than that many sends even when the
+  reviewer presents the selected identities in another order;
 - more than 5,000 captured identities remain exact, or storage failure stops
   visibly without accepting anyone;
 - a capped or otherwise loss-signalled legacy ledger remains migration-incomplete

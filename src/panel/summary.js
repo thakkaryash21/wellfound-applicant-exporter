@@ -268,12 +268,24 @@ export function summarize(event, trace = []) {
     // Wellfound's UI, and that decision has to be said: an accepting run that
     // reports nothing accepted, with no reason given, reads as a role where
     // there was nobody to accept.
-    const heldBack = jobs.filter((j) => j.acceptHeldBack).map((j) => j.jobTitle);
-    if (heldBack.length) {
+    const downloadHeldBack = jobs
+      .filter((j) => j.acceptHeldBackReason === 'downloads-failing')
+      .map((j) => j.jobTitle);
+    if (downloadHeldBack.length) {
       both(
-        `Nothing was accepted for ${listNames(heldBack)}: downloads kept failing, ` +
+        `Nothing was accepted for ${listNames(downloadHeldBack)}: downloads kept failing, ` +
           'so no messages were sent. Nobody was accepted and nothing is lost. ' +
           'Run that role again once downloads are working.',
+      );
+    }
+    const trackingHeldBack = jobs
+      .filter((j) => j.acceptHeldBackReason === 'tracking-incomplete')
+      .map((j) => j.jobTitle);
+    if (trackingHeldBack.length) {
+      both(
+        `Nothing was accepted for ${listNames(trackingHeldBack)}: the candidate check or ` +
+          'resume evidence was incomplete, so no safe target list could be established. ' +
+          'No messages were sent. Run that role again to complete recovery.',
       );
     }
 

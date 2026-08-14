@@ -105,6 +105,8 @@ export async function runJob(deps, options) {
   // number anywhere.
   const previewed = [];
   const records = [];
+  const observedBuckets = new Set();
+  let missingBucketEvidence = false;
   // Guarantees the unidentifiable are counted once per record per run even if a
   // cursor hands back a page that overlaps one already walked.
   const countedNoId = new Set();
@@ -142,6 +144,8 @@ export async function runJob(deps, options) {
     const pageRecords = pageResult.edges.map((n) =>
       normalizeNode(n, { jobId, jobTitle: pageResult.jobTitle ?? jobTitle }),
     );
+    if (pageResult.bucket) observedBuckets.add(pageResult.bucket);
+    else missingBucketEvidence = true;
     const { fresh, allSeen } = diffPage(pageRecords, seen);
     records.push(...pageRecords);
 
@@ -208,6 +212,14 @@ export async function runJob(deps, options) {
       // lands in exactly one - so their sum is "how many of the limit this walk
       // has spent", and a real run's arithmetic is unchanged.
       if (!discoveringAcceptTargets && downloaded.length + previewed.length >= limit) {
+        if (actions.accept) {
+          // Combined runs still need a complete Review identity snapshot. The
+          // download limit leaves this person untouched but cannot truncate
+          // discovery; Pass 2 will see NOT_REACHED and refuse them as capture
+          // evidence while preserving queue order for the people downloaded.
+          if (record.userId && !seen.has(record.userId)) seen.add(record.userId);
+          continue;
+        }
         stoppedBecause = 'limit';
         break;
       }
@@ -328,6 +340,16 @@ export async function runJob(deps, options) {
   // Kept as one array so callers that only want "how many did we not fetch"
   // still have it, while the causes stay separable.
   const skipped = [...skippedNoResume, ...skippedNoId];
+  const bucket = !missingBucketEvidence && observedBuckets.size === 1 ? [...observedBuckets][0] : null;
+  const complete = stoppedBecause === 'exhausted' && bucket !== null;
+  const snapshot = {
+    jobId: String(jobId),
+    bucket,
+    complete,
+    scannedAt: complete ? new Date().toISOString() : null,
+    userIds: [...new Set(records.map((record) => record.userId).filter(Boolean).map(String))],
+    unidentified: records.filter((record) => !record.userId).length,
+  };
 
   emit({
     type: 'job_done',
@@ -346,6 +368,7 @@ export async function runJob(deps, options) {
     failed,
     previewed,
     records,
+    snapshot,
     pages: pageNumber,
     stoppedBecause,
     // Everyone on the guest list the walk never reached. Empty for a normal run.

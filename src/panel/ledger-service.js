@@ -43,6 +43,13 @@ export function createLedgerService(storage) {
     // credit for resumes already on disk.
     recordDownloaded: (jobId, record, meta) => ledger.markDownloaded(jobId, [record.userId], meta),
 
+    // Reconciliation found files named by this extension that are present but
+    // absent from the registry. Adopt them before deriving new or acceptance
+    // sets so positive file evidence can never be mislabeled as a new person.
+    recordAdopted: (jobId, userIds) => ledger.adopt(jobId, userIds, 'adopted'),
+
+    markMigrationComplete: (jobId) => ledger.markMigrationComplete(jobId),
+
     acceptedUserIdsFor: (jobId) => ledger.acceptedUserIds(jobId),
 
     // Written per person, immediately - never batched. An accept sends a
@@ -75,7 +82,16 @@ export function createLedgerService(storage) {
       const jobs = await ledger.describeAll();
       const rows = [];
       for (const job of jobs) {
-        const status = await reconcileJob(job.jobId);
+        let status = await reconcileJob(job.jobId);
+        const adoptedCount = status.orphans.length;
+        if (status.orphans.length) {
+          await ledger.adopt(job.jobId, status.orphans, 'adopted');
+          status = {
+            ...status,
+            verified: [...status.verified, ...status.orphans],
+            orphans: [],
+          };
+        }
         // An accepted candidate has left NEEDS_REVIEW, which is the only
         // collection this extension can query, so no walk will ever fetch them
         // again. Counting them under `missing` would put a Re-download button
@@ -97,17 +113,14 @@ export function createLedgerService(storage) {
         rows.push({
           jobId: job.jobId,
           jobTitle: job.jobTitle,
-          downloaded: job.downloaded,
-          // Everyone the ledger will not re-fetch, including people it learned
-          // about from a CSV import or an adoption. After an import of 400,
-          // "0 downloaded" alone reads as "the import did nothing".
-          known: job.known,
+          resumesAvailable: status.verified.length,
+          captured: job.known + adoptedCount,
+          migrationIncomplete: job.migrationIncomplete,
           lastRunAt: job.lastRunAt,
           missing: status.missing.length - unreachable.length - unsettled.length,
           unreachable: unreachable.length,
           unsettled: unsettled.length,
           unverifiable: status.unverifiable.length,
-          orphans: status.orphans.length,
         });
       }
       return rows;
@@ -118,8 +131,11 @@ export function createLedgerService(storage) {
       // hit its limit carries hundreds of "not fetched: the run stopped first"
       // rows, and adopting those would mark people seen who were never fetched -
       // permanently, since nothing ever revisits the ledger.
-      const userIds = userIdsFromCsv(text);
-      await ledger.adopt(jobId, userIds);
+      const userIds = userIdsFromCsv(text, { jobId });
+      await ledger.adopt(jobId, userIds, 'imported');
+      // Import restores scoped identities, but it cannot prove a lossy legacy
+      // registry complete. Only the full current-Review recovery walk may
+      // clear migrationIncomplete.
       return { imported: userIds.length };
     },
 
@@ -129,7 +145,7 @@ export function createLedgerService(storage) {
     async adoptOrphans(jobId) {
       const status = await reconcileJob(jobId);
       if (status.orphans.length === 0) return { adopted: 0 };
-      await ledger.adopt(jobId, status.orphans);
+      await ledger.adopt(jobId, status.orphans, 'adopted');
       return { adopted: status.orphans.length };
     },
 

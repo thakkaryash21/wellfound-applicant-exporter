@@ -43,6 +43,7 @@ function fakePage({
   // comes to answer "unknown". That is the only answer which now leaves a
   // deferral unresolved: still-queued is a release, and gone is an accept.
   foreignBucket = false,
+  initialForeignBucket = false,
 }) {
   const calls = { fetches: [], listJobs: 0, reviewer: [] };
   const buckets = new Map();
@@ -51,6 +52,7 @@ function fakePage({
   // establish about an accept - there is no ACCEPTED status to ask for.
   const leftTheQueue = new Set();
   const positions = new Map();
+  let sendAttempted = false;
   const bucketFor = (jobId) => {
     if (!buckets.has(jobId)) buckets.set(jobId, (bucketByJob?.[jobId] ?? []).map(String));
     return buckets.get(jobId);
@@ -86,7 +88,10 @@ function fakePage({
           // REJECTED and SHORTLISTED, and this is the one the extension walks;
           // the queue check refuses to conclude anything from a page that came
           // back from a different bucket, so the fake has to send the real one.
-          bucket: foreignBucket ? 'SHORTLISTED' : 'NEEDS_REVIEW',
+          bucket:
+            initialForeignBucket || (foreignBucket && sendAttempted)
+              ? 'SHORTLISTED'
+              : 'NEEDS_REVIEW',
           // Wellfound's shapes, confirmed live: submittedAt a number of Unix
           // seconds, currentLocation an object. Both used to be pre-flattened
           // here, which meant this end-to-end suite never crossed formatDate's
@@ -154,6 +159,7 @@ function fakePage({
         positions.set(jobId, (positions.get(jobId) ?? 1) + 1);
       }
       if (message.type === CX.ACCEPT_CANDIDATE) {
+        sendAttempted = true;
         const here = at();
         if (!here || here.userId !== String(message.payload.expectedUserId)) {
           return { ok: false, error: `The reviewer is showing ${here?.userId}` };
@@ -219,6 +225,7 @@ function setup({
   // comes to answer "unknown". That is the only answer which now leaves a
   // deferral unresolved: still-queued is a release, and gone is an accept.
   foreignBucket = false,
+  initialForeignBucket = false,
 } = {}) {
   const page = fakePage({
     people,
@@ -228,6 +235,7 @@ function setup({
     bucketByJob,
     unconfirmed,
     foreignBucket,
+    initialForeignBucket,
   });
   fake = installFakeChrome({ tabs: [{ id: TAB, url: tabUrl }], pages: { [TAB]: page }, storage });
   return page;
@@ -271,6 +279,7 @@ afterEach(() => {
 });
 
 const ledgerRecord = () => fake.store[`job:${JOB}`];
+const capturedIds = () => Object.keys(ledgerRecord()?.captures ?? {});
 
 describe('startRun', () => {
   it('downloads every new applicant, names the file and records them', async () => {
@@ -287,7 +296,7 @@ describe('startRun', () => {
       'resumes/Jane Doe-7700001-9100001.pdf',
       'resumes/John Doe-7700002-9100001.pdf',
     ]);
-    expect(ledgerRecord().seenUserIds).toEqual(['7700001', '7700002']);
+    expect(capturedIds()).toEqual(['7700001', '7700002']);
     expect(ledgerRecord().totalDownloaded).toBe(2);
   });
 
@@ -435,10 +444,16 @@ describe('startRun', () => {
     expect(Math.min(...sleeps)).toBeGreaterThanOrEqual(1500);
   });
 
-  it('does not fetch anyone the ledger already knows', async () => {
+  it('does not fetch a ledger candidate whose file is positively available', async () => {
     setup({
       people: [person('7700001'), person('7700002')],
       storage: { [`job:${JOB}`]: { jobId: JOB, seenUserIds: ['7700001'], totalDownloaded: 1 } },
+    });
+    fake.addHistory({
+      filename: `resumes/Person 7700001-7700001-${JOB}.pdf`,
+      url: 'https://wellfound.com/link/7700001/tok/resume_url',
+      state: 'complete',
+      exists: true,
     });
     const controller = await controllerFor();
     await controller.startRun({
@@ -446,8 +461,12 @@ describe('startRun', () => {
       folder: 'resumes',
       pageSize: 10,
     });
-    const names = fake.items.filter((i) => i.url.includes('resume_url')).map((i) => i.filename);
-    expect(names).toEqual(['resumes/Person 7700002-7700002-9100001.pdf']);
+    const resumeDownloads = fake.calls.downloads.filter((item) =>
+      String(item.url).includes('resume_url'),
+    );
+    expect(resumeDownloads.map((item) => item.url)).toEqual([
+      'https://wellfound.com/link/7700002/tok/resume_url',
+    ]);
   });
 
   // Reconcile before the walk: a file the user deleted is missing from disk, and
@@ -810,7 +829,7 @@ describe('listJobs hydration', () => {
     };
     const controller = await controllerFor();
     const jobs = await controller.listJobs();
-    expect(jobs).toMatchObject([{ jobId: JOB, title: 'Backend Engineer', estimatedNew: null }]);
+    expect(jobs).toMatchObject([{ jobId: JOB, title: 'Backend Engineer', newCount: null }]);
   });
 
   // The flag used to be set before the try, so one closed tab disabled hydration
@@ -829,11 +848,7 @@ describe('listJobs hydration', () => {
     expect((await controller.listJobs()).map((j) => j.actionableCount)).toEqual([4, 7]);
   });
 
-  // The sibling of `known`, and it is on the list for the same reason: the
-  // confirm screen has to subtract the people this extension has already
-  // messaged, or the second run over a role asks the operator to approve a
-  // number that includes people it will then correctly skip.
-  it('carries how many of a role this extension has already accepted', async () => {
+  it('does not infer new applicants from the current count minus historical captures', async () => {
     setup({
       tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
       jobs: [{ jobId: JOB, title: 'Backend Engineer', actionableCount: 4 }],
@@ -847,16 +862,77 @@ describe('listJobs hydration', () => {
       },
     });
     const controller = await controllerFor();
-    expect(await controller.listJobs()).toMatchObject([{ known: 3, accepted: 2 }]);
+    const [job] = await controller.listJobs();
+    expect(job).toMatchObject({ known: 3, newCount: null, trackingExact: false });
+    expect(job.accepted).toBeUndefined();
   });
 
-  it('says nobody has been accepted for a role this extension has never run', async () => {
+  it('publishes exact new and ready counts after a complete identity walk', async () => {
     setup({
-      tabUrl: 'https://wellfound.com/recruit/jobs/9100001',
-      jobs: [{ jobId: JOB, title: 'Backend Engineer', actionableCount: 4 }],
+      people: [person('7700001'), person('7700002')],
+      jobs: [{ jobId: JOB, title: 'Backend Engineer', actionableCount: 2 }],
     });
     const controller = await controllerFor();
-    expect(await controller.listJobs()).toMatchObject([{ accepted: 0 }]);
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: Infinity, forceFullWalk: true }],
+      folder: 'resumes',
+      pageSize: 10,
+      actions: { download: true, accept: false },
+    });
+
+    expect(await controller.listJobs()).toMatchObject([
+      {
+        downloaded: 2,
+        newCount: 0,
+        readyToAccept: 2,
+        needsRecovery: 0,
+        trackingExact: true,
+      },
+    ]);
+    // A second refresh cannot assume an equal raw count means the same people.
+    expect(await controller.listJobs()).toMatchObject([
+      { newCount: null, readyToAccept: null, trackingExact: false },
+    ]);
+  });
+
+  it('invalidates an exact snapshot when the working tab navigates away', async () => {
+    setup({
+      people: [person('7700001')],
+      jobs: [{ jobId: JOB, title: 'Backend Engineer', actionableCount: 1 }],
+    });
+    const controller = await controllerFor();
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: Infinity, forceFullWalk: true }],
+      folder: 'resumes',
+      pageSize: 10,
+      actions: { download: true, accept: false },
+    });
+    await fake.chrome.tabs.update(TAB, { url: 'https://wellfound.com/recruit/jobs' });
+    expect(await controller.listJobs()).toMatchObject([
+      { newCount: null, readyToAccept: null, trackingExact: false },
+    ]);
+  });
+
+  it('invalidates an exact snapshot when the same URL gets a new document', async () => {
+    const url = `https://wellfound.com/recruit/applicants/jobs/${JOB}`;
+    setup({
+      tabUrl: url,
+      people: [person('7700001')],
+      jobs: [{ jobId: JOB, title: 'Backend Engineer', actionableCount: 1 }],
+    });
+    const controller = await controllerFor();
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: Infinity, forceFullWalk: true }],
+      folder: 'resumes',
+      pageSize: 10,
+      actions: { download: true, accept: false },
+    });
+
+    fake.navigateTab(TAB, url);
+
+    expect(await controller.listJobs()).toMatchObject([
+      { newCount: null, readyToAccept: null, trackingExact: false },
+    ]);
   });
 });
 
@@ -1048,7 +1124,7 @@ describe('importCsv', () => {
       row('7700002', RESUME_STATUS.ALREADY),
     ]);
     expect(result.imported).toBe(2);
-    expect(ledgerRecord().seenUserIds).toEqual(['7700001', '7700002']);
+    expect(capturedIds()).toEqual(['7700001', '7700002']);
   });
 
   // The bug: a run that hit its limit at page 8 of 20 writes a CSV whose tail is
@@ -1061,7 +1137,7 @@ describe('importCsv', () => {
       row('7700003', RESUME_STATUS.NOT_REACHED),
     ]);
     expect(result.imported).toBe(1);
-    expect(ledgerRecord().seenUserIds).toEqual(['7700001']);
+    expect(capturedIds()).toEqual(['7700001']);
   });
 
   it('refuses to adopt people with no resume and people it could not identify', async () => {
@@ -1071,18 +1147,50 @@ describe('importCsv', () => {
       row('7700003', RESUME_STATUS.LOCKED),
     ]);
     expect(result.imported).toBe(0);
-    expect(ledgerRecord()?.seenUserIds ?? []).toEqual([]);
+    expect(capturedIds()).toEqual([]);
   });
 
   it('never moves the downloaded counter, only what the run will skip', async () => {
     await importing([row('7700001', RESUME_STATUS.DOWNLOADED)]);
     expect(ledgerRecord().totalDownloaded).toBe(0);
-    expect(ledgerRecord().seenUserIds).toEqual(['7700001']);
+    expect(capturedIds()).toEqual(['7700001']);
   });
 
-  // The end-to-end shape of the bug: import, then run, and see whether the
-  // people the CSV never fetched are fetched now.
-  it('leaves the unfetched fetchable by the very next run', async () => {
+  it('keeps migration incomplete after a scoped CSV restores identities', async () => {
+    setup({
+      people: [],
+      storage: {
+        [`job:${JOB}`]: { jobId: JOB, seenUserIds: ['7700001'], totalDownloaded: 2 },
+      },
+    });
+    const controller = await controllerFor();
+    const result = await controller.importCsv(
+      JOB,
+      toCsv([
+        row('7700001', RESUME_STATUS.DOWNLOADED),
+        row('7700002', RESUME_STATUS.DOWNLOADED),
+      ]),
+    );
+    expect(result).toEqual({ imported: 2 });
+    expect(ledgerRecord().migrationIncomplete).toBe(true);
+  });
+
+  it('refuses to import adoptable rows from another job', async () => {
+    setup({ people: [] });
+    const controller = await controllerFor();
+    const result = await controller.importCsv(
+      JOB,
+      toCsv([
+        { ...row('7700001', RESUME_STATUS.DOWNLOADED), jobId: '9100002' },
+        { ...row('7700002', RESUME_STATUS.DOWNLOADED), jobId: '9100002' },
+      ]),
+    );
+
+    expect(result).toEqual({ imported: 0 });
+    expect(capturedIds()).toEqual([]);
+  });
+
+  it('revalidates an imported capture when this browser cannot verify its file', async () => {
     const csv = toCsv([
       row('7700001', RESUME_STATUS.DOWNLOADED),
       row('7700002', RESUME_STATUS.NOT_REACHED),
@@ -1096,7 +1204,10 @@ describe('importCsv', () => {
       pageSize: 10,
     });
     const names = fake.items.filter((i) => i.url.includes('resume_url')).map((i) => i.filename);
-    expect(names).toEqual(['resumes/Person 7700002-7700002-9100001.pdf']);
+    expect(names).toEqual([
+      'resumes/Person 7700001-7700001-9100001.pdf',
+      'resumes/Person 7700002-7700002-9100001.pdf',
+    ]);
   });
 });
 
@@ -1209,7 +1320,7 @@ describe('redownloadMissing', () => {
     withMissing([person('7700001')], ['7700001']);
     const controller = await controllerFor();
     await controller.redownloadMissing({ jobId: JOB });
-    expect(ledgerRecord().seenUserIds).toEqual(['7700001']);
+    expect(capturedIds()).toEqual(['7700001']);
     expect(ledgerRecord().totalDownloaded).toBe(1);
   });
 
@@ -1230,7 +1341,7 @@ describe('redownloadMissing', () => {
 });
 
 describe('library and adoption', () => {
-  it('counts people known from an import separately from files downloaded', async () => {
+  it('shows an imported identity as captured but not available without file evidence', async () => {
     setup({ people: [] });
     const controller = await controllerFor();
     await controller.importCsv(
@@ -1238,11 +1349,14 @@ describe('library and adoption', () => {
       toCsv([{ userId: '7700001', jobId: JOB, resumeStatus: RESUME_STATUS.DOWNLOADED }]),
     );
     const [row] = await controller.library();
-    expect(row).toMatchObject({ jobId: JOB, known: 1, downloaded: 0 });
+    expect(row).toMatchObject({ jobId: JOB, captured: 1, resumesAvailable: 0 });
   });
 
-  it('adopts files found on disk that the ledger never heard of', async () => {
-    setup({ people: [] });
+  it('automatically adopts verified files before the Library derives availability', async () => {
+    setup({
+      people: [],
+      storage: { [`job:${JOB}`]: { jobId: JOB, seenUserIds: [], totalDownloaded: 0 } },
+    });
     fake.addHistory({
       filename: `resumes/Jane Doe-7700001-${JOB}.pdf`,
       url: 'https://wellfound.com/link/7700001/tok/resume_url',
@@ -1250,8 +1364,10 @@ describe('library and adoption', () => {
       exists: true,
     });
     const controller = await controllerFor();
-    expect(await controller.adoptOrphans(JOB)).toEqual({ adopted: 1 });
-    expect(ledgerRecord().seenUserIds).toEqual(['7700001']);
+    const [row] = await controller.library();
+    expect(row).toMatchObject({ resumesAvailable: 1 });
+    expect(row).not.toHaveProperty('orphans');
+    expect(capturedIds()).toEqual(['7700001']);
   });
 
   it('forgets a job entirely', async () => {
@@ -1416,6 +1532,82 @@ describe('the accept pass', () => {
       ...extra,
     });
 
+  it('re-downloads a missing historical capture and accepts it in the same combined run', async () => {
+    setup({
+      people: [person('7700001')],
+      bucketByJob: { [JOB]: ['7700001'] },
+      storage: {
+        [`job:${JOB}`]: { jobId: JOB, seenUserIds: ['7700001'], totalDownloaded: 1 },
+      },
+    });
+    fake.addHistory({
+      filename: `resumes/Person 7700001-7700001-${JOB}.pdf`,
+      url: 'https://wellfound.com/link/7700001/tok/resume_url',
+      state: 'complete',
+      exists: false,
+    });
+    const controller = await controllerFor();
+    await acceptRun(controller, { pageSize: 10 });
+
+    expect(
+      fake.calls.sendMessage
+        .filter((call) => call.message.type === CX.ACCEPT_CANDIDATE)
+        .map((call) => String(call.message.payload.expectedUserId)),
+    ).toEqual(['7700001']);
+    expect(events.find((event) => event.type === 'done')).toMatchObject({
+      downloaded: 1,
+      accepted: 1,
+    });
+  });
+
+  it('keeps lossy migration blocked unless every current identifiable resume is available', async () => {
+    setup({
+      people: [person('7700001'), { ...person('7700002'), resumeUrl: null }],
+      bucketByJob: { [JOB]: ['7700001', '7700002'] },
+      storage: {
+        [`job:${JOB}`]: { jobId: JOB, seenUserIds: ['7700001'], totalDownloaded: 2 },
+      },
+    });
+    fake.addHistory({
+      filename: `resumes/Person 7700001-7700001-${JOB}.pdf`,
+      url: 'https://wellfound.com/link/7700001/tok/resume_url',
+      state: 'complete',
+      exists: true,
+    });
+    const controller = await controllerFor();
+    await acceptRun(controller, { pageSize: 10 });
+
+    expect(fake.calls.sendMessage.map((call) => call.message.type)).not.toContain(
+      CX.ACCEPT_CANDIDATE,
+    );
+    expect(ledgerRecord().migrationIncomplete).toBe(true);
+    expect(events.find((event) => event.type === 'done').jobs[0].acceptHeldBack).toBe(true);
+  });
+
+  it('clears lossy migration after a complete current-Review recovery and then accepts', async () => {
+    setup({
+      people: [person('7700001')],
+      bucketByJob: { [JOB]: ['7700001'] },
+      storage: {
+        [`job:${JOB}`]: { jobId: JOB, seenUserIds: ['7700001'], totalDownloaded: 2 },
+      },
+    });
+    fake.addHistory({
+      filename: `resumes/Person 7700001-7700001-${JOB}.pdf`,
+      url: 'https://wellfound.com/link/7700001/tok/resume_url',
+      state: 'complete',
+      exists: false,
+    });
+    const controller = await controllerFor();
+    await acceptRun(controller, { pageSize: 10 });
+
+    expect(ledgerRecord().migrationIncomplete).toBe(false);
+    expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual(['7700001']);
+    expect(controller.trace.entries().some((entry) => entry.step === 'migration_recovered')).toBe(
+      true,
+    );
+  });
+
   // Rule 1, and the reason this is a pass rather than a branch: accepting
   // removes people from the collection the API walk paginates, so a single
   // accept before the last fetch silently shortens the walk. Every fetch for a
@@ -1472,6 +1664,20 @@ describe('the accept pass', () => {
     expect(done).toMatchObject({ accepted: 1, acceptRefused: 1 });
     const csv = await objectUrls[0].text();
     expect(csv).toContain('refused: no resume on file');
+  });
+
+  it('authorizes no accepts when the completed walk observed a foreign bucket', async () => {
+    setup({
+      people: [person('7700001')],
+      bucketByJob: { [JOB]: ['7700001'] },
+      initialForeignBucket: true,
+    });
+    const controller = await controllerFor();
+    await acceptRun(controller);
+
+    const sent = fake.calls.sendMessage.filter((call) => call.message.type === CX.ACCEPT_CANDIDATE);
+    expect(sent).toEqual([]);
+    expect(events.find((event) => event.type === 'done')).toMatchObject({ accepted: 0 });
   });
 
   it('sends the operator s wording, with the candidate and the role in it', async () => {
@@ -1747,6 +1953,95 @@ describe('the accept pass', () => {
       fake.calls.sendMessage
         .filter((call) => call.message.type === CX.ACCEPT_CANDIDATE)
         .map((call) => String(call.message.payload.expectedUserId));
+
+    it('refuses a ledger-known candidate whose resume is not positively available', async () => {
+      setup({
+        people: [person('7700001')],
+        bucketByJob: { [JOB]: ['7700001'] },
+        storage: {
+          [`job:${JOB}`]: {
+            jobId: JOB,
+            // This is the shape left by a CSV import or legacy ledger on a
+            // browser whose download history cannot vouch for the file.
+            seenUserIds: ['7700001'],
+            totalDownloaded: 0,
+          },
+        },
+      });
+      const controller = await controllerFor();
+      await controller.startRun({
+        jobs: [{ jobId: JOB, limit: Infinity }],
+        folder: 'resumes',
+        pageSize: 10,
+        actions: { download: false, accept: true },
+      });
+
+      expect(sentTo()).toEqual([]);
+      expect(Object.keys(ledgerRecord().accepted ?? {})).toEqual([]);
+      expect(events.find((event) => event.type === 'done')).toMatchObject({
+        accepted: 0,
+        acceptRefused: 1,
+      });
+      expect(await objectUrls[0].text()).toContain('refused: no resume on file');
+    });
+
+    it('reconciles again before planning and refuses a file deleted during the queue walk', async () => {
+      setup({
+        people: [person('7700001')],
+        bucketByJob: { [JOB]: ['7700001'] },
+        storage: {
+          [`job:${JOB}`]: { jobId: JOB, seenUserIds: ['7700001'], totalDownloaded: 1 },
+        },
+      });
+      fake.addHistory({
+        filename: `resumes/Person 7700001-7700001-${JOB}.pdf`,
+        url: 'https://wellfound.com/link/7700001/tok/resume_url',
+        state: 'complete',
+        exists: true,
+      });
+      const search = fake.chrome.downloads.search;
+      let searches = 0;
+      fake.chrome.downloads.search = async (query) => {
+        searches += 1;
+        if (searches === 2) {
+          fake.items.find((item) => item.filename.includes(`-${JOB}.pdf`)).exists = false;
+        }
+        return search(query);
+      };
+      const controller = await controllerFor();
+      await controller.startRun({
+        jobs: [{ jobId: JOB, limit: Infinity }],
+        folder: 'resumes',
+        pageSize: 10,
+        actions: { download: false, accept: true },
+      });
+
+      expect(sentTo()).toEqual([]);
+      expect(await objectUrls[0].text()).toContain('refused: no resume on file');
+    });
+
+    it('adopts a verified orphan before deriving acceptance eligibility', async () => {
+      setup({
+        people: [person('7700001')],
+        bucketByJob: { [JOB]: ['7700001'] },
+      });
+      fake.addHistory({
+        filename: `resumes/Person 7700001-7700001-${JOB}.pdf`,
+        url: 'https://wellfound.com/link/7700001/tok/resume_url',
+        state: 'complete',
+        exists: true,
+      });
+      const controller = await controllerFor();
+      await controller.startRun({
+        jobs: [{ jobId: JOB, limit: Infinity }],
+        folder: 'resumes',
+        pageSize: 10,
+        actions: { download: false, accept: true },
+      });
+
+      expect(sentTo()).toEqual(['7700001']);
+      expect(ledgerRecord().captures).toMatchObject({ 7700001: 'adopted' });
+    });
 
     it('messages three people when the role is limited to three', async () => {
       await retroactiveRun(3);

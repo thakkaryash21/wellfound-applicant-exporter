@@ -260,10 +260,12 @@ export function planAccepts({
   // them. They are not `alreadyAccepted` either, because that word promises one
   // did. They keep the cell that says exactly what is known, which is nothing.
   heldProvisional = [],
+  allowedTargets = null,
   limit = Infinity,
 } = {}) {
   const already = new Set(alreadyAccepted.map(String));
   const held = new Set(heldProvisional.map(String));
+  const allowed = allowedTargets == null ? null : new Set(allowedTargets.map(String));
   // Grouped before anything is decided, because the decision is about a PERSON
   // and the evidence is spread across their rows. Deciding row by row let one
   // person be refused on the row whose download failed and accepted on the
@@ -322,19 +324,22 @@ export function planAccepts({
       heldCount += rows.length;
       continue;
     }
+    if (allowed && !allowed.has(userId)) {
+      for (const row of rows) row.acceptStatus = ACCEPT_STATUS.NOT_REACHED;
+      continue;
+    }
     targets.push(userId);
     // Held until the walk reaches them. A pass that stops early leaves this
     // word in the cell, which is the honest one.
     for (const row of rows) row.acceptStatus = ACCEPT_STATUS.NOT_REACHED;
   }
 
-  // Cut here, last, once every row has its cell. Order is the order pass 1
-  // handed the records over - Wellfound's own queue order, the order the API
-  // paginated them in - carried through `records`, then through this Map's
+  // Cut here, last, once every row has its cell. Selection order is the API
+  // discovery order pass 1 handed over, carried through `records`, this Map's
   // insertion order, and out to `targets` unchanged. It is deliberately not
-  // whatever order a Map or an object happens to yield for a set of ids: the
-  // people a capped run takes are the ones at the front of the queue, which is
-  // also where the reviewer starts, so a small run skips past nobody.
+  // object-key order. The reviewer is measured to use an independent order,
+  // so execution treats this result as an immutable identity set and may
+  // encounter its members in a different sequence.
   //
   // `Infinity` is the unlimited case and slices nothing: a role set to
   // "everyone" still accepts everyone.
@@ -626,6 +631,7 @@ export async function runAcceptPass(deps, options) {
     // that has no opinion should get - but the run controller always has one,
     // because every role on Home always carries either a number or Infinity.
     limit = Infinity,
+    plannedUserIds = null,
   } = options;
 
   // Questions a previous run left behind, answered before this one plans
@@ -654,10 +660,21 @@ export async function runAcceptPass(deps, options) {
     releaseAccepted,
     emit,
   });
+  // A queued held-over send has just been proven not to have happened and its
+  // provisional interlock has been released. That proof occurs before the
+  // immutable plan is materialized, so the candidate may re-enter this run's
+  // allowed set without expanding the per-role limit.
+  // Fail closed at this boundary. A caller that omitted the identity-derived
+  // eligible set authorizes nobody; captured-looking rows are not a fallback
+  // plan for an irreversible send.
+  const allowedTargets = Array.isArray(plannedUserIds)
+    ? [...new Set([...plannedUserIds, ...heldOver.released])]
+    : [];
   const plan = planAccepts({
     records,
     alreadyAccepted: [...alreadyAccepted, ...heldOver.confirmed],
     heldProvisional: heldOver.held,
+    allowedTargets,
     limit,
   });
   const intended = plan.targets.length;

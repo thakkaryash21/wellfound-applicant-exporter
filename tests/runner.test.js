@@ -83,6 +83,34 @@ describe('runJob', () => {
     expect(out.stoppedBecause).toBe('exhausted');
   });
 
+  it('returns a complete identity snapshot only after exhausting one review bucket', async () => {
+    const first = { ...page([1, 2]), bucket: 'NEEDS_REVIEW' };
+    const last = { ...page([2, 3], false), bucket: 'NEEDS_REVIEW' };
+    const out = await runJob(deps({ fetchPage: pager([first, last]) }), {
+      ...options,
+      forceFullWalk: true,
+    });
+
+    expect(out.snapshot).toMatchObject({
+      jobId: '9100001',
+      bucket: 'NEEDS_REVIEW',
+      complete: true,
+      userIds: ['1', '2', '3'],
+      unidentified: 0,
+    });
+    expect(out.snapshot.scannedAt).toEqual(expect.any(String));
+  });
+
+  it('does not authorize a snapshot when any page omits bucket evidence', async () => {
+    const first = { ...page([1, 2]), bucket: 'NEEDS_REVIEW' };
+    const last = { ...page([3], false), bucket: null };
+    const out = await runJob(deps({ fetchPage: pager([first, last]) }), {
+      ...options,
+      actions: { download: false, accept: true },
+    });
+    expect(out.snapshot).toMatchObject({ complete: false, bucket: null, scannedAt: null });
+  });
+
   // C3: these three fields used to arrive at runJob already in the shape our own
   // code produces, so no end-to-end test here ever crossed normalize.js's
   // coercions. The fixture now sends what Wellfound sends; this asserts what
@@ -173,6 +201,24 @@ describe('runJob', () => {
     const out = await runJob(d, { ...options, limit: 2 });
     expect(d.downloadResume).toHaveBeenCalledTimes(2);
     expect(out.stoppedBecause).toBe('limit');
+  });
+
+  it('keeps scanning after a combined run reaches its download limit', async () => {
+    const pages = [
+      { ...page([1, 2, 3]), bucket: 'NEEDS_REVIEW' },
+      { ...page([4, 5], false), bucket: 'NEEDS_REVIEW' },
+    ];
+    const d = deps({ fetchPage: pager(pages) });
+    const out = await runJob(d, {
+      ...options,
+      limit: 2,
+      actions: { download: true, accept: true },
+    });
+
+    expect(out.downloaded.map((record) => record.userId)).toEqual(['1', '2']);
+    expect(out.records.map((record) => record.userId)).toEqual(['1', '2', '3', '4', '5']);
+    expect(out.snapshot.complete).toBe(true);
+    expect(out.stoppedBecause).toBe('exhausted');
   });
 
   // C2: `previewed` is a preview's `downloaded`, and gating the limit on

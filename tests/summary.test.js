@@ -220,12 +220,29 @@ describe('the accept pass, afterwards', () => {
     expect(s.headline).toBe('12 downloaded \u00b7 12 accepted');
   });
 
+  it('distinguishes an incomplete tracking model from download failures', () => {
+    const notes = summarize(
+      accepting({
+        jobs: [
+          {
+            jobId: '1',
+            jobTitle: 'Platform Engineer',
+            acceptHeldBack: true,
+            acceptHeldBackReason: 'tracking-incomplete',
+          },
+        ],
+      }),
+    ).notes.join('\n');
+    expect(notes).toContain('candidate check or resume evidence was incomplete');
+    expect(notes).not.toContain('downloads kept failing');
+  });
+
   it('says the accepts cannot be undone', () => {
     expect(summarize(accepting({ accepted: 12 })).notes.join('\n')).toContain('cannot be undone');
   });
 
-  // The home screen's counts drop, possibly to zero, because the queue drained.
-  // Unsaid, that reads as the extension having lost the applicants.
+  // Wellfound's role-screen queue counts drop, possibly to zero, because the
+  // queue drained. Unsaid, that reads as the extension having lost applicants.
   it('explains why the roles screen will show fewer applicants now', () => {
     const notes = summarize(accepting({ accepted: 12 })).notes.join('\n');
     expect(notes).toContain('lower now, perhaps zero');

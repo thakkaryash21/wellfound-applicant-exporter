@@ -1,15 +1,20 @@
 import { localDateTimeText } from './local-time.js';
 
-export const MAX_SEEN = 5000;
-
 const KEY_PREFIX = 'job:';
+const SCHEMA_VERSION = 2;
+const LEGACY_MAX_SEEN = 5000;
 const key = (jobId) => `${KEY_PREFIX}${jobId}`;
 
 function emptyRecord(jobId) {
   return {
     jobId,
     jobTitle: null,
-    seenUserIds: [],
+    schemaVersion: SCHEMA_VERSION,
+    // userId -> how this extension learned that a resume was captured. The
+    // registry is authoritative; the former seenUserIds array is migration
+    // input only and is never written again.
+    captures: {},
+    migrationIncomplete: false,
     lastRunAt: null,
     totalDownloaded: 0,
     folder: null,
@@ -39,24 +44,50 @@ function emptyRecord(jobId) {
   };
 }
 
-// Everyone this ledger will not fetch again: downloads, CSV imports and adopted
-// orphans alike. Its own arithmetic, so it lives here rather than being spelled
-// out at each call site.
-function knownCount(record) {
-  return new Set(record?.seenUserIds ?? []).size;
+function captureMap(record) {
+  return record?.captures ?? {};
 }
 
-// The record's field names stop here.
-//
-// `record.seenUserIds ?? []` used to be written out at the call sites, which
-// made a rename silently survivable in the worst possible way: the field goes
-// missing, `?? []` turns that into an empty set, and the run treats every
-// applicant as new - hundreds of resumes re-fetched at human pacing with no
-// error anywhere. This module is the one place that knows the shape, so it is
-// the one place allowed to default it, and a rename inside it fails loudly at
-// the only site that could have been forgotten.
-function seenUserIds(record) {
-  return record?.seenUserIds ?? [];
+function captureIds(record) {
+  return Object.keys(captureMap(record));
+}
+
+function normalizeRecord(raw, jobId) {
+  if (!raw) return { record: emptyRecord(jobId), migrated: false };
+  if (raw.schemaVersion === SCHEMA_VERSION && raw.captures) {
+    return {
+      record: { ...emptyRecord(jobId), ...raw, jobId: String(jobId) },
+      migrated: false,
+    };
+  }
+
+  const legacyIds = [...new Set((raw.seenUserIds ?? []).filter(Boolean).map(String))];
+  const captures = Object.fromEntries(legacyIds.map((id) => [id, 'legacy']));
+  const { seenUserIds: _legacy, ...rest } = raw;
+  const migrationIncomplete =
+    Boolean(raw.migrationIncomplete) ||
+    legacyIds.length >= LEGACY_MAX_SEEN ||
+    Number(raw.totalDownloaded ?? 0) > legacyIds.length;
+  return {
+    record: {
+      ...emptyRecord(jobId),
+      ...rest,
+      jobId: String(jobId),
+      schemaVersion: SCHEMA_VERSION,
+      captures,
+      migrationIncomplete,
+    },
+    migrated: true,
+  };
+}
+
+// Compatibility for existing internal diagnostics and tests. This is derived
+// on read and never stored, so there remains one authoritative identity source.
+function withSeenProjection(record) {
+  return Object.defineProperty({ ...record }, 'seenUserIds', {
+    value: captureIds(record),
+    enumerable: false,
+  });
 }
 
 // Same defaulting rule as seenUserIds, and for the same reason: this is the
@@ -90,7 +121,8 @@ function describeRecord(record) {
     // same set plus everyone a CSV import or an orphan adoption taught it.
     // After importing 400 people, `downloaded` is still 0 and only this number
     // shows the import did anything.
-    known: knownCount(record),
+    known: captureIds(record).length,
+    migrationIncomplete: Boolean(record.migrationIncomplete),
     lastRunAt: record.lastRunAt ?? null,
     folder: record.folder ?? null,
   };
@@ -99,35 +131,42 @@ function describeRecord(record) {
 export function createLedger(storage) {
   async function get(jobId) {
     const stored = await storage.get(key(jobId));
-    return stored[key(jobId)] ?? emptyRecord(jobId);
+    const raw = stored[key(jobId)];
+    const { record, migrated } = normalizeRecord(raw, jobId);
+    if (migrated) await put(record);
+    return withSeenProjection(record);
   }
 
   async function put(record) {
-    await storage.set({ [key(record.jobId)]: record });
+    const { seenUserIds: _projection, ...stored } = record;
+    await storage.set({ [key(record.jobId)]: stored });
   }
 
-  function merge(existingList, ids) {
-    const existing = new Set(existingList);
-    // Add as we filter, so a batch is deduped against itself as well as against
-    // what is already stored.
-    const added = ids.filter((id) => {
-      if (!id || existing.has(id)) return false;
-      existing.add(id);
-      return true;
-    });
-    const list = [...existingList, ...added];
-    return {
-      list: list.length > MAX_SEEN ? list.slice(list.length - MAX_SEEN) : list,
-      addedCount: added.length,
-    };
+  function mergeCaptures(record, ids, provenance) {
+    const captures = { ...captureMap(record) };
+    let addedCount = 0;
+    let newlyDownloaded = 0;
+    for (const raw of ids) {
+      if (!raw) continue;
+      const id = String(raw);
+      const previous = captures[id];
+      if (!previous) addedCount += 1;
+      if (provenance === 'downloaded' && !previous) newlyDownloaded += 1;
+      if (!previous || provenance === 'downloaded' || provenance === 'adopted') {
+        captures[id] = provenance;
+      }
+    }
+    return { captures, addedCount, newlyDownloaded };
   }
 
   return {
     get,
-    // Everyone this job will not fetch again. The run subtracts from this list;
-    // it never reaches into the record to build it.
+    // Everyone historically captured for this job. This is not evidence that
+    // the file is still available: callers must reconcile it against Chrome
+    // download history before using any identity as a download or acceptance
+    // exclusion.
     async seenUserIds(jobId) {
-      return seenUserIds(await get(jobId));
+      return captureIds(await get(jobId));
     },
     async describe(jobId) {
       return describeRecord(await get(jobId));
@@ -138,31 +177,42 @@ export function createLedger(storage) {
     // `totalDownloaded`, `jobTitle` and `lastRunAt` off the storage shape.
     async describeAll() {
       const everything = await storage.get(null);
-      return Object.entries(everything)
-        .filter(([k]) => k.startsWith(KEY_PREFIX))
-        .map(([, v]) => describeRecord(v));
+      const rows = [];
+      for (const [storedKey, raw] of Object.entries(everything)) {
+        if (!storedKey.startsWith(KEY_PREFIX)) continue;
+        const jobId = String(raw?.jobId ?? storedKey.slice(KEY_PREFIX.length));
+        const { record, migrated } = normalizeRecord(raw, jobId);
+        if (migrated) await put(record);
+        rows.push(describeRecord(record));
+      }
+      return rows;
     },
     // Takes the userIds themselves. It used to take `{ applicantId, userId }`
     // entries and drop the applicantId on the floor, which meant two call sites
     // passed a literal `null` for a field no ledger function has ever read.
     async markDownloaded(jobId, userIds, meta = {}) {
       const record = await get(jobId);
-      const users = merge(seenUserIds(record), userIds);
+      const merged = mergeCaptures(record, userIds, 'downloaded');
       await put({
         ...record,
         jobTitle: meta.jobTitle ?? record.jobTitle,
-        seenUserIds: users.list,
+        captures: merged.captures,
         // Counted on unique userIds: one person who applied to the job twice is
         // one file on disk, so they must not count twice. userId is the only
         // identity this ledger keeps; two identity sets that could drift apart
         // is a bug waiting to be found.
-        totalDownloaded: record.totalDownloaded + users.addedCount,
+        totalDownloaded: record.totalDownloaded + merged.newlyDownloaded,
       });
     },
-    async adopt(jobId, userIds) {
+    async adopt(jobId, userIds, provenance = 'imported') {
       const record = await get(jobId);
-      const users = merge(seenUserIds(record), userIds);
-      await put({ ...record, seenUserIds: users.list });
+      const merged = mergeCaptures(record, userIds, provenance);
+      await put({ ...record, captures: merged.captures });
+    },
+    async markMigrationComplete(jobId) {
+      const record = await get(jobId);
+      if (!record.migrationIncomplete) return;
+      await put({ ...record, migrationIncomplete: false });
     },
     // `folder` is remembered so a later re-download lands beside the originals
     // instead of in whatever default the Library screen would have guessed.
@@ -177,9 +227,9 @@ export function createLedger(storage) {
         folder: folder ?? record.folder ?? null,
       });
     },
-    // Everyone this job has already been sent an accept message for. Mirrors
-    // seenUserIds: the accept pass subtracts from this list, it never reaches
-    // into the record itself.
+    // Everyone this job has already been sent an accept message for. The
+    // accept pass subtracts from this list; it never reaches into the record
+    // itself.
     async acceptedUserIds(jobId) {
       return Object.keys(acceptedMap(await get(jobId)));
     },
@@ -259,7 +309,7 @@ export function createLedger(storage) {
       await storage.remove(key(jobId));
     },
     // The accept-only equivalent of forget. Deliberately narrower: it clears
-    // who has been messaged for this job without touching seenUserIds or
+    // who has been messaged for this job without touching capture history or
     // totalDownloaded, so a rerun after clearing it re-walks accept targets
     // but does not re-fetch resumes already on disk. Named to say exactly
     // what it clears, so it can never be wired to the same button as forget

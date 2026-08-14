@@ -102,8 +102,9 @@ Treat them as measurements, and re-measure rather than infer if you doubt them.
 - **The status enum is exactly `NEEDS_REVIEW`, `REJECTED`, `SHORTLISTED`** (found
   by sending an invalid value and reading the error), and `filters` may not be
   null or empty. There is no `ACCEPTED`. An accepted candidate appears in none of
-  the three, so they are unreachable forever. The Library must say so up front
-  rather than walking forty pages to report them missing.
+  the three, so they are unreachable forever. The internal delivery ledger keeps
+  them out of recovery; the Library reports the generic unrecoverable state and
+  does not expose an accepted count.
 - **Applicant counts come from a separate query**, not from the Apollo cache.
   Waiting on the cache for them was a bug that told users to reopen the panel for
   a number that was never coming.

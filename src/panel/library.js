@@ -15,7 +15,7 @@ export function describeRefetch({
   // saying "still missing" would send the user looking for a button that
   // cannot exist.
   const gone = acceptedGone
-    ? `${acceptedGone} ${acceptedGone === 1 ? 'was' : 'were'} accepted and can no longer be fetched`
+    ? `${acceptedGone} ${acceptedGone === 1 ? 'is' : 'are'} no longer in Review and cannot be fetched`
     : '';
   if (acceptedGone && refetched === 0 && stillMissing === 0) {
     return `Nothing to re-download: ${gone}`;
@@ -70,15 +70,11 @@ function states(job) {
     parts.push(`<span class="warn num">${job.missing}</span>
       <span class="job-meta"> missing from disk</span>`);
   }
-  // Not "missing", which is this screen's word for a file a walk can fetch
-  // back. An accepted candidate has left the only collection this extension can
-  // query, so there is nothing to fetch and no button below to offer. The
-  // wording is the one describeRefetch already uses, because it is the same
-  // fact told at a different moment.
+  // Keep the delivery interlock internal. The Library is about resume
+  // availability, not an accepted metric; it only needs to explain why some
+  // historical captures cannot be offered for recovery.
   if (job.unreachable) {
-    parts.push(`<span class="num">${job.unreachable}</span>
-      <span class="job-meta"> ${job.unreachable === 1 ? 'was' : 'were'} accepted
-      and can no longer be fetched</span>`);
+    parts.push('<span class="job-meta">some historical captures are no longer in Review and cannot be recovered</span>');
   }
   // Deliberately not the accepted wording, and deliberately not "missing". A
   // provisional entry means Send was armed and nobody could vouch for its use,
@@ -86,19 +82,16 @@ function states(job) {
   // review queue and settles it, which is also the only thing that can, so this
   // line says who is waiting and leaves no button to press.
   if (job.unsettled) {
-    parts.push(`<span class="num">${job.unsettled}</span>
-      <span class="job-meta"> ${job.unsettled === 1 ? 'has' : 'have'} an accept nobody
-      could confirm, so the next run settles it</span>`);
+    parts.push('<span class="job-meta">an acceptance outcome still needs reconciliation on the next run</span>');
   }
   if (job.unverifiable) {
     parts.push(`<span class="num">${job.unverifiable}</span>
       <span class="job-meta"> not in your download history, so can\u2019t verify</span>`);
   }
-  if (job.orphans) {
-    parts.push(`<span class="num">${job.orphans}</span>
-      <span class="job-meta"> found on disk but not in the ledger</span>`);
+  if (job.migrationIncomplete) {
+    parts.push('<span class="job-meta warn">tracking history needs recovery before accepting</span>');
   }
-  if (parts.length === 0) return '<span class="job-meta">all files present</span>';
+  if (parts.length === 0) return '<span class="job-meta">all available resumes verified</span>';
   return parts.map((p) => `<div>${p}</div>`).join('');
 }
 
@@ -109,17 +102,13 @@ function row(job) {
     <div class="lib-row" data-id="${escapeHtml(job.jobId)}">
       <div class="job-title">${escapeHtml(job.jobTitle ?? job.jobId)}</div>
       <div class="job-meta">
-        <span class="num">${job.downloaded}</span> downloaded \u00b7
-        <span class="num">${job.known}</span> known \u00b7 last run ${last}
+        <span class="num">${job.resumesAvailable}</span> ${
+          job.resumesAvailable === 1 ? 'resume' : 'resumes'
+        } available \u00b7 last checked ${last}
       </div>
       <div>${missing}</div>
       <div class="lib-actions">
         ${job.missing ? '<button type="button" data-act="refetch">Re-download missing</button>' : ''}
-        ${
-          job.orphans
-            ? `<button type="button" data-act="adopt">Adopt ${job.orphans} found files</button>`
-            : ''
-        }
         <button type="button" data-act="import">Import CSV</button>
         <button type="button" data-act="forget" class="danger">Forget this job</button>
       </div>
@@ -172,23 +161,6 @@ export async function renderLibrary(screen, { controller, onBack }) {
       } finally {
         button.dataset.running = '';
         button.disabled = false;
-      }
-    });
-
-    element.querySelector('[data-act="adopt"]')?.addEventListener('click', async (event) => {
-      const button = event.currentTarget;
-      button.disabled = true;
-      try {
-        const { adopted } = await controller.adoptOrphans(jobId);
-        // Re-render for the same reason the import path does: this screen
-        // exists to show where the ledger and the disk disagree, so its own
-        // counts must never outlive a change to the ledger.
-        await renderLibrary(screen, { controller, onBack });
-        // The re-render replaced the row, so the note goes on the new one.
-        showNote(screen.querySelector(`.lib-row[data-id="${jobId}"]`), `Adopted ${adopted} files.`);
-      } catch (error) {
-        button.disabled = false;
-        showError(element, error.message);
       }
     });
 

@@ -192,7 +192,10 @@ function requestedJobs() {
     return {
       jobId: job.jobId,
       limit: setting.mode === 'all' ? Infinity : setting.limit,
-      forceFullWalk: setting.rereadPages,
+      // A count-free Home is honest but not useful forever. The first check
+      // after opening the panel completes the identity walk; later runs may
+      // use the ordinary early-stop economy until the snapshot is invalidated.
+      forceFullWalk: setting.rereadPages || !job.trackingExact,
     };
   });
 }

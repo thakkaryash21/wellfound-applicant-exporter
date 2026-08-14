@@ -70,14 +70,19 @@ That is deliberate: it is one person's browser doing one thing at a time.
 
 Three sources, in order of authority:
 
-- **A per-job ledger** in extension storage, keyed on user ID — the identifier
-  that survives a CSV round-trip, a filename, and a move to another machine.
+- **A per-job capture registry** in extension storage, keyed on user ID — the
+  identifier that survives a CSV round-trip, a filename, and a move to another
+  machine. It retains provenance without silently evicting old identities.
 - **Reconciliation against Chrome's own download history**, which catches files
-  you deleted or moved. The Library screen shows what is verified present, what
-  is missing, what it cannot verify, and what it found on disk but does not know
-  about.
+  you deleted or moved. Home and Library count only positively verified resumes;
+  missing or unverifiable files are never acceptance evidence. Verified orphan
+  files are adopted automatically.
 - **CSV import**, for a new machine or a fresh profile. Only rows whose resume
   actually landed are adopted.
+
+Exact new-applicant and ready-to-accept counts come only from a complete current
+Needs Review identity scan. If that scan or legacy migration is incomplete, the
+extension shows no exact count and sends no acceptance messages.
 
 ## Privacy
 

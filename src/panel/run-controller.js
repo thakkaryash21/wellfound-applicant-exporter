@@ -1,10 +1,11 @@
 import { runJob, runActions } from '../lib/runner.js';
-import { toCsv, PREVIEW, ACCEPT_STATUS } from '../lib/csv.js';
+import { toCsv, PREVIEW, ACCEPT_STATUS, RESUME_STATUS } from '../lib/csv.js';
 import { PACING, sample, sleep as realSleep } from '../lib/jitter.js';
 import { normalizeNode } from '../lib/normalize.js';
 import { CX } from '../lib/messages.js';
 import { createTrace, scrubVariables } from '../lib/trace.js';
 import { localDateStamp } from '../lib/local-time.js';
+import { deriveTracking, REVIEW_BUCKET } from '../lib/tracking.js';
 import { consoleSink } from './verbose-console.js';
 import { createTabDriver } from './tab-driver.js';
 import { createLedgerService } from './ledger-service.js';
@@ -24,6 +25,7 @@ export function runKind(actions) {
 // A re-download walks pages looking for userIds that may have left the review
 // bucket entirely, so it needs a stop that does not depend on hasNextPage.
 const REDOWNLOAD_PAGE_CAP = 40;
+const REVIEW_SNAPSHOT_MAX_AGE_MS = 5 * 60 * 1000;
 // The same page size a normal, non-"Faster" run asks for, so a re-download's
 // requests are indistinguishable from an ordinary one's.
 const REDOWNLOAD_PAGE_SIZE = 10;
@@ -32,7 +34,6 @@ const REDOWNLOAD_PAGE_SIZE = 10;
 // NEEDS_REVIEW, REJECTED and SHORTLISTED - there is no ACCEPTED - so the only
 // question the API can answer about an accept is whether the candidate has left
 // this collection. Nothing can positively confirm one.
-const REVIEW_BUCKET = 'NEEDS_REVIEW';
 // The queue check pages like a re-download does, at the same size and under a
 // cap, for the same reasons: its requests must look like every other one this
 // extension makes, and a walk with no stop of its own would keep asking for
@@ -131,6 +132,21 @@ export function createController({
   const { reconcileJob } = ledgerService;
   const tabs = createTabDriver({ sleep, trace });
   let controller = null;
+  // Exact only at successful completion and never persisted as evergreen
+  // truth. A panel lifetime may reuse a completed check; a new panel must ask
+  // Wellfound again.
+  const reviewSnapshots = new Map();
+  // URL equality is not document identity: a reload, or navigating away and
+  // back, can leave the same tab on the same URL with a different Review
+  // queue. Chrome reports the navigation boundary, so discard every snapshot
+  // tied to that tab as soon as a new document starts (or a URL transition is
+  // announced). The run stores its replacement only after its walk completes.
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (changeInfo.status !== 'loading' && changeInfo.url == null) return;
+    for (const [jobId, snapshot] of reviewSnapshots) {
+      if (snapshot.tabId === tabId) reviewSnapshots.delete(jobId);
+    }
+  });
 
   // One lock for every activity that drives the working tab. A re-download and a
   // run both navigate it, so letting them overlap would have one loop's next
@@ -421,9 +437,8 @@ export function createController({
     forget: ledgerService.forget,
 
     // Enriched with ledger state so the UI can say how many are actually new
-    // rather than how many sit in the review queue. `estimatedNew` is an
-    // estimate: it cannot know about applicants who left the queue since the
-    // last run. The run itself is authoritative.
+    // rather than how many sit in the review queue. `newCount` is exact only
+    // for a complete, current Review identity snapshot; otherwise it is null.
     // `onHydrating` is called only when a navigation is actually about to
     // happen, so the panel can say "Reading your jobs..." for exactly as long as
     // it is true.
@@ -458,24 +473,59 @@ export function createController({
 
       return Promise.all(
         jobs.map(async (job) => {
-          // `known`, not `downloaded`. The download counter deliberately does
-          // not move when a CSV import or an orphan adoption teaches the ledger
-          // about people, so estimating from it promised files the run would
-          // then correctly refuse to fetch.
-          const { known, downloaded } = await ledgerService.describe(job.jobId);
-          // Everyone this extension has already messaged for this role. It is
-          // the sibling of `known` and it is here for the same reason: without
-          // it the confirm screen counts people the run will then correctly
-          // skip, and that screen is the one place a number must not read
-          // higher than what will happen.
-          //
-          // It counts what we did, not who has been accepted. An applicant the
-          // operator accepted by hand in Wellfound is in neither this list nor
-          // the review queue, and nothing here can see them.
-          const accepted = (await ledgerService.acceptedUserIdsFor(job.jobId)).length;
-          const estimatedNew =
-            job.actionableCount == null ? null : Math.max(0, job.actionableCount - known);
-          return { ...job, downloaded, known, accepted, estimatedNew };
+          let status = await reconcileJob(job.jobId);
+          if (status.orphans.length > 0) {
+            await ledgerService.recordAdopted(job.jobId, status.orphans);
+            status = { ...status, verified: [...status.verified, ...status.orphans], orphans: [] };
+          }
+          const described = await ledgerService.describe(job.jobId);
+          const historical = await ledgerService.seenUserIdsFor(job.jobId);
+          const accepted = await ledgerService.acceptedUserIdsFor(job.jobId);
+          const provisional = await ledgerService.provisionalUserIdsFor(job.jobId);
+          let snapshot = reviewSnapshots.get(String(job.jobId)) ?? null;
+          const snapshotAge = snapshot?.scannedAt
+            ? Date.now() - Date.parse(snapshot.scannedAt)
+            : Infinity;
+          // Exactness is deliberately one Home read, on the same document and
+          // soon after the completed scan. A second refresh must check again:
+          // equal raw counts cannot reveal that one candidate left while
+          // another arrived.
+          if (
+            snapshot &&
+            (snapshot.published ||
+              snapshot.tabId !== tab.id ||
+              snapshot.tabUrl !== tab.url ||
+              snapshotAge < 0 ||
+              snapshotAge > REVIEW_SNAPSHOT_MAX_AGE_MS ||
+              (job.actionableCount != null &&
+                snapshot.userIds.length + snapshot.unidentified !== job.actionableCount))
+          ) {
+            reviewSnapshots.delete(String(job.jobId));
+            snapshot = null;
+          }
+          const tracking = described.migrationIncomplete
+            ? deriveTracking({ jobId: job.jobId, snapshot: null })
+            : deriveTracking({
+                jobId: job.jobId,
+                snapshot,
+                historicallyCaptured: historical,
+                availableCaptured: status.verified,
+                accepted,
+                provisional,
+              });
+          if (snapshot && tracking.exact) snapshot.published = true;
+          return {
+            ...job,
+            downloaded: status.verified.length,
+            known: described.known,
+            newCount: tracking.exact ? tracking.newUserIds.length : null,
+            readyToAccept: tracking.exact ? tracking.eligibleUserIds.length : null,
+            needsRecovery: tracking.exact ? tracking.needsRecoveryUserIds.length : null,
+            unidentified: tracking.exact ? tracking.unidentified : null,
+            trackingExact: tracking.exact,
+            trackingScannedAt: tracking.scannedAt,
+            migrationIncomplete: described.migrationIncomplete,
+          };
         }),
       );
     },
@@ -605,9 +655,15 @@ export function createController({
           // the run should quietly fetch it again rather than trusting the
           // ledger's memory of having downloaded it once.
           const status = await reconcileJob(jobId);
-          const gone = new Set(status.missing);
-          const seen = await ledgerService.seenUserIdsFor(jobId);
-          const seenUserIds = seen.filter((id) => !gone.has(id));
+          if (status.orphans.length > 0) {
+            await ledgerService.recordAdopted(jobId, status.orphans);
+          }
+          // `seenUserIds` is capture evidence for this walk, not merely
+          // historical memory. Only Chrome-verified files may become
+          // `already downloaded`; missing and unverifiable ledger entries are
+          // walked again so download mode can recover them and accept-only
+          // mode refuses them.
+          const seenUserIds = [...status.verified, ...status.orphans];
 
           const result = await runJob(
             {
@@ -633,6 +689,18 @@ export function createController({
               jobTotal: requested.length,
             },
           );
+
+          if (result.snapshot?.complete && result.snapshot.bucket === REVIEW_BUCKET) {
+            const currentTab = await chrome.tabs.get(tab.id);
+            reviewSnapshots.set(String(jobId), {
+              ...result.snapshot,
+              tabId: tab.id,
+              tabUrl: currentTab.url,
+              published: false,
+            });
+          } else {
+            reviewSnapshots.delete(String(jobId));
+          }
 
           totals.downloaded += result.downloaded.length;
           totals.failed += result.failed.length;
@@ -665,6 +733,59 @@ export function createController({
             await ledgerService.finishRun(jobId, { folder });
             trace.record('ledger_write', { jobId, count: result.downloaded.length });
           }
+
+          let acceptanceTracking = null;
+          if (actions.accept) {
+            // File availability can change during a long API/download walk.
+            // Reconcile at the last reversible moment, then merge downloads
+            // completed by this run so the planner receives positive evidence
+            // rather than an old ledger assertion.
+            const beforePlan = await reconcileJob(jobId);
+            if (beforePlan.orphans.length > 0) {
+              await ledgerService.recordAdopted(jobId, beforePlan.orphans);
+            }
+            const available = new Set(
+              [
+                ...beforePlan.verified,
+                ...beforePlan.orphans,
+                ...result.downloaded.map((record) => record.userId),
+              ].map(String),
+            );
+            for (const record of result.records) {
+              if (
+                record.resumeStatus === RESUME_STATUS.ALREADY &&
+                record.userId &&
+                !available.has(String(record.userId))
+              ) {
+                record.resumeStatus = RESUME_STATUS.NEEDS_RECOVERY;
+              }
+            }
+            let described = await ledgerService.describe(jobId);
+            const snapshotIds = (result.snapshot?.userIds ?? []).map(String);
+            const recoveredCurrentReview =
+              described.migrationIncomplete &&
+              result.snapshot?.complete === true &&
+              result.snapshot?.bucket === REVIEW_BUCKET &&
+              result.snapshot?.unidentified === 0 &&
+              snapshotIds.every((userId) => available.has(userId));
+            if (recoveredCurrentReview) {
+              await ledgerService.markMigrationComplete(jobId);
+              described = await ledgerService.describe(jobId);
+              trace.record('migration_recovered', { jobId, count: snapshotIds.length });
+            }
+            acceptanceTracking = {
+              migrationIncomplete: described.migrationIncomplete,
+              model: deriveTracking({
+                jobId,
+                snapshot: result.snapshot,
+                historicallyCaptured: await ledgerService.seenUserIdsFor(jobId),
+                availableCaptured: [...available],
+                accepted: await ledgerService.acceptedUserIdsFor(jobId),
+                provisional: await ledgerService.provisionalUserIdsFor(jobId),
+                limit,
+              }),
+            };
+          }
           // Pass 2, and only now: accepting removes people from the very
           // NEEDS_REVIEW collection pass 1 above paginates with a cursor, so
           // the two passes are never interleaved. It drives the applicant
@@ -688,10 +809,19 @@ export function createController({
           // An aborted pass 1 needs nothing here: the operator's signal is the
           // same one the accept pass checks before it opens the reviewer, so an
           // abort already stops pass 2 with nothing sent.
-          const heldBack = actions.accept && result.stoppedBecause === 'failing';
+          const trackingHeldBack =
+            actions.accept &&
+            (acceptanceTracking?.migrationIncomplete || !acceptanceTracking?.model.exact);
+          const heldBack =
+            actions.accept && (result.stoppedBecause === 'failing' || trackingHeldBack);
           if (heldBack) {
             stop.acceptHeldBack = true;
-            trace.record('accept_held_back', { jobId, outcome: 'failing' });
+            stop.acceptHeldBackReason =
+              result.stoppedBecause === 'failing' ? 'downloads-failing' : 'tracking-incomplete';
+            trace.record('accept_held_back', {
+              jobId,
+              outcome: result.stoppedBecause === 'failing' ? 'failing' : 'tracking-incomplete',
+            });
             // The run was accepting, and stopped before it reached anybody.
             // That is exactly NOT_REACHED, and a blank cell here would read as
             // "we tried and nothing happened".
@@ -749,6 +879,11 @@ export function createController({
                 // limit of 3 sent 115 messages. Here it means what the
                 // operator reads it as: at most this many people are messaged.
                 limit,
+                // The model supplies the whole positively available eligible
+                // set. The accept pass performs duplicate-row refusal first
+                // and only then applies the limit, so a refused identity never
+                // spends one of the operator's N slots.
+                plannedUserIds: acceptanceTracking.model.eligibleUserIds,
                 template: acceptMessage,
                 signal,
               },
@@ -762,6 +897,10 @@ export function createController({
             stop.acceptIntended = acceptResult.intended;
             stop.acceptUnresolved = acceptResult.unresolved;
             stop.acceptStoppedBecause = acceptResult.stoppedBecause;
+            // The immutable target plan may finish, but after its first
+            // confirmed send the queue no longer matches the snapshot and no
+            // Home count may reuse it.
+            if (acceptResult.accepted > 0) reviewSnapshots.delete(String(jobId));
           } else {
             // A run that was never accepting says so in the column rather than
             // leaving it blank, which reads as "we tried and nothing happened".

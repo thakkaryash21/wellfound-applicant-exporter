@@ -50,7 +50,10 @@ const job = (jobId, over = {}) => ({
   jobId,
   title: 'Platform Engineer',
   actionableCount: 4,
-  estimatedNew: 3,
+  newCount: 3,
+  downloaded: 1,
+  readyToAccept: 1,
+  trackingExact: true,
   ...over,
 });
 
@@ -132,8 +135,9 @@ describe('Home', () => {
       }),
     });
     expect(screen.querySelectorAll('.job-row')).toHaveLength(2);
-    expect(screen.innerHTML).toContain('4 applicants');
+    expect(screen.innerHTML).toContain('1 resume available');
     expect(screen.innerHTML).toContain('3 new');
+    expect(screen.innerHTML).toContain('1 ready to accept');
     expect(byId('start').disabled).toBe(true);
     expect(byId('start').textContent).toContain('Select a role');
   });
@@ -224,6 +228,22 @@ describe('Home', () => {
       actions: { download: false, accept: false },
       acceptMessage: DEFAULT_MESSAGE,
     });
+  });
+
+  it('forces a complete walk when the role has no authoritative identity snapshot', async () => {
+    const screen = await openPanel({
+      stub: stubController({
+        listJobs: vi.fn(async () => [job(JOB_A, { newCount: null, trackingExact: false })]),
+      }),
+    });
+    const pick = screen.querySelector('.job-pick');
+    pick.checked = true;
+    await pick.dispatch('change');
+    await byId('start').click();
+
+    expect(controller.startRun.mock.calls[0][0].jobs).toEqual([
+      { jobId: JOB_A, limit: Infinity, forceFullWalk: true },
+    ]);
   });
 
   it('falls back to the default folder when the box is emptied', async () => {
@@ -839,15 +859,21 @@ describe('accepting', () => {
 });
 
 // End to end on the one screen where an overstated number cannot be taken
-// back: the operator runs this retroactively over the same roles, so from the
-// second run on the library holds people who have already been messaged and
-// have left the review queue.
-describe('the confirm screen over a role accepted before', () => {
+// back: it must use the complete current Review snapshot, not historical
+// downloaded or accepted totals.
+describe('the confirm screen over a previously scanned role', () => {
   it('asks approval for the people who will actually be messaged', async () => {
     const screen = await openPanel({
       stub: stubController({
         listJobs: vi.fn(async () => [
-          job(JOB_A, { actionableCount: 372, known: 312, accepted: 40, estimatedNew: 60 }),
+          job(JOB_A, {
+            actionableCount: 372,
+            known: 312,
+            accepted: 40,
+            newCount: 100,
+            readyToAccept: 272,
+            needsRecovery: 0,
+          }),
         ]),
         startRun: vi.fn(() => new Promise(() => {})),
       }),
@@ -865,13 +891,13 @@ describe('the confirm screen over a role accepted before', () => {
     await byId('start').click();
     await settle();
 
-    // 312 in the library, 40 of them messaged last run and gone from the queue,
-    // so 272 are left to message and the 100 who applied since have no resume.
+    // The identity snapshot says exactly 272 current Review candidates have a
+    // positively available resume. Historical totals are deliberately ignored.
     expect(screen.innerHTML).toContain('Accept 272 people');
     expect(screen.innerHTML).toContain('372 in the review queue');
     expect(screen.innerHTML).toContain('272 will be messaged');
-    expect(screen.innerHTML).toContain('100 refused');
-    expect(screen.innerHTML).toContain('40 accepted by this extension on an earlier run');
+    expect(screen.innerHTML).toContain('100 without an available resume');
+    expect(screen.innerHTML).not.toContain('accepted by this extension on an earlier run');
     expect(screen.innerHTML).not.toContain('Accept 312 people');
   });
 });

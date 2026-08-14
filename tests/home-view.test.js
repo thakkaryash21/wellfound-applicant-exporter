@@ -11,7 +11,7 @@ import {
 import {
   DEFAULT_LIMIT,
   sanitizeLimit,
-  estimateFor,
+  newCountFor,
   askedFor,
   jobSubtitle,
   startLabel,
@@ -32,7 +32,11 @@ const job = (over = {}) => ({
   jobId: '9100001',
   title: 'Platform Engineer',
   actionableCount: 4,
-  estimatedNew: 3,
+  newCount: 3,
+  downloaded: 10,
+  readyToAccept: 1,
+  needsRecovery: 0,
+  trackingExact: true,
   ...over,
 });
 
@@ -192,7 +196,7 @@ describe('what the button promises against what the run fetches', () => {
       // of that capture.
       const limit = sanitizeLimit(typed);
       const m = homeModel({
-        jobs: [{ jobId: JOB, title: 'Platform Engineer', actionableCount: ROSTER.length, estimatedNew: ROSTER.length }],
+        jobs: [{ jobId: JOB, title: 'Platform Engineer', actionableCount: ROSTER.length, newCount: ROSTER.length }],
         settingFor: () => setting({ selected: true, mode: 'limit', limit }),
         settings,
       });
@@ -207,16 +211,16 @@ describe('what the button promises against what the run fetches', () => {
 });
 
 describe('what a role can honestly claim is waiting', () => {
-  it('prefers the ledger-adjusted estimate to the raw queue count', () => {
-    expect(estimateFor(job())).toBe(3);
+  it('uses only the identity-derived new count', () => {
+    expect(newCountFor(job())).toBe(3);
   });
 
-  it('falls back to the queue count before a first run', () => {
-    expect(estimateFor(job({ estimatedNew: undefined }))).toBe(4);
+  it('does not turn the raw queue count into a new count before a complete scan', () => {
+    expect(newCountFor(job({ newCount: null, trackingExact: false }))).toBe(null);
   });
 
   it('is null when the page has not said, because null is not zero', () => {
-    expect(estimateFor(job({ estimatedNew: null, actionableCount: null }))).toBe(null);
+    expect(newCountFor(job({ newCount: null, actionableCount: null }))).toBe(null);
   });
 
   it('is capped by the number the role was asked for', () => {
@@ -227,20 +231,26 @@ describe('what a role can honestly claim is waiting', () => {
 });
 
 describe('the subtitle under a role', () => {
-  it('says how many are waiting and how many are new', () => {
-    expect(jobSubtitle(job())).toBe('4 applicants \u00b7 3 new');
+  it('says how many resumes are available, new, and ready', () => {
+    expect(jobSubtitle(job())).toBe('10 resumes available \u00b7 3 new \u00b7 1 ready to accept');
   });
 
-  it('says all downloaded rather than "0 new"', () => {
-    expect(jobSubtitle(job({ estimatedNew: 0 }))).toBe('4 applicants \u00b7 all downloaded');
+  it('says no new applicants instead of claiming every queue applicant was downloaded', () => {
+    expect(jobSubtitle(job({ newCount: 0 }))).toBe(
+      '10 resumes available \u00b7 no new applicants \u00b7 1 ready to accept',
+    );
   });
 
-  it('says the count is not loaded rather than showing nothing', () => {
-    expect(jobSubtitle(job({ actionableCount: null }))).toBe('applicant count not loaded yet');
+  it('asks for a check when there is no complete identity snapshot', () => {
+    expect(jobSubtitle(job({ newCount: null, trackingExact: false }))).toBe(
+      '10 resumes available \u00b7 check to count new applicants',
+    );
   });
 
-  it('says applicant, singular, for one', () => {
-    expect(jobSubtitle(job({ actionableCount: 1, estimatedNew: 1 }))).toBe('1 applicant \u00b7 1 new');
+  it('names recovery exceptions without making them new or ready', () => {
+    expect(jobSubtitle(job({ needsRecovery: 2 }))).toBe(
+      '10 resumes available \u00b7 3 new \u00b7 1 ready to accept \u00b7 2 need recovery',
+    );
   });
 });
 
@@ -313,7 +323,7 @@ describe('homeModel', () => {
   });
 
   it('counts only the roles that are picked', () => {
-    const m = model([job(), job({ jobId: '9100002', estimatedNew: 2 })], {
+    const m = model([job(), job({ jobId: '9100002', newCount: 2 })], {
       '9100001': setting({ selected: true }),
       '9100002': setting(),
     });
@@ -505,19 +515,10 @@ describe('the accept control', () => {
   });
 });
 
-// The counts drop after an accept run, possibly to zero, because accepting
-// drains the review queue. Naming what left is what stops that reading as the
-// extension having lost the applicants.
-describe('a role this extension has accepted people from', () => {
-  it('names them beside the queue count', () => {
-    expect(jobSubtitle(job({ accepted: 40 }))).toBe('4 applicants \u00b7 3 new \u00b7 40 accepted');
-    expect(jobSubtitle(job({ estimatedNew: 0, accepted: 40 }))).toBe(
-      '4 applicants \u00b7 all downloaded \u00b7 40 accepted',
+describe('accepted history is not a Home metric', () => {
+  it('never renders an accepted count even when legacy input carries one', () => {
+    expect(jobSubtitle(job({ accepted: 40 }))).toBe(
+      '10 resumes available \u00b7 3 new \u00b7 1 ready to accept',
     );
-  });
-
-  it('says nothing when this extension has accepted nobody', () => {
-    expect(jobSubtitle(job())).toBe('4 applicants \u00b7 3 new');
-    expect(jobSubtitle(job({ accepted: 0 }))).toBe('4 applicants \u00b7 3 new');
   });
 });

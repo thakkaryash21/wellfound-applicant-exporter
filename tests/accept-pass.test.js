@@ -214,6 +214,7 @@ function harness({
   template,
   rand,
   limit,
+  plannedUserIds,
 } = {}) {
   const reviewer = fakeReviewer({
     people,
@@ -316,14 +317,40 @@ function harness({
       alreadyAccepted,
       template,
       signal,
+      plannedUserIds:
+        plannedUserIds === undefined
+          ? [...new Set(records.map((record) => record.userId).filter(Boolean).map(String))]
+          : plannedUserIds,
       ...(limit === undefined ? {} : { limit }),
     });
   return { run, reviewer, events, ledger, sleeps, asked, provisional, released };
 }
 
 const typesOf = (log) => log.map((entry) => entry.type);
+const planned = (records) => [
+  ...new Set(records.map((record) => record.userId).filter(Boolean).map(String)),
+];
 
 describe('planAccepts', () => {
+  it('cannot expand beyond the immutable identity-derived target plan', () => {
+    const rows = [captured('1'), captured('2'), captured('3')];
+    const plan = planAccepts({ records: rows, allowedTargets: ['2'] });
+    expect(plan.targets).toEqual(['2']);
+    expect(rows[0].acceptStatus).toBe(ACCEPT_STATUS.NOT_REACHED);
+    expect(rows[2].acceptStatus).toBe(ACCEPT_STATUS.NOT_REACHED);
+  });
+
+  it('applies the limit after duplicate-row refusal and backfills the next eligible person', () => {
+    const rows = [
+      captured('1'),
+      { userId: '1', resumeStatus: 'failed: NETWORK_FAILED' },
+      captured('2'),
+    ];
+    const plan = planAccepts({ records: rows, allowedTargets: ['1', '2'], limit: 1 });
+    expect(plan.targets).toEqual(['2']);
+    expect(rows[0].acceptStatus).toBe(ACCEPT_STATUS.NO_RESUME);
+  });
+
   it('refuses anybody whose resume was never captured, and says why in the cell', () => {
     const rows = [
       captured('1'),
@@ -437,13 +464,31 @@ describe('the role s limit bounds who is messaged', () => {
     expect(reviewer.queue).toHaveLength(112);
   });
 
-  // Queue order, carried through `records` and out again unchanged - not
-  // whatever order a Map or an object happens to yield. The three taken are the
-  // three at the front, which is where the reviewer already is, so a capped run
-  // never skips past anybody to reach its targets.
+  // API discovery order, carried through `records` and out again unchanged -
+  // not whatever order a Map or object happens to yield. Reviewer order is an
+  // independent measured sequence and is tested separately below.
   it('takes the first N in the order pass 1 handed them over', () => {
     const rows = ['70000005', '70000001', '70000009', '70000003'].map((id) => captured(id));
     expect(planAccepts({ records: rows, limit: 2 }).targets).toEqual(['70000005', '70000001']);
+  });
+
+  it('keeps the finite API-selected set when the reviewer presents another order', async () => {
+    const records = ['70000001', '70000002', '70000003'].map((id) => captured(id));
+    const { run, reviewer, ledger } = harness({
+      records,
+      people: ['70000002', '70000003', '70000001'],
+      limit: 2,
+    });
+
+    const result = await run();
+    const sent = reviewer.log
+      .filter((entry) => entry.type === CX.ACCEPT_CANDIDATE)
+      .map((entry) => entry.expectedUserId);
+
+    expect(result).toMatchObject({ intended: 2, accepted: 2, stoppedBecause: 'finished' });
+    expect(sent).toEqual(['70000002', '70000001']);
+    expect(ledger.map((entry) => entry.userId)).toEqual(['70000002', '70000001']);
+    expect(reviewer.queue).toEqual(['70000003']);
   });
 
   // Held back is not refused and not attempted. NOT_REACHED is already the word
@@ -580,6 +625,17 @@ describe('resolveFirstName', () => {
 });
 
 describe('runAcceptPass', () => {
+  it('authorizes nobody when the caller omits the identity-derived plan', async () => {
+    const { run, reviewer } = harness({
+      people: ['1'],
+      records: [captured('1')],
+      plannedUserIds: null,
+    });
+    const result = await run();
+    expect(result.accepted).toBe(0);
+    expect(typesOf(reviewer.log)).not.toContain(CX.ACCEPT_CANDIDATE);
+  });
+
   // Rule 3. Accepting everybody performs NO navigation: the confirm already
   // auto-advanced, and a skip after one steps over a person unseen.
   it('never follows a confirmed accept with a skip', async () => {
@@ -666,7 +722,7 @@ describe('runAcceptPass', () => {
         sleep: async () => {},
         emit: (event) => events.push(event),
       },
-      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records, plannedUserIds: planned(records) },
     );
 
     expect(result.stoppedBecause).toBe('error');
@@ -690,7 +746,7 @@ describe('runAcceptPass', () => {
         sleep: async () => {},
         emit: () => {},
       },
-      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records, plannedUserIds: planned(records) },
     );
     expect(result.stoppedBecause).toBe('error');
     expect(result.error).toMatch(/provisional ledger writer.*nothing was sent/i);
@@ -777,6 +833,7 @@ describe('runAcceptPass', () => {
         jobId: JOB,
         jobTitle: 'Platform Engineer',
         records,
+        plannedUserIds: planned(records),
         signal: controller.signal,
       },
     );
@@ -798,7 +855,7 @@ describe('runAcceptPass', () => {
         sleep: async () => {},
         emit: (event) => events.push(event),
       },
-      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records, plannedUserIds: planned(records) },
     );
 
     expect(result).toMatchObject({ accepted: 0, stoppedBecause: 'error' });
@@ -878,7 +935,13 @@ describe('runAcceptPass', () => {
         sleep: async () => {},
         emit: () => {},
       },
-      { jobId: JOB, jobTitle: 'Platform Engineer', records, signal: controller.signal },
+      {
+        jobId: JOB,
+        jobTitle: 'Platform Engineer',
+        records,
+        plannedUserIds: planned(records),
+        signal: controller.signal,
+      },
     );
 
     expect(typesOf(reviewer.log)).toContain(CX.STOP_REVIEWER);
@@ -933,7 +996,7 @@ describe('leaving Wellfound as the pass found it', () => {
         sleep: async () => {},
         emit: () => {},
       },
-      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records, plannedUserIds: planned(records) },
     );
     expect(result.stoppedBecause).toBe('error');
     expect(typesOf(reviewer.log)).toContain(CX_CLOSE_REVIEWER);
@@ -958,7 +1021,13 @@ describe('leaving Wellfound as the pass found it', () => {
         sleep: async () => {},
         emit: () => {},
       },
-      { jobId: JOB, jobTitle: 'Platform Engineer', records, signal: controller.signal },
+      {
+        jobId: JOB,
+        jobTitle: 'Platform Engineer',
+        records,
+        plannedUserIds: planned(records),
+        signal: controller.signal,
+      },
     );
     const types = typesOf(reviewer.log);
     // Stop first - it is a signal, and it has to reach an accept that is
@@ -987,7 +1056,7 @@ describe('leaving Wellfound as the pass found it', () => {
         sleep: async () => {},
         emit: () => {},
       },
-      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records, plannedUserIds: planned(records) },
     );
     expect(result.stoppedBecause).toBe('error');
     expect(log).toEqual([CX.OPEN_REVIEWER, CX_CLOSE_REVIEWER]);
@@ -1028,7 +1097,7 @@ describe('leaving Wellfound as the pass found it', () => {
         sleep: async () => {},
         emit: (event) => events.push(event),
       },
-      { jobId: JOB, jobTitle: 'Platform Engineer', records },
+      { jobId: JOB, jobTitle: 'Platform Engineer', records, plannedUserIds: planned(records) },
     );
     expect(result.stoppedBecause).toBe('unclear');
     expect(result.error).toContain('Could not confirm the accept');

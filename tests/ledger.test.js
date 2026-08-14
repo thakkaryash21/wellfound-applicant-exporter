@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { createLedger, MAX_SEEN } from '../src/lib/ledger.js';
+import { createLedger } from '../src/lib/ledger.js';
 
 function fakeStorage() {
   const data = {};
@@ -34,6 +34,45 @@ describe('ledger.get', () => {
     const record = await ledger.get('9100001');
     expect(record).toMatchObject({ jobId: '9100001', seenUserIds: [], totalDownloaded: 0 });
   });
+
+  it('migrates legacy seen ids into the canonical capture registry', async () => {
+    await storage.set({
+      'job:9100001': {
+        jobId: '9100001',
+        seenUserIds: ['1', '2'],
+        totalDownloaded: 2,
+      },
+    });
+
+    const record = await ledger.get('9100001');
+
+    expect(record.captures).toEqual({ 1: 'legacy', 2: 'legacy' });
+    expect(storage.data['job:9100001'].captures).toEqual({ 1: 'legacy', 2: 'legacy' });
+    expect(storage.data['job:9100001'].seenUserIds).toBeUndefined();
+  });
+
+  it('marks a lossy legacy registry as migration-incomplete', async () => {
+    await storage.set({
+      'job:9100001': {
+        jobId: '9100001',
+        seenUserIds: ['1'],
+        totalDownloaded: 2,
+      },
+    });
+    expect((await ledger.describe('9100001')).migrationIncomplete).toBe(true);
+  });
+
+  it('clears migration-incomplete only through an explicit completed recovery', async () => {
+    await storage.set({
+      'job:9100001': {
+        jobId: '9100001',
+        seenUserIds: ['1'],
+        totalDownloaded: 2,
+      },
+    });
+    await ledger.markMigrationComplete('9100001');
+    expect((await ledger.describe('9100001')).migrationIncomplete).toBe(false);
+  });
 });
 
 describe('ledger.markDownloaded', () => {
@@ -52,13 +91,13 @@ describe('ledger.markDownloaded', () => {
     expect((await ledger.get('9100001')).totalDownloaded).toBe(2);
   });
 
-  it(`evicts oldest ids beyond ${MAX_SEEN}`, async () => {
-    const many = Array.from({ length: MAX_SEEN + 10 }, (_, i) => String(i));
+  it('never silently evicts captured identities beyond the old 5,000-id cap', async () => {
+    const many = Array.from({ length: 5010 }, (_, i) => String(i));
     await ledger.markDownloaded('9100001', many, { jobTitle: 'x' });
     const { seenUserIds } = await ledger.get('9100001');
-    expect(seenUserIds).toHaveLength(MAX_SEEN);
-    expect(seenUserIds[0]).toBe('10');
-    expect(seenUserIds.at(-1)).toBe(String(MAX_SEEN + 9));
+    expect(seenUserIds).toHaveLength(5010);
+    expect(seenUserIds[0]).toBe('0');
+    expect(seenUserIds.at(-1)).toBe('5009');
   });
 
   it('writes under a namespaced key so it never collides with settings', async () => {
@@ -82,6 +121,14 @@ describe('ledger.adopt', () => {
     const record = await ledger.get('9100001');
     expect(record.seenUserIds).toEqual(['1', '2']);
     expect(record.totalDownloaded).toBe(0);
+  });
+
+  it('adoption never claims a lossy migration is complete', async () => {
+    await storage.set({
+      'job:9100001': { jobId: '9100001', seenUserIds: ['1'], totalDownloaded: 2 },
+    });
+    await ledger.adopt('9100001', ['1', '2'], 'imported');
+    expect((await ledger.describe('9100001')).migrationIncomplete).toBe(true);
   });
 });
 
@@ -112,6 +159,16 @@ describe('ledger.finishRun', () => {
 // Library then read totalDownloaded, jobTitle and lastRunAt straight off the
 // storage shape, which is exactly what describeAll exists to stop.
 describe('ledger.describeAll', () => {
+  it('normalizes legacy records before describing them', async () => {
+    await storage.set({
+      'job:9100001': { jobId: '9100001', seenUserIds: ['1'], totalDownloaded: 2 },
+    });
+    expect(await ledger.describeAll()).toEqual([
+      expect.objectContaining({ jobId: '9100001', known: 1, migrationIncomplete: true }),
+    ]);
+    expect(storage.data['job:9100001'].captures).toEqual({ 1: 'legacy' });
+  });
+
   it('returns every job and ignores unrelated keys', async () => {
     await ledger.markDownloaded('1', ['1'], { jobTitle: 'a' });
     await ledger.markDownloaded('2', ['2'], { jobTitle: 'b' });
@@ -128,6 +185,7 @@ describe('ledger.describeAll', () => {
       jobTitle: 'a',
       downloaded: 1,
       known: 1,
+      migrationIncomplete: false,
       lastRunAt: null,
       folder: null,
     });
@@ -164,6 +222,7 @@ describe('ledger.describe', () => {
       jobTitle: null,
       downloaded: 0,
       known: 0,
+      migrationIncomplete: false,
       lastRunAt: null,
       folder: null,
     });

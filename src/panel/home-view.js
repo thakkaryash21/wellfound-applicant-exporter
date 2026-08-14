@@ -78,33 +78,47 @@ export function sanitizeLimit(value, fallback = DEFAULT_LIMIT) {
   return Math.max(1, Math.floor(n));
 }
 
-// What the panel can honestly claim is waiting. `estimatedNew` already subtracts
-// everyone the ledger knows; `actionableCount` is the fallback before a first
-// run; null means the page has not told us yet, and null is not zero.
-export function estimateFor(job) {
-  return job.estimatedNew ?? job.actionableCount ?? null;
+// Exact only after a complete identity walk. The raw queue count is not a
+// fallback: people who left Review remain in capture history, so subtracting
+// unrelated counts is the bug this field exists to avoid.
+export function newCountFor(job) {
+  if (job.trackingExact !== true) return null;
+  return job.newCount ?? null;
 }
 
 export function askedFor(job, setting) {
-  const estimate = estimateFor(job);
-  if (estimate == null) return null;
-  if (setting.mode === 'all') return estimate;
+  const newCount = newCountFor(job);
+  if (newCount == null) return null;
+  if (setting.mode === 'all') return newCount;
   // `limit` is sanitised on capture, so both readers see the same number.
-  return Math.min(setting.limit, estimate);
+  return Math.min(setting.limit, newCount);
 }
 
-// One line under the title, in the user's terms: how many people are in the
-// queue and how many of them this extension has not fetched yet.
+// One line under the title, in the three facts the operator needs. Accepted is
+// deliberately absent: its identity map is a delivery interlock, not a metric.
 export function jobSubtitle(job) {
-  const total = job.actionableCount;
-  if (total == null) return 'applicant count not loaded yet';
-  const noun = total === 1 ? 'applicant' : 'applicants';
-  // Accepting drains the queue, so this count drops after an accept run and
-  // can drop to zero. Naming what left is what stops that reading as the
-  // extension having lost the applicants.
-  const accepted = job.accepted ? ` \u00b7 ${job.accepted} accepted` : '';
-  if (job.estimatedNew === 0) return `${total} ${noun} \u00b7 all downloaded${accepted}`;
-  return `${total} ${noun} \u00b7 ${job.estimatedNew} new${accepted}`;
+  const available = job.downloaded ?? 0;
+  const resumeNoun = available === 1 ? 'resume' : 'resumes';
+  const parts = [`${available} ${resumeNoun} available`];
+  if (job.migrationIncomplete) {
+    parts.push('tracking needs recovery');
+    return parts.join(' \u00b7 ');
+  }
+  if (!job.trackingExact || job.newCount == null) {
+    parts.push('check to count new applicants');
+    return parts.join(' \u00b7 ');
+  }
+  parts.push(job.newCount === 0 ? 'no new applicants' : `${job.newCount} new`);
+  if (job.readyToAccept != null) {
+    parts.push(`${job.readyToAccept} ready to accept`);
+  }
+  if (job.needsRecovery > 0) {
+    parts.push(`${job.needsRecovery} need recovery`);
+  }
+  if (job.unidentified > 0) {
+    parts.push(`${job.unidentified} could not be identified`);
+  }
+  return parts.join(' \u00b7 ');
 }
 
 // The button used to promise the whole backlog under a limit that would refuse
@@ -196,7 +210,7 @@ export function homeModel({
 
   const rows = jobs.map((job) => {
     const setting = settingFor(job.jobId);
-    const estimate = estimateFor(job);
+    const newCount = newCountFor(job);
     return {
       jobId: job.jobId,
       title: job.title,
@@ -206,7 +220,7 @@ export function homeModel({
       mode: setting.mode,
       limit: setting.limit,
       rereadPages: setting.rereadPages,
-      allLabel: estimate == null ? 'all new' : `all ${estimate} new`,
+      allLabel: newCount == null ? 'all new' : `all ${newCount} new`,
       asked: askedFor(job, setting),
     };
   });

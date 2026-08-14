@@ -28,15 +28,12 @@ export const CONFIRM_IDS = {
 // The exact figure is not knowable from this screen for every mode, and saying
 // so is cheaper than a number that turns out wrong:
 //
-// - Accept-only walks the queue, downloads nobody, and can therefore only
-//   accept the people already in the library. Everyone else in the queue is
-//   refused, and both halves are exact.
-// - Downloading everything captures the whole queue, so the whole queue is
-//   accepted. Nobody is refused up front; only a download that fails is, and
-//   this screen cannot know how many of those there will be.
-// - Downloading the first N stops the walk once N new files have landed, so the
-//   people it reaches are bounded rather than counted. `bound` says the number
-//   is a ceiling and the screen says "up to".
+// - Accept-only uses `readyToAccept`, which is derived from a complete Review
+//   identity snapshot and positively available files. Historical totals are
+//   never subtracted from one another.
+// - Download-and-accept can only show a ceiling before the walk because a
+//   download may fail. The run recomputes eligibility from fresh evidence
+//   immediately before pass 2.
 //
 // The role's limit caps the last step in every mode, because that is what it
 // means to the pass that does the messaging: at most N people are messaged from
@@ -48,42 +45,29 @@ export const CONFIRM_IDS = {
 // did.
 export function acceptRow(job, setting, { download = true } = {}) {
   const inQueue = job.actionableCount ?? null;
-  const already = job.accepted ?? 0;
-  // The library holds everyone this extension has fetched, and it keeps holding
-  // the ones it has since accepted - the download ledger has no reason to
-  // forget them. The review queue does not: accepting removes a candidate from
-  // it. So the people who are both on disk and still acceptable are the library
-  // minus the ones already messaged, and using `known` on its own counts that
-  // difference twice on the second run over a role.
-  const haveResume = Math.max(0, (job.known ?? 0) - already);
-  const base = { jobId: job.jobId, title: job.title, alreadyAccepted: already, inQueue };
+  const base = { jobId: job.jobId, title: job.title, inQueue };
   // "Everyone" is genuinely everyone, so it caps nothing at all.
   const cap = (people) => (setting.mode === 'all' ? people : Math.min(people, setting.limit));
-  if (inQueue == null) {
-    return { ...base, people: null, bound: false, refused: 0 };
-  }
   if (!download) {
-    // Eligible first, refusals from that, and only then the cap. Capping first
-    // would report a refusal for everyone the limit held back, and they were
-    // not refused - the run simply stopped once it had messaged its number.
-    const eligible = Math.min(haveResume, inQueue);
-    return { ...base, people: cap(eligible), bound: false, refused: inQueue - eligible };
+    const exact = job.trackingExact === true && !job.migrationIncomplete;
+    if (!exact || job.readyToAccept == null || inQueue == null) {
+      return { ...base, people: null, bound: false, refused: 0 };
+    }
+    const eligible = Math.min(job.readyToAccept, inQueue);
+    const unavailable =
+      (job.newCount ?? 0) + (job.needsRecovery ?? 0) + (job.unidentified ?? 0);
+    return { ...base, people: cap(eligible), bound: false, refused: unavailable };
   }
-  if (setting.mode === 'all') {
-    return { ...base, people: inQueue, bound: false, refused: 0 };
-  }
-  // The limited download-and-accept run. The pool it could message is the whole
-  // queue - the walk is forced full, so the people already on disk are
-  // acceptable too - and the limit is what actually decides the figure. Still a
-  // ceiling rather than a count: a download that fails takes its candidate out
-  // of reach, and this screen cannot know how many of those there will be.
+  if (inQueue == null) return { ...base, people: null, bound: true, refused: 0 };
+  // A successful download makes its candidate eligible in the same run, but a
+  // failure does not. Before that evidence exists, the queue is only a ceiling.
   return { ...base, people: cap(inQueue), bound: true, refused: 0 };
 }
 
 export function roleLine(row) {
-  if (row.people == null) return `${row.title}: not counted yet`;
+  if (row.people == null) return `${row.title}: counted during the candidate check`;
   const people = `${row.people} ${row.people === 1 ? 'person' : 'people'}`;
-  const refused = row.refused ? `, ${row.refused} refused` : '';
+  const refused = row.refused ? `, ${row.refused} without an available resume` : '';
   return `${row.title}: ${row.bound ? 'up to ' : ''}${people}${refused}`;
 }
 
@@ -99,14 +83,12 @@ export function confirmModel({
   const counted = rows.filter((row) => row.people != null);
   const total = counted.reduce((sum, row) => sum + row.people, 0);
   const refused = rows.reduce((sum, row) => sum + row.refused, 0);
-  const alreadyAccepted = rows.reduce((sum, row) => sum + row.alreadyAccepted, 0);
   const inQueue = counted.reduce((sum, row) => sum + row.inQueue, 0);
   const role = rows[0]?.title ?? '';
   return {
     rows,
     total,
     refused,
-    alreadyAccepted,
     inQueue,
     // A role whose count never loaded makes the total a floor rather than a
     // sum, and the screen has to say which it is.
@@ -120,8 +102,9 @@ export function confirmModel({
 }
 
 export function headline(model) {
+  if (model.uncounted) return 'Accept after candidate check';
   const people = `${model.total} ${model.total === 1 ? 'person' : 'people'}`;
-  const lead = model.bound || model.uncounted ? 'Accept up to ' : 'Accept ';
+  const lead = model.bound ? 'Accept up to ' : 'Accept ';
   return `${lead}${people}`;
 }
 
@@ -137,16 +120,8 @@ export function derivation(model) {
     `${model.bound || model.uncounted ? 'up to ' : ''}${model.total} will be messaged`,
   );
   if (model.refused) {
-    lines.push(`${model.refused} refused: no resume was captured for them`);
-  }
-  if (model.alreadyAccepted) {
-    // Not subtracted from the queue on screen, because they were never in it:
-    // accepting removed them. It is here to explain a figure that has shrunk
-    // since the last run, and it is what this extension did, not who has been
-    // accepted - anyone accepted by hand in Wellfound is in neither list.
     lines.push(
-      `${model.alreadyAccepted} accepted by this extension on an earlier run, ` +
-        'so they have already left the queue',
+      `${model.refused} will not be messaged because no resume is currently available`,
     );
   }
   return lines;
@@ -163,8 +138,8 @@ export function renderConfirm(model) {
     : '';
   const uncounted = model.uncounted
     ? `<p class="job-meta warn">${model.uncounted}
-         ${model.uncounted === 1 ? 'role has' : 'roles have'} no applicant count yet,
-         so the total above is a floor.</p>`
+         ${model.uncounted === 1 ? 'role will be' : 'roles will be'} counted during the run.
+         No message is sent until its complete candidate check establishes an eligible list.</p>`
     : '';
 
   return `
@@ -194,7 +169,7 @@ export function renderConfirm(model) {
       <div class="post-run-actions">
         <button class="primary" id="${CONFIRM_IDS.back}" type="button">Go back</button>
         <button class="secondary danger-action" id="${CONFIRM_IDS.send}" type="button">
-          ${escapeHtml(`Accept and message ${model.total}`)}
+          ${escapeHtml(model.uncounted ? 'Start checked acceptance' : `Accept and message ${model.total}`)}
         </button>
       </div>
     </section>`;
