@@ -24,6 +24,17 @@ under the operator's name and it cannot be undone. That one fact reshapes more
 of this design than anything else in it, and the section on accepting explains
 what follows from it.
 
+### Tracking model correction (implementation pending)
+
+The approved identity, capture-availability, new-applicant, and acceptance
+eligibility contract is [Candidate tracking model](TRACKING_MODEL.md). It is the
+canonical source for the corrected model and its release gates. The current
+implementation still contains the count-subtraction estimate, treats some
+unverifiable captures as acceptance evidence, and caps remembered identities;
+the linked contract is deliberately documented before that implementation work
+begins. Existing sections below describe the code as it stands until the
+correction lands.
+
 ## Non-goals
 
 - Choosing which applicant bucket to export. The collector copies the variables
