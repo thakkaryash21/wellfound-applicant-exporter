@@ -436,8 +436,12 @@ For each selected job, sequentially, driven from the panel:
 6. It downloads fresh resumes one at a time, recording each in the ledger
    *before* anything else can interrupt, and sleeping a jittered interval between
    each.
-7. It stops when `hasNextPage` is false, the per-role `limit` is reached, the
-   early-stop rule fires, five downloads fail in a row, or the run is aborted.
+7. It stops when `hasNextPage` is false, the early-stop rule fires, five
+   downloads fail in a row, or the run is aborted. Reaching the per-role `limit`
+   is *not* among them: the limit stops the walk spending downloads and it keeps
+   reading pages to the end, because pagination is what establishes who is in the
+   queue and a truncated walk cannot produce a complete identity snapshot. See
+   `docs/TRACKING_MODEL.md`.
 8. The ledger's run is closed out with the folder it wrote to.
 9. **Pass 2**, if the run is accepting: `accept-pass.js` resolves any questions
    an earlier run left behind, then opens the reviewer and accepts the people
@@ -948,7 +952,8 @@ against an older export still finds every prior column exactly where it was.
 - **User ID, Job ID and Resume Filename** are there because filenames are
   `Name-userId-jobId`; without them a row cannot be mapped back to its file.
 - **Resume** is the status of that row — `downloaded`, `already downloaded`,
-  `no resume on file`, `not identifiable`, `locked on Wellfound`, `preview`,
+  `previously captured; resume needs recovery`, `no resume on file`,
+  `not identifiable`, `locked on Wellfound`, `preview`,
   `not fetched: the run stopped first`, or `failed: {reason}`. It exists because
   without it "fetched on an earlier run" and "never fetched" are the same empty
   Resume Filename cell, and it is the column the import-safety rule above reads.
@@ -1198,6 +1203,14 @@ the screen fixes itself when the operator does the thing it asked for.
   (the default, and unbounded) or "first N", where N defaults to 25 once the user
   picks it. There is no global cap, and no run-wide default of 250: an earlier
   draft of this document described one that was never built.
+- **The limit bounds what a run spends, never what it discovers.** Reaching N
+  stops the downloads; the walk reads on to the end of the queue. It used to end
+  pagination too, which meant a bounded role produced an incomplete Review
+  snapshot and could therefore never publish an exact new or ready count — the
+  operator was asked to "check to count new applicants" by a run that had just
+  refused to finish counting. Whether the limit governs a pass at all is a
+  separate question: accept-only pass 1 previews are unbounded, because there the
+  number belongs to pass 2 and fresh ineligible rows must not spend it.
 - **The limit bounds accepts as well as downloads**, and that is one number
   rather than two on purpose. It used to bound pass 1 alone, and pass 1 counts
   *new* downloads: on a role already fully downloaded its counter never moves, so
@@ -1520,7 +1533,9 @@ nothing.
 The Apollo and download layers are also verified by hand against a live account —
 there is no honest way to fake a signature-gated API. Two safety valves make
 manual verification cheap: **Preview only** walks pages and produces the CSV while
-downloading nothing, and a per-role **first N** stops after N candidates.
+downloading nothing, and a per-role **first N** fetches only N candidates. Note
+that **first N** still reads every page, so it is cheap in downloads rather than
+in page requests.
 
 Manual verification checklist:
 

@@ -15,7 +15,6 @@ const row = (over = {}) => ({
   jobId: JOB,
   jobTitle: 'Platform Engineer',
   resumesAvailable: 3,
-  captured: 3,
   lastRunAt: null,
   missing: 0,
   unreachable: 0,

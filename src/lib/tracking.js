@@ -3,8 +3,15 @@ export const REVIEW_BUCKET = 'NEEDS_REVIEW';
 const ids = (values) => new Set((values ?? []).filter(Boolean).map(String));
 
 // The one interface for candidate-set arithmetic. Callers provide evidence;
-// this module decides which claims and irreversible targets that evidence can
-// support. Order always comes from the current Wellfound review snapshot.
+// this module decides which claims that evidence can support. Order always
+// comes from the current Wellfound review snapshot.
+//
+// It deliberately does NOT apply the per-role limit or produce the accept plan.
+// It sees identities and availability; it cannot see that one of a person's
+// rows records a failed download, which is a refusal that must not spend one of
+// the operator's N slots. `planAccepts` in accept-pass.js has the rows, refuses
+// per person, and cuts to N last. Two places holding half the rule each is how
+// a refusal comes to consume a slot.
 export function deriveTracking({
   jobId,
   snapshot,
@@ -12,7 +19,6 @@ export function deriveTracking({
   availableCaptured = [],
   accepted = [],
   provisional = [],
-  limit = Infinity,
 } = {}) {
   const valid =
     jobId != null &&
@@ -28,7 +34,6 @@ export function deriveTracking({
       newUserIds: null,
       needsRecoveryUserIds: null,
       eligibleUserIds: [],
-      plannedUserIds: [],
     };
   }
 
@@ -45,8 +50,6 @@ export function deriveTracking({
   const eligibleUserIds = review.filter(
     (id) => available.has(id) && !sent.has(id) && !unresolved.has(id),
   );
-  const count = Number.isFinite(limit) ? Math.max(0, Math.floor(limit)) : Infinity;
-
   return {
     exact: true,
     scannedAt: snapshot?.scannedAt ?? null,
@@ -54,6 +57,5 @@ export function deriveTracking({
     newUserIds,
     needsRecoveryUserIds,
     eligibleUserIds,
-    plannedUserIds: eligibleUserIds.slice(0, count),
   };
 }

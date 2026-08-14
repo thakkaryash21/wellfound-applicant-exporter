@@ -66,7 +66,19 @@ describe('the notes', () => {
     const s = summarize(
       done({
         downloaded: 25,
-        jobs: [{ jobId: '1', jobTitle: 'Backend', limit: 25, stoppedBecause: 'limit' }],
+        // Reaching the limit is a fact about the downloads, not about why
+        // pagination ended: the walk reads on to finish the identity snapshot,
+        // so the stop reason is `exhausted` and the note comes off
+        // `limitReached`.
+        jobs: [
+          {
+            jobId: '1',
+            jobTitle: 'Backend',
+            limit: 25,
+            limitReached: true,
+            stoppedBecause: 'exhausted',
+          },
+        ],
       }),
     );
     expect(s.notes).toContain(

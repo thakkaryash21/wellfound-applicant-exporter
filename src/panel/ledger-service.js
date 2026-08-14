@@ -83,7 +83,6 @@ export function createLedgerService(storage) {
       const rows = [];
       for (const job of jobs) {
         let status = await reconcileJob(job.jobId);
-        const adoptedCount = status.orphans.length;
         if (status.orphans.length) {
           await ledger.adopt(job.jobId, status.orphans, 'adopted');
           status = {
@@ -114,7 +113,6 @@ export function createLedgerService(storage) {
           jobId: job.jobId,
           jobTitle: job.jobTitle,
           resumesAvailable: status.verified.length,
-          captured: job.known + adoptedCount,
           migrationIncomplete: job.migrationIncomplete,
           lastRunAt: job.lastRunAt,
           missing: status.missing.length - unreachable.length - unsettled.length,

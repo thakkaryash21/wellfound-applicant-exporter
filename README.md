@@ -82,7 +82,9 @@ Three sources, in order of authority:
 
 Exact new-applicant and ready-to-accept counts come only from a complete current
 Needs Review identity scan. If that scan or legacy migration is incomplete, the
-extension shows no exact count and sends no acceptance messages.
+extension shows no exact count and sends no acceptance messages. Asking for only
+the first few resumes does not cost you the counts: a limited run fetches its
+number and still reads the whole list.
 
 ## Privacy
 

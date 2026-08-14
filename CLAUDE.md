@@ -8,7 +8,7 @@ way. This file carries only what is surprising, invariant, or expensive to learn
 `git log --oneline` is worth twenty minutes: the commit subjects are written as
 statements of intent and say what each change was for.
 
-`npm test` is 29 files and 896 tests, green. Keep it that way.
+`npm test` is 30 files and 943 tests, green. Keep it that way.
 
 ## The one fact everything else follows from
 
@@ -55,6 +55,15 @@ near them.
   are skipped with no error at all: the walk just returns fewer people and
   reports success. "Accept as you go" is the obvious implementation and it is
   wrong.
+- **The limit rations spending, never discovery.** Reaching a role's `limit`
+  stops the walk downloading and it keeps paging to the end. Ending pagination
+  there looks like an obvious economy and it silently destroys the Review
+  identity snapshot, so a bounded role can publish no new count, no ready count
+  and no accepts at all - and the screen asks the operator to run the check that
+  just refused to finish. Separately: whether the limit governs a pass is not the
+  same question. Accept-only pass 1 ignores it because it belongs to pass 2.
+  Collapsing those two into one rule breaks
+  `walks past fresh previews to find already-downloaded candidates`.
 - **Refuse the uncaptured.** `planAccepts` decides per person, not per row, using
   `some` + `every` over that person's rows. A person can hold two rows with
   disagreeing statuses, and the earlier version accepted them on the strength of

@@ -94,18 +94,32 @@ scan, interruption, or an observed queue-changing action outside the plan
 invalidates the snapshot.
 
 The snapshot is ephemeral. An explicit check for new applicants creates one and
-may display exact counts **as of its `scannedAt` time**. An acceptance plan may
-use only a snapshot completed in the same uninterrupted run; there is no
-wall-clock TTL that turns an older snapshot into permission to send. A stale or
-incomplete snapshot may be shown as incomplete, but it may not produce an exact
-new count or authorize accepts.
+may display exact counts from it. An acceptance plan may use only a snapshot
+completed in the same uninterrupted run; there is no wall-clock TTL that turns an
+older snapshot into permission to send. A stale or incomplete snapshot may be
+shown as incomplete, but it may not produce an exact new count or authorize
+accepts.
 
 For Home display, the implementation exposes a completed snapshot once, only on
-the same tab URL and within five minutes. A later refresh requires another
+the same tab and URL and within five minutes. A later refresh requires another
 identity check because equal raw counts cannot prove the members are unchanged.
 
+Freshness is enforced by those conditions rather than printed beside the number.
+No `scannedAt` travels to the screen: a count either passed the publish-once,
+same-document, five-minute test or it was refused outright, and a timestamp
+under a number the operator cannot act on adds a clause without adding a check.
+
+**The per-role limit never truncates discovery.** `limit` is how many people the
+run will act on. Pagination is what establishes who is in the queue, and a walk
+that stopped paging cannot produce a complete snapshot, so a bounded role could
+otherwise never publish a count at all. Reaching the limit stops the run
+spending downloads and it keeps reading pages to the end. Whether the limit
+governs a pass at all is a separate question: in accept-only mode it belongs to
+pass 2, which applies it after refusing everyone without a captured resume, so
+pass 1 previews are unbounded.
+
 Building the plan materializes an immutable target identity set. API discovery
-order decides which first `N` eligible identities enter that set, but does not
+order decides which eligible identities enter that set, but does not
 constrain execution order: the reviewer and API orders are independently
 measured and may differ. A confirmed
 accept performed by that plan invalidates the snapshot for further count
@@ -180,8 +194,17 @@ eligibleToAccept = review
                    - accepted
                    - provisional
 
-plannedToAccept = first N eligibleToAccept identities in Review API discovery order
+plannedToAccept = first N of eligibleToAccept, in Review API discovery order,
+                  after per-person row refusal
 ```
+
+`eligibleToAccept` is derived from identities and availability. `plannedToAccept`
+is not, and the two are computed in different places on purpose. Deciding the
+plan needs the rows: a person holding one failed row and one pointer row is
+refused however available their identity looks, and that refusal must happen
+before `N` is applied or it spends one of the operator's slots. The set module
+cannot see rows, so it does not produce the plan; the accept planner refuses per
+person and cuts to `N` last.
 
 These equations use identities, never subtraction between unrelated counts.
 `actionableCount - knownCount` is not a valid estimate: accepted, rejected, and
@@ -279,6 +302,13 @@ history is complete. Only the full current-Review recovery walk clears that
 state. Migration never claims that a successful but empty history search or a
 large CSV reconstructed erased information.
 
+That walk is defined by its evidence, not by what else the run was doing: a
+complete `NEEDS_REVIEW` snapshot with no unidentified rows, in which every
+identity in it is positively available. A download-only run establishes exactly
+that and clears the state. Tying the clearing to an accepting run would have
+meant the one state that blocks accepting could only be lifted by a run that was
+already accepting.
+
 Existing `accepted` and `provisional` maps are retained byte-for-byte. Their UI
 counts may be removed, but their meanings and timestamps do not change.
 
@@ -310,10 +340,15 @@ Implementation is complete only when automated tests prove all of the following:
 - a per-role limit is applied after every refusal/exclusion, selects in API
   discovery order, and never permits more than that many sends even when the
   reviewer presents the selected identities in another order;
+- a bounded role still publishes exact counts: a run that downloads only its
+  limit reads every page, so the people past the limit are discovered and
+  counted as new rather than lost to a truncated scan;
 - more than 5,000 captured identities remain exact, or storage failure stops
   visibly without accepting anyone;
 - a capped or otherwise loss-signalled legacy ledger remains migration-incomplete
   when download history cannot reconstruct it, and publishes no exact claims;
+- a complete recovery walk clears migration-incomplete whether or not the run
+  was accepting, and sends nothing when it was not;
 - a planned acceptance invalidates further snapshot count claims after its first
   confirmed send but continues only through its immutable target list and live
   per-target DOM interlock;

@@ -114,14 +114,14 @@ function describeRecord(record) {
     jobTitle: record.jobTitle ?? null,
     // Files this ledger fetched. Deliberately unmoved by a CSV import or an
     // orphan adoption.
+    //
+    // There used to be a `known` beside it - the capture registry's size, the
+    // strictly broader number that showed a CSV import had done something. Both
+    // its readers are gone: the Library row states resumes verified present now,
+    // which is the question it is asked, and the import reports its own count
+    // where the operator is standing when it finishes. A count nothing renders
+    // is a claim nobody checks.
     downloaded: record.totalDownloaded ?? 0,
-    // The one place this codebase says `known` rather than `seenUserIds`, and
-    // deliberately: everywhere else the seen set is the list of userIds a run
-    // subtracts from, while this is the strictly broader public count - the
-    // same set plus everyone a CSV import or an orphan adoption taught it.
-    // After importing 400 people, `downloaded` is still 0 and only this number
-    // shows the import did anything.
-    known: captureIds(record).length,
     migrationIncomplete: Boolean(record.migrationIncomplete),
     lastRunAt: record.lastRunAt ?? null,
     folder: record.folder ?? null,

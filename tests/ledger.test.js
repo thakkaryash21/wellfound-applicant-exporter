@@ -164,7 +164,7 @@ describe('ledger.describeAll', () => {
       'job:9100001': { jobId: '9100001', seenUserIds: ['1'], totalDownloaded: 2 },
     });
     expect(await ledger.describeAll()).toEqual([
-      expect.objectContaining({ jobId: '9100001', known: 1, migrationIncomplete: true }),
+      expect.objectContaining({ jobId: '9100001', migrationIncomplete: true }),
     ]);
     expect(storage.data['job:9100001'].captures).toEqual({ 1: 'legacy' });
   });
@@ -184,7 +184,6 @@ describe('ledger.describeAll', () => {
       jobId: '1',
       jobTitle: 'a',
       downloaded: 1,
-      known: 1,
       migrationIncomplete: false,
       lastRunAt: null,
       folder: null,
@@ -206,14 +205,15 @@ describe('ledger.seenUserIds', () => {
 });
 
 describe('ledger.describe', () => {
-  it('separates what was downloaded from everyone who is known', async () => {
+  it('separates what was downloaded from everyone the registry holds', async () => {
     await ledger.markDownloaded('1', ['1'], { jobTitle: 'a' });
-    // An import teaches the ledger about people without fetching a file, so
-    // `known` moves and `downloaded` deliberately does not.
+    // An import teaches the ledger about people without fetching a file, so the
+    // capture registry grows and `downloaded` deliberately does not. The
+    // registry is read as identities now; the count that used to sit on
+    // `describe` had no reader left.
     await ledger.adopt('1', ['2']);
-    const job = await ledger.describe('1');
-    expect(job.downloaded).toBe(1);
-    expect(job.known).toBe(2);
+    expect((await ledger.describe('1')).downloaded).toBe(1);
+    expect((await ledger.seenUserIds('1')).sort()).toEqual(['1', '2']);
   });
 
   it('describes a job that has never run without inventing anything', async () => {
@@ -221,7 +221,6 @@ describe('ledger.describe', () => {
       jobId: 'nope',
       jobTitle: null,
       downloaded: 0,
-      known: 0,
       migrationIncomplete: false,
       lastRunAt: null,
       folder: null,

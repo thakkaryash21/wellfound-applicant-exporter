@@ -200,7 +200,32 @@ describe('runJob', () => {
     const d = deps({ fetchPage: pager([page([1, 2, 3, 4, 5])]) });
     const out = await runJob(d, { ...options, limit: 2 });
     expect(d.downloadResume).toHaveBeenCalledTimes(2);
-    expect(out.stoppedBecause).toBe('limit');
+    expect(out.limitReached).toBe(true);
+  });
+
+  // The limit rations downloads. It used to ration pagination too, and a walk
+  // that stopped paging cannot say who is in the review queue - so a role set to
+  // "first 2" could never publish an exact count on Home, for ever.
+  it('reads the whole queue after the limit is spent, so the snapshot still counts', async () => {
+    const pages = [
+      { ...page([1, 2, 3]), bucket: 'NEEDS_REVIEW' },
+      { ...page([4, 5], false), bucket: 'NEEDS_REVIEW' },
+    ];
+    const d = deps({ fetchPage: pager(pages) });
+    const out = await runJob(d, { ...options, limit: 2 });
+
+    expect(d.downloadResume).toHaveBeenCalledTimes(2);
+    expect(d.fetchPage).toHaveBeenCalledTimes(2);
+    expect(out.snapshot.complete).toBe(true);
+    expect(out.snapshot.userIds).toEqual(['1', '2', '3', '4', '5']);
+    expect(out.stoppedBecause).toBe('exhausted');
+    expect(out.limitReached).toBe(true);
+  });
+
+  it('does not claim a limit was reached when the role had fewer people than that', async () => {
+    const d = deps({ fetchPage: pager([page([1, 2], false)]) });
+    const out = await runJob(d, { ...options, limit: 25 });
+    expect(out.limitReached).toBe(false);
   });
 
   it('keeps scanning after a combined run reaches its download limit', async () => {
@@ -230,7 +255,7 @@ describe('runJob', () => {
       const d = deps({ fetchPage: pager([page([1, 2, 3, 4, 5])]) });
       const out = await runJob(d, { ...options, limit: 2, actions: PREVIEW_ONLY });
       expect(out.previewed).toHaveLength(2);
-      expect(out.stoppedBecause).toBe('limit');
+      expect(out.limitReached).toBe(true);
     });
 
     it('previews exactly the number the real run downloads, for the same limit', async () => {
@@ -265,10 +290,14 @@ describe('runJob', () => {
       expect(d.fetchPage).toHaveBeenCalledTimes(2);
     });
 
-    it('stops paging once a preview has met the limit, rather than walking on', async () => {
+    // It used to stop paging here, and that is exactly the truncation that made
+    // an exact count unreachable for a limited role. The preview still previews
+    // the number the real run would fetch; it just finishes reading first.
+    it('keeps paging once a preview has met the limit, without previewing more', async () => {
       const d = deps({ fetchPage: pager([page([1, 2, 3]), page([4, 5, 6]), page([7, 8], false)]) });
-      await runJob(d, { ...options, limit: 2, actions: PREVIEW_ONLY });
-      expect(d.fetchPage).toHaveBeenCalledTimes(1);
+      const out = await runJob(d, { ...options, limit: 2, actions: PREVIEW_ONLY });
+      expect(d.fetchPage).toHaveBeenCalledTimes(3);
+      expect(out.previewed).toHaveLength(2);
     });
 
     it('leaves an unlimited preview free to list everybody', async () => {

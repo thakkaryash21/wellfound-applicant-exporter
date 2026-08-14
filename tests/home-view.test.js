@@ -196,7 +196,18 @@ describe('what the button promises against what the run fetches', () => {
       // of that capture.
       const limit = sanitizeLimit(typed);
       const m = homeModel({
-        jobs: [{ jobId: JOB, title: 'Platform Engineer', actionableCount: ROSTER.length, newCount: ROSTER.length }],
+        // `trackingExact` is what makes `newCount` sayable. Without it the
+        // button correctly refuses to name a number, and this test - which is
+        // about the number - would never reach its own subject.
+        jobs: [
+          {
+            jobId: JOB,
+            title: 'Platform Engineer',
+            actionableCount: ROSTER.length,
+            newCount: ROSTER.length,
+            trackingExact: true,
+          },
+        ],
         settingFor: () => setting({ selected: true, mode: 'limit', limit }),
         settings,
       });

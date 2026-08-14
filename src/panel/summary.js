@@ -172,7 +172,10 @@ export function summarize(event, trace = []) {
 
   // The limit is per role now, so the note names each role with the number that
   // role was asked for rather than one run-wide figure that no longer exists.
-  for (const job of jobs.filter((j) => j.stoppedBecause === 'limit')) {
+  // Read off `limitReached` rather than the stop reason: the walk carries on
+  // reading pages after the last download is spent, so the limit is no longer
+  // what ends it.
+  for (const job of jobs.filter((j) => j.limitReached)) {
     both(`${job.jobTitle}: got the first ${job.limit} you asked for. Run again for the rest.`);
   }
 

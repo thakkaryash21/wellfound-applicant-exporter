@@ -517,13 +517,16 @@ export function createController({
           return {
             ...job,
             downloaded: status.verified.length,
-            known: described.known,
             newCount: tracking.exact ? tracking.newUserIds.length : null,
             readyToAccept: tracking.exact ? tracking.eligibleUserIds.length : null,
             needsRecovery: tracking.exact ? tracking.needsRecoveryUserIds.length : null,
             unidentified: tracking.exact ? tracking.unidentified : null,
+            // No `scannedAt` travels with these. A count's freshness is
+            // enforced here rather than displayed: it is published once, on the
+            // same tab and URL, within five minutes of the scan that produced
+            // it. A timestamp beside the number would be a clause the operator
+            // cannot act on, guarding something already guarded.
             trackingExact: tracking.exact,
-            trackingScannedAt: tracking.scannedAt,
             migrationIncomplete: described.migrationIncomplete,
           };
         }),
@@ -719,6 +722,11 @@ export function createController({
             // for. There is no longer one run-wide limit to name.
             limit,
             stoppedBecause: result.stoppedBecause,
+            // The role got its number. Carried apart from `stoppedBecause`
+            // because the walk now reads on past the limit to finish
+            // discovering who is in the queue, so "hit the limit" and "this is
+            // why pagination ended" are no longer the same fact.
+            limitReached: result.limitReached,
             downloaded: result.downloaded.length,
             pages: result.pages,
             // Filled in below, once the CSV write has been attempted. Pushed
@@ -734,23 +742,45 @@ export function createController({
             trace.record('ledger_write', { jobId, count: result.downloaded.length });
           }
 
+          // File availability can change during a long API/download walk.
+          // Reconcile again here, then merge the downloads this run completed,
+          // so what follows reads positive current evidence rather than an old
+          // ledger assertion. For an accepting run this is deliberately the last
+          // reversible moment before pass 2.
+          const afterWalk = await reconcileJob(jobId);
+          if (afterWalk.orphans.length > 0) {
+            await ledgerService.recordAdopted(jobId, afterWalk.orphans);
+          }
+          const available = new Set(
+            [
+              ...afterWalk.verified,
+              ...afterWalk.orphans,
+              ...result.downloaded.map((record) => record.userId),
+            ].map(String),
+          );
+
+          // A lossy legacy ledger is recovered by evidence, not by intent. What
+          // proves it is a complete current-Review snapshot in which every
+          // identifiable applicant is positively available - and a download-only
+          // walk can establish exactly that. This used to live inside the accept
+          // branch, so the one state that blocks accepting could only be cleared
+          // by a run that was already accepting.
+          let described = await ledgerService.describe(jobId);
+          const snapshotIds = (result.snapshot?.userIds ?? []).map(String);
+          const recoveredCurrentReview =
+            described.migrationIncomplete &&
+            result.snapshot?.complete === true &&
+            result.snapshot?.bucket === REVIEW_BUCKET &&
+            result.snapshot?.unidentified === 0 &&
+            snapshotIds.every((userId) => available.has(userId));
+          if (recoveredCurrentReview) {
+            await ledgerService.markMigrationComplete(jobId);
+            described = await ledgerService.describe(jobId);
+            trace.record('migration_recovered', { jobId, count: snapshotIds.length });
+          }
+
           let acceptanceTracking = null;
           if (actions.accept) {
-            // File availability can change during a long API/download walk.
-            // Reconcile at the last reversible moment, then merge downloads
-            // completed by this run so the planner receives positive evidence
-            // rather than an old ledger assertion.
-            const beforePlan = await reconcileJob(jobId);
-            if (beforePlan.orphans.length > 0) {
-              await ledgerService.recordAdopted(jobId, beforePlan.orphans);
-            }
-            const available = new Set(
-              [
-                ...beforePlan.verified,
-                ...beforePlan.orphans,
-                ...result.downloaded.map((record) => record.userId),
-              ].map(String),
-            );
             for (const record of result.records) {
               if (
                 record.resumeStatus === RESUME_STATUS.ALREADY &&
@@ -759,19 +789,6 @@ export function createController({
               ) {
                 record.resumeStatus = RESUME_STATUS.NEEDS_RECOVERY;
               }
-            }
-            let described = await ledgerService.describe(jobId);
-            const snapshotIds = (result.snapshot?.userIds ?? []).map(String);
-            const recoveredCurrentReview =
-              described.migrationIncomplete &&
-              result.snapshot?.complete === true &&
-              result.snapshot?.bucket === REVIEW_BUCKET &&
-              result.snapshot?.unidentified === 0 &&
-              snapshotIds.every((userId) => available.has(userId));
-            if (recoveredCurrentReview) {
-              await ledgerService.markMigrationComplete(jobId);
-              described = await ledgerService.describe(jobId);
-              trace.record('migration_recovered', { jobId, count: snapshotIds.length });
             }
             acceptanceTracking = {
               migrationIncomplete: described.migrationIncomplete,
@@ -782,7 +799,6 @@ export function createController({
                 availableCaptured: [...available],
                 accepted: await ledgerService.acceptedUserIdsFor(jobId),
                 provisional: await ledgerService.provisionalUserIdsFor(jobId),
-                limit,
               }),
             };
           }

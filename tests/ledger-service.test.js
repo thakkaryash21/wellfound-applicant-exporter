@@ -137,6 +137,7 @@ describe('ledger-service accept dimension', () => {
     await service.recordAccepted(JOB, '1');
     await service.forgetAccepted(JOB);
     // Downloads survive a forgetAccepted call.
-    expect(await service.describe(JOB)).toMatchObject({ downloaded: 1, known: 1 });
+    expect(await service.describe(JOB)).toMatchObject({ downloaded: 1 });
+    expect(await service.seenUserIdsFor(JOB)).toEqual(['1']);
   });
 });

@@ -6,6 +6,11 @@ node_modules/
 # packages. Local working notes, not part of the project.
 .superpowers/
 
+# Plans, checklists and lessons for work in progress. Same reason: the account
+# of how a change was made belongs in the commit message and the code comments,
+# which are read. A plan file in the tree goes stale the day it lands.
+tasks/
+
 # Editor and tooling
 .vscode/
 .idea/

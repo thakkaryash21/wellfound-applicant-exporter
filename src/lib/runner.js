@@ -68,12 +68,15 @@ export async function runJob(deps, options) {
   } = options;
 
   const actions = runActions(askedActions);
-  // In accept-only mode fresh rows are not the target: they have no captured
-  // resume and the accept pass will refuse them. Spending the acceptance limit
-  // on those previews can stop the walk before it reaches ledger-known rows
-  // whose files are already on disk. Pass 2 applies the limit after filtering
-  // for captured candidates, so pass 1 must keep discovering here.
-  const discoveringAcceptTargets = actions.accept && !actions.download;
+  // Whether the limit governs this pass at all - which is a different question
+  // from whether it may end the walk, and the two used to be tangled.
+  //
+  // In accept-only mode the limit is the number of people who will be MESSAGED,
+  // and pass 2 applies it after refusing everyone without a captured resume.
+  // Pass 1 spends nothing it governs: a preview row costs no fetch. Letting
+  // fresh, ineligible previews consume it stopped the walk before it reached the
+  // ledger-known rows the pass was looking for.
+  const limitGovernsThisPass = !(actions.accept && !actions.download);
   // Two sets, because "already downloaded" was one word for two facts. This one
   // is the ledger as it stood before the walk began and is never added to: an id
   // in here has a file on disk from an earlier run, which is the only reading
@@ -115,6 +118,11 @@ export async function runJob(deps, options) {
   let sinceBreak = 0;
   let breakAt = sampleInt(PACING.breakEvery, rand);
   let stoppedBecause = 'exhausted';
+  // The role got everything it asked for and the walk read on regardless. It is
+  // a fact about the downloads, not about why pagination ended, which is why it
+  // is no longer a stop reason: the summary still names the role and the number,
+  // and the snapshot stays complete enough to count with.
+  let limitReached = false;
   let consecutiveFailures = 0;
   let pageNumber = 0;
 
@@ -205,23 +213,32 @@ export async function runJob(deps, options) {
         stoppedBecause = 'aborted';
         break;
       }
+      // THE LIMIT STOPS SPENDING. IT NEVER STOPS DISCOVERY.
+      //
+      // `limit` is how many people the operator asked this run to act on. It was
+      // also being used to truncate PAGINATION, and those are different jobs:
+      // pagination is what establishes who is in the review queue, and a walk
+      // that ended early cannot produce a complete Review identity snapshot. No
+      // snapshot means no exact new count, no eligible set, and no accepts - so
+      // a role set to "first 25" could never publish a number on Home at all.
+      //
+      // Combined runs had already found this and carved out an exception. The
+      // exception was the rule: reaching the number is a reason to stop
+      // spending, never a reason to stop looking. Discovery costs one page read
+      // per twenty people through the site's own client; capture costs a signed
+      // URL each. Only the second is what the operator was rationing.
+      //
       // A preview counts into `previewed`, never into `downloaded`, so gating on
-      // `downloaded` alone meant a preview could never reach its limit: it
-      // walked all forty pages of a 400-applicant role that the real run would
-      // have stopped at 25. The two buckets are mutually exclusive - a candidate
-      // lands in exactly one - so their sum is "how many of the limit this walk
-      // has spent", and a real run's arithmetic is unchanged.
-      if (!discoveringAcceptTargets && downloaded.length + previewed.length >= limit) {
-        if (actions.accept) {
-          // Combined runs still need a complete Review identity snapshot. The
-          // download limit leaves this person untouched but cannot truncate
-          // discovery; Pass 2 will see NOT_REACHED and refuse them as capture
-          // evidence while preserving queue order for the people downloaded.
-          if (record.userId && !seen.has(record.userId)) seen.add(record.userId);
-          continue;
-        }
-        stoppedBecause = 'limit';
-        break;
+      // `downloaded` alone meant a preview could never reach its limit. The two
+      // buckets are mutually exclusive - a candidate lands in exactly one - so
+      // their sum is "how much of the limit this walk has spent".
+      if (limitGovernsThisPass && downloaded.length + previewed.length >= limit) {
+        limitReached = true;
+        // Untouched, and their row keeps NOT_REACHED, so pass 2 refuses them as
+        // capture evidence while queue order is preserved for everyone the
+        // limit did reach.
+        if (record.userId && !seen.has(record.userId)) seen.add(record.userId);
+        continue;
       }
 
       // diffPage judged the page against `seen` as it stood at the top of the
@@ -371,6 +388,7 @@ export async function runJob(deps, options) {
     snapshot,
     pages: pageNumber,
     stoppedBecause,
+    limitReached,
     // Everyone on the guest list the walk never reached. Empty for a normal run.
     stillWanted: wanted ? [...wanted] : [],
   };

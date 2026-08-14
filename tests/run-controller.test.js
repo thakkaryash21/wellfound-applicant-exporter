@@ -387,7 +387,12 @@ describe('startRun', () => {
     });
     const done = events.find((e) => e.type === 'done');
     expect(done).toMatchObject({ actions: { download: false }, previewed: 3, downloaded: 0 });
-    expect(done.jobs[0]).toMatchObject({ jobId: JOB, limit: 3, stoppedBecause: 'limit' });
+    expect(done.jobs[0]).toMatchObject({
+      jobId: JOB,
+      limit: 3,
+      limitReached: true,
+      stoppedBecause: 'exhausted',
+    });
     // The number the post-run screen offers to fetch is the number the live run
     // would actually fetch, not the size of the queue.
     expect(summarize(done).notes.join(' ')).toContain('these 3 resumes');
@@ -589,8 +594,20 @@ describe('a run over several roles', () => {
     });
     const done = events.find((e) => e.type === 'done');
     expect(done.jobs).toMatchObject([
-      { jobId: JOB, jobTitle: 'Backend Engineer', limit: Infinity, stoppedBecause: 'exhausted' },
-      { jobId: OTHER, jobTitle: 'Data Scientist', limit: 1, stoppedBecause: 'limit' },
+      {
+        jobId: JOB,
+        jobTitle: 'Backend Engineer',
+        limit: Infinity,
+        limitReached: false,
+        stoppedBecause: 'exhausted',
+      },
+      {
+        jobId: OTHER,
+        jobTitle: 'Data Scientist',
+        limit: 1,
+        limitReached: true,
+        stoppedBecause: 'exhausted',
+      },
     ]);
   });
 
@@ -863,7 +880,7 @@ describe('listJobs hydration', () => {
     });
     const controller = await controllerFor();
     const [job] = await controller.listJobs();
-    expect(job).toMatchObject({ known: 3, newCount: null, trackingExact: false });
+    expect(job).toMatchObject({ newCount: null, trackingExact: false });
     expect(job.accepted).toBeUndefined();
   });
 
@@ -892,6 +909,37 @@ describe('listJobs hydration', () => {
     // A second refresh cannot assume an equal raw count means the same people.
     expect(await controller.listJobs()).toMatchObject([
       { newCount: null, readyToAccept: null, trackingExact: false },
+    ]);
+  });
+
+  // The limit used to end pagination, so a role set to "first N" produced an
+  // incomplete snapshot, and Home read "check to count new applicants" for ever
+  // with no run that could answer it. Downloading fewer than everybody is not a
+  // reason to know less about who is there.
+  it('publishes exact counts from a limited download run, having fetched only its limit', async () => {
+    setup({
+      people: [person('7700001'), person('7700002'), person('7700003')],
+      jobs: [{ jobId: JOB, title: 'Backend Engineer', actionableCount: 3 }],
+    });
+    const controller = await controllerFor();
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: 2, forceFullWalk: true }],
+      folder: 'resumes',
+      pageSize: 10,
+      actions: { download: true, accept: false },
+    });
+
+    expect(events.find((e) => e.type === 'done')).toMatchObject({ downloaded: 2 });
+    expect(await controller.listJobs()).toMatchObject([
+      {
+        downloaded: 2,
+        // The third person was discovered but never fetched, so they are still
+        // new - which is precisely the fact a truncated walk could not state.
+        newCount: 1,
+        readyToAccept: 2,
+        needsRecovery: 0,
+        trackingExact: true,
+      },
     ]);
   });
 
@@ -1341,7 +1389,11 @@ describe('redownloadMissing', () => {
 });
 
 describe('library and adoption', () => {
-  it('shows an imported identity as captured but not available without file evidence', async () => {
+  // An import restores an identity, never a file. The Library says so as
+  // `unverifiable` - there is nothing in download history to check the claim
+  // against - rather than as a captured total, which read as a promise that a
+  // resume was there.
+  it('shows an imported identity as unverifiable, not as an available resume', async () => {
     setup({ people: [] });
     const controller = await controllerFor();
     await controller.importCsv(
@@ -1349,7 +1401,7 @@ describe('library and adoption', () => {
       toCsv([{ userId: '7700001', jobId: JOB, resumeStatus: RESUME_STATUS.DOWNLOADED }]),
     );
     const [row] = await controller.library();
-    expect(row).toMatchObject({ jobId: JOB, captured: 1, resumesAvailable: 0 });
+    expect(row).toMatchObject({ jobId: JOB, resumesAvailable: 0, unverifiable: 1 });
   });
 
   it('automatically adopts verified files before the Library derives availability', async () => {
@@ -1606,6 +1658,41 @@ describe('the accept pass', () => {
     expect(controller.trace.entries().some((entry) => entry.step === 'migration_recovered')).toBe(
       true,
     );
+  });
+
+  // The clearing used to sit inside the accept branch, so the one state that
+  // blocks accepting could only be lifted by a run that was already accepting.
+  // What proves recovery is the evidence - a complete Review snapshot in which
+  // every identifiable applicant is positively available - and downloading is
+  // how that evidence is produced.
+  it('clears lossy migration from a download-only recovery walk, with nothing sent', async () => {
+    setup({
+      people: [person('7700001')],
+      bucketByJob: { [JOB]: ['7700001'] },
+      storage: {
+        [`job:${JOB}`]: { jobId: JOB, seenUserIds: ['7700001'], totalDownloaded: 2 },
+      },
+    });
+    fake.addHistory({
+      filename: `resumes/Person 7700001-7700001-${JOB}.pdf`,
+      url: 'https://wellfound.com/link/7700001/tok/resume_url',
+      state: 'complete',
+      exists: false,
+    });
+    const controller = await controllerFor();
+    await controller.startRun({
+      jobs: [{ jobId: JOB, limit: Infinity, forceFullWalk: true }],
+      folder: 'resumes',
+      pageSize: 10,
+      actions: { download: true, accept: false },
+    });
+
+    expect(ledgerRecord().migrationIncomplete).toBe(false);
+    expect(fake.calls.sendMessage.map((call) => call.message.type)).not.toContain(
+      CX.ACCEPT_CANDIDATE,
+    );
+    // And the Home row can now say what it could not before.
+    expect(await controller.listJobs()).toMatchObject([{ trackingExact: true, newCount: 0 }]);
   });
 
   // Rule 1, and the reason this is a pass rather than a branch: accepting
